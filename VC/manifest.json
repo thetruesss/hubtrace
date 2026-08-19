@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Hub Trace",
-  "version": "1.2.0",
+  "version": "2.0.0",
   "description": "Ищет склад в истории Hub по номерам отправлений",
   "icons": {
     "16": "icons/icon-16.png",
@@ -21,6 +21,22 @@
   "background": {
     "service_worker": "background.js"
   },
+  "content_scripts": [
+    {
+      "matches": ["https://hub.o3t.ru/*"],
+      "js": ["netprobe.js"],
+      "run_at": "document_start",
+      "world": "MAIN",
+      "all_frames": false
+    },
+    {
+      "matches": ["https://hub.o3t.ru/*"],
+      "js": ["scanner.js"],
+      "run_at": "document_start",
+      "world": "ISOLATED",
+      "all_frames": false
+    }
+  ],
   "permissions": ["tabs", "scripting", "storage", "windows", "notifications"],
   "host_permissions": ["https://hub.o3t.ru/*"]
 }

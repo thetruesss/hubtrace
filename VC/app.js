@@ -1,42 +1,67 @@
+/* Hub Trace · интерфейс. */
+
 const STORAGE_SETTINGS = "hubTraceSettings";
 const STORAGE_FINISHED = "hubTraceFinished";
-const STORAGE_RUNTIME = "hubTraceRuntime";
 
-const postingsEl = document.getElementById("postings");
-const warehouseEl = document.getElementById("warehouse");
-const countBadge = document.getElementById("count-badge");
-const inputError = document.getElementById("input-error");
-
-const screens = {
-  input: document.getElementById("screen-input"),
-  scan: document.getElementById("screen-scan"),
-  result: document.getElementById("screen-result")
+const MODE_HINTS = {
+  turbo: "Максимум скорости: больше вкладок, минимум перепроверок. Для длинных списков.",
+  balance: "По умолчанию. Быстрый путь плюс сверка с обходом DOM и один повтор на неполные ответы.",
+  deep: "Только обход страницы, максимум терпения и повторов. Когда результат вызывает сомнения."
 };
 
-const scanState = {
+const MODE_LABELS = { turbo: "Турбо", balance: "Баланс", deep: "Глубокий" };
+const MODE_THREADS = { turbo: 8, balance: 5, deep: 3 };
+const STEP_INDEX = { input: 0, scan: 1, result: 2 };
+
+const $ = (id) => document.getElementById(id);
+const $$ = (selector, root) => [...(root || document).querySelectorAll(selector)];
+
+const postingsEl = $("postings");
+const warehouseEl = $("warehouse");
+const inputError = $("input-error");
+
+const screens = {
+  input: $("screen-input"),
+  scan: $("screen-scan"),
+  result: $("screen-result")
+};
+
+const settings = {
+  mode: "balance",
+  threads: 5,
+  focusMode: true,
+  workerWindow: true,
+  useApi: true
+};
+
+const ui = {
   jobId: null,
+  byIndex: new Map(),
   hits: 0,
   misses: 0,
   issues: 0,
-  items: [],
+  total: 0,
   blips: [],
-  scanning: false,
+  running: false,
+  paused: false,
   stopping: false,
   hasResults: false,
   currentStep: "input",
-  mode: "idle",
-  boostTimer: null
+  apiState: "unknown",
+  elapsedMs: 0,
+  elapsedAt: 0,
+  rate: 0,
+  etaMs: null,
+  workers: [],
+  lists: { hits: [], misses: [], issues: [] },
+  finished: null,
+  recentWarehouses: [],
+  rates: {}
 };
 
-let keepAlivePort = null;
-
-function ensureKeepAlive() {
-  if (keepAlivePort) return;
-  keepAlivePort = chrome.runtime.connect({ name: "hub-trace-keepalive" });
-  keepAlivePort.onDisconnect.addListener(() => {
-    keepAlivePort = null;
-  });
-}
+/* ------------------------------------------------------------------ */
+/* служебное                                                           */
+/* ------------------------------------------------------------------ */
 
 function storageGet(keys) {
   return new Promise((resolve) => chrome.storage.local.get(keys, resolve));
@@ -46,11 +71,85 @@ function storageSet(payload) {
   return new Promise((resolve) => chrome.storage.local.set(payload, resolve));
 }
 
+function send(message) {
+  return new Promise((resolve) => {
+    try {
+      chrome.runtime.sendMessage(message, (reply) => {
+        void chrome.runtime.lastError;
+        resolve(reply || null);
+      });
+    } catch (_err) {
+      resolve(null);
+    }
+  });
+}
+
+let keepAlivePort = null;
+let keepAliveTimer = null;
+
+function ensureKeepAlive() {
+  if (!keepAlivePort) {
+    try {
+      keepAlivePort = chrome.runtime.connect({ name: "hub-trace-keepalive" });
+      keepAlivePort.onDisconnect.addListener(() => {
+        keepAlivePort = null;
+      });
+    } catch (_err) {
+      keepAlivePort = null;
+    }
+  }
+  if (keepAliveTimer) return;
+  keepAliveTimer = window.setInterval(() => {
+    if (!keepAlivePort) {
+      ensureKeepAlive();
+      return;
+    }
+    try {
+      keepAlivePort.postMessage({ ping: Date.now() });
+    } catch (_err) {
+      keepAlivePort = null;
+    }
+  }, 20000);
+}
+
+function pad(value) {
+  return String(value).padStart(2, "0");
+}
+
+function fmtDuration(ms) {
+  if (!Number.isFinite(ms) || ms < 0) return "—";
+  const total = Math.round(ms / 1000);
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  return h ? `${h}:${pad(m)}:${pad(s)}` : `${m}:${pad(s)}`;
+}
+
+function fmtRate(perMin) {
+  if (!perMin) return "—";
+  if (perMin >= 100) return `${Math.round(perMin)}/мин`;
+  return `${perMin.toFixed(1)}/мин`;
+}
+
+function plural(count, forms) {
+  const n = Math.abs(count) % 100;
+  const tail = n % 10;
+  if (n > 10 && n < 20) return forms[2];
+  if (tail > 1 && tail < 5) return forms[1];
+  if (tail === 1) return forms[0];
+  return forms[2];
+}
+
+/* ------------------------------------------------------------------ */
+/* разбор номеров                                                      */
+/* ------------------------------------------------------------------ */
+
 function parsePostings(raw) {
   const lines = String(raw || "")
     .split(/\r?\n/)
     .map((line) => line.trim())
     .filter(Boolean);
+
   const tokens = [];
   for (const line of lines) {
     if (line.includes("\t")) {
@@ -62,239 +161,237 @@ function parsePostings(raw) {
       continue;
     }
     const parts = line.split(/\s+/);
-    if (parts.length > 1 && parts.every((part) => /^[A-Za-z0-9:_-]+$/.test(part))) {
-      tokens.push(...parts);
-    } else {
-      tokens.push(parts[0]);
-    }
+    if (parts.length > 1 && parts.every((part) => /^[A-Za-z0-9:_-]+$/.test(part))) tokens.push(...parts);
+    else tokens.push(parts[0]);
   }
 
   const out = [];
   const seen = new Set();
+  let duplicates = 0;
   for (let token of tokens) {
     const fromUrl = token.match(/stock\/item\/Lozon:([^?&#/]+)/i);
     if (fromUrl) token = decodeURIComponent(fromUrl[1]);
     token = token.replace(/^Lozon:/i, "").trim();
     if (!token) continue;
     const key = token.toLowerCase();
-    if (seen.has(key)) continue;
+    if (seen.has(key)) {
+      duplicates += 1;
+      continue;
+    }
     seen.add(key);
     out.push(token);
   }
+  out.duplicates = duplicates;
   return out;
 }
 
-function readSettings() {
-  return {
-    threads: Math.max(1, Math.min(12, Number(document.getElementById("threads").value) || 4)),
-    focusMode: document.getElementById("focus-mode").checked,
-    workerWindow: document.getElementById("worker-window").checked
-  };
+/* ------------------------------------------------------------------ */
+/* дек управления                                                      */
+/* ------------------------------------------------------------------ */
+
+function mountDecks() {
+  const template = $("tpl-deck");
+  for (const mount of $$("[data-deck]")) {
+    mount.innerHTML = "";
+    mount.appendChild(template.content.cloneNode(true));
+  }
 }
 
-function applySettings(settings) {
-  if (!settings) return;
-  if (settings.threads) document.getElementById("threads").value = settings.threads;
-  if (settings.warehouse) warehouseEl.value = settings.warehouse;
-  document.getElementById("focus-mode").checked = settings.focusMode !== false;
-  document.getElementById("worker-window").checked = settings.workerWindow !== false;
+function writeDecks() {
+  for (const deck of $$("[data-deck]")) {
+    const seg = deck.querySelector('[data-ctl="mode"]');
+    if (seg) {
+      const keys = Object.keys(MODE_LABELS);
+      seg.style.setProperty("--seg-index", String(Math.max(0, keys.indexOf(settings.mode))));
+      seg.dataset.mode = settings.mode;
+      for (const btn of $$(".seg__btn", seg)) btn.classList.toggle("is-on", btn.dataset.mode === settings.mode);
+    }
+
+    const hint = deck.querySelector("[data-mode-hint]");
+    if (hint) hint.textContent = MODE_HINTS[settings.mode] || "";
+
+    const range = deck.querySelector('[data-ctl="threads"]');
+    if (range) {
+      range.value = String(settings.threads);
+      const min = Number(range.min) || 1;
+      const max = Number(range.max) || 12;
+      const fill = ((settings.threads - min) / Math.max(1, max - min)) * 100;
+      range.style.setProperty("--fill", `${fill}%`);
+    }
+
+    const value = deck.querySelector("[data-threads-value]");
+    if (value) value.textContent = String(settings.threads);
+
+    const api = deck.querySelector('[data-ctl="api"]');
+    if (api) api.checked = settings.useApi;
+    const focus = deck.querySelector('[data-ctl="focus"]');
+    if (focus) focus.checked = settings.focusMode;
+    const win = deck.querySelector('[data-ctl="window"]');
+    if (win) win.checked = settings.workerWindow;
+  }
+
+  const badge = $("live-mode-badge");
+  if (badge) badge.textContent = MODE_LABELS[settings.mode] || settings.mode;
+  renderApiBadge();
+  renderBrief();
 }
 
-function availableSteps() {
-  return {
-    input: true,
-    scan: true,
-    result: scanState.hasResults
-  };
+let settingsSaveTimer = null;
+/* Пока идёт наш собственный апдейт, не даём фону откатить переключатель. */
+let settingsDirtyUntil = 0;
+
+async function setSetting(patch, { pushLive = true } = {}) {
+  settingsDirtyUntil = Date.now() + 900;
+  Object.assign(settings, patch);
+  settings.threads = Math.max(1, Math.min(12, Number(settings.threads) || 5));
+  writeDecks();
+
+  window.clearTimeout(settingsSaveTimer);
+  settingsSaveTimer = window.setTimeout(async () => {
+    const saved = await storageGet([STORAGE_SETTINGS]);
+    await storageSet({ [STORAGE_SETTINGS]: { ...(saved[STORAGE_SETTINGS] || {}), ...settings } });
+  }, 250);
+
+  if (pushLive && ui.running) {
+    const reply = await send({ action: "updateSettings", settings: { ...settings } });
+    if (reply?.settings) {
+      Object.assign(settings, reply.settings);
+      settingsDirtyUntil = 0;
+      writeDecks();
+    }
+  }
+}
+
+document.addEventListener("click", (event) => {
+  const btn = event.target.closest(".seg__btn[data-mode]");
+  if (!btn) return;
+  const mode = btn.dataset.mode;
+  if (mode === settings.mode) return;
+  void setSetting({ mode, threads: MODE_THREADS[mode] || settings.threads });
+  toast("ok", `Режим: ${MODE_LABELS[mode]}${ui.running ? " — применён на ходу" : ""}`);
+});
+
+document.addEventListener("input", (event) => {
+  const target = event.target;
+  if (target.matches('[data-ctl="threads"]')) {
+    void setSetting({ threads: Number(target.value) });
+  }
+});
+
+document.addEventListener("change", (event) => {
+  const target = event.target;
+  if (target.matches('[data-ctl="api"]')) void setSetting({ useApi: target.checked });
+  else if (target.matches('[data-ctl="focus"]')) void setSetting({ focusMode: target.checked });
+  else if (target.matches('[data-ctl="window"]')) void setSetting({ workerWindow: target.checked });
+});
+
+/* ------------------------------------------------------------------ */
+/* тосты                                                               */
+/* ------------------------------------------------------------------ */
+
+function toast(kind, text) {
+  const host = $("toasts");
+  if (!host || !text) return;
+  const node = document.createElement("div");
+  node.className = `toast toast--${kind}`;
+  node.textContent = text;
+  host.appendChild(node);
+  while (host.children.length > 4) host.firstElementChild.remove();
+  window.setTimeout(() => {
+    node.classList.add("is-out");
+    window.setTimeout(() => node.remove(), 320);
+  }, 5200);
+}
+
+/* ------------------------------------------------------------------ */
+/* шаги                                                                */
+/* ------------------------------------------------------------------ */
+
+function stepAvailable(name) {
+  if (name === "result") return ui.hasResults;
+  return true;
 }
 
 function syncSteps() {
-  const avail = availableSteps();
-  document.querySelectorAll(".step").forEach((btn) => {
+  const steps = document.querySelector(".steps");
+  if (steps) steps.style.setProperty("--step-index", String(STEP_INDEX[ui.currentStep] ?? 0));
+  for (const btn of $$(".step")) {
     const step = btn.dataset.step;
-    btn.classList.toggle("is-active", step === scanState.currentStep);
-    btn.disabled = !avail[step];
-  });
-}
-
-function setScanMode(mode) {
-  scanState.mode = mode;
-  screens.scan.classList.toggle("is-live", mode === "live");
-  screens.scan.classList.toggle("is-stopping", mode === "stopping");
-  screens.scan.classList.toggle("is-idle", mode === "idle");
-  const radar = document.getElementById("radar");
-  if (radar) radar.classList.toggle("is-live", mode === "live");
-  const badge = document.getElementById("scan-status");
-  badge.classList.toggle("badge--live", mode === "live");
-  if (mode === "live") badge.textContent = "идёт";
-  else if (mode === "stopping") badge.textContent = "стоп";
-  else badge.textContent = "ожидание";
-  const stopBtn = document.getElementById("btn-stop");
-  stopBtn.disabled = mode !== "live";
-  const empty = document.getElementById("feed-empty");
-  const hasItems = document.getElementById("feed").children.length > 0;
-  const current = document.getElementById("scan-current");
-  if (hasItems) {
-    empty.hidden = true;
-  } else if (mode === "live") {
-    empty.hidden = false;
-    empty.textContent = "Жду первые результаты…";
-  } else if (mode === "stopping") {
-    empty.hidden = false;
-    empty.textContent = "Останавливаю проверку…";
-  } else {
-    empty.hidden = false;
-    empty.textContent = "Сейчас ничего не проверяется";
+    btn.classList.toggle("is-active", step === ui.currentStep);
+    btn.disabled = !stepAvailable(step);
   }
-  if (mode === "idle") {
-    current.textContent = hasItems ? "Проверка не идёт" : "Сейчас ничего не проверяется";
-  } else if (mode === "stopping") {
-    current.textContent = "Останавливаю…";
-  }
-}
-
-function startBoostClient() {
-  stopBoostClient();
-  if (!document.getElementById("focus-mode")?.checked) return;
-  scanState.boostTimer = window.setInterval(() => {
-    chrome.runtime.sendMessage({ action: "workerBoostTick" }, () => {
-      void chrome.runtime.lastError;
-    });
-  }, 450);
-}
-
-function stopBoostClient() {
-  if (!scanState.boostTimer) return;
-  window.clearInterval(scanState.boostTimer);
-  scanState.boostTimer = null;
-}
-
-function finishScanUi(payload) {
-  window.clearTimeout(scanState.stopTimer);
-  stopBoostClient();
-  scanState.scanning = false;
-  scanState.stopping = false;
-  setScanMode("idle");
-  updateFormState();
-  const savedResults = payload?.results;
-  void storageGet([STORAGE_FINISHED]).then((saved) => {
-    const finished = saved[STORAGE_FINISHED] || {
-      results: savedResults || scanState.items,
-      inputCount: Number(document.getElementById("scan-progress").dataset.total || scanState.items.length),
-      warehouse: warehouseEl.value.trim(),
-      stopped: payload?.stopped,
-      error: payload?.error
-    };
-    if (finished.results?.length || scanState.items.length) {
-      if (!finished.results?.length) finished.results = scanState.items;
-      scanState.hasResults = true;
-      scanState.items = finished.results;
-      renderResults(finished);
-    } else {
-      document.getElementById("scan-current").textContent = "Сейчас ничего не проверяется";
-      syncSteps();
-    }
-  });
-}
-
-function rebuildFeed() {
-  const feed = document.getElementById("feed");
-  feed.innerHTML = "";
-  for (const item of scanState.items.slice(-80)) renderFeed(item);
 }
 
 function setStep(name) {
-  const avail = availableSteps();
-  if (!avail[name]) return;
-  scanState.currentStep = name;
-  for (const [key, el] of Object.entries(screens)) {
-    el.hidden = key !== name;
-  }
-  if (name === "scan" && !scanState.scanning) {
-    rebuildFeed();
-    setScanMode("idle");
-  }
+  if (!stepAvailable(name)) return;
+  ui.currentStep = name;
+  for (const [key, el] of Object.entries(screens)) el.hidden = key !== name;
   syncSteps();
 }
 
-function updateCount() {
-  countBadge.textContent = String(parsePostings(postingsEl.value).length);
-  updateFormState();
-}
-
-function updateFormState() {
-  const hasPostings = parsePostings(postingsEl.value).length > 0;
-  const hasWarehouse = warehouseEl.value.trim().length > 0;
-  const hasHits = document.getElementById("hits").value.trim().length > 0;
-  const hasMisses = document.getElementById("misses").value.trim().length > 0;
-  const hasIssues = document.getElementById("issues").value.trim().length > 0;
-  document.getElementById("btn-start").disabled = scanState.scanning || scanState.stopping || !(hasPostings && hasWarehouse);
-  document.getElementById("btn-clear").disabled = !postingsEl.value.trim();
-  document.getElementById("btn-copy").disabled = !hasHits;
-  document.getElementById("btn-copy-hits").disabled = !hasHits;
-  document.getElementById("btn-copy-misses").disabled = !hasMisses;
-  document.getElementById("btn-copy-issues").disabled = !hasIssues;
-}
+/* ------------------------------------------------------------------ */
+/* классификация                                                       */
+/* ------------------------------------------------------------------ */
 
 function classify(item) {
   if (item?.found) return "hit";
-  if (item?.status === "partial" && !item?.found) return "issue";
-  if (["complete", "missing"].includes(item?.status) && !item?.found) return "miss";
-  if (item?.ok && !item?.found) return "miss";
+  if (item?.status === "partial") return "issue";
+  if (["complete", "missing"].includes(item?.status)) return "miss";
+  if (item?.ok) return "miss";
   return "issue";
 }
 
+const STATUS_LABELS = {
+  complete: "нет",
+  missing: "нет страницы",
+  partial: "мало строк",
+  auth: "нет входа",
+  no_history: "нет истории",
+  no_counter: "нет счётчика",
+  bad_input: "нет склада",
+  timeout: "таймаут",
+  stopped: "стоп",
+  paused: "пауза",
+  tab_error: "вкладка",
+  script_error: "скрипт",
+  exception: "ошибка"
+};
+
 function statusLabel(item) {
   if (item?.found) return "есть";
-  const map = {
-    complete: "нет",
-    missing: "нет страницы",
-    partial: "мало строк",
-    auth: "нет входа",
-    no_history: "нет истории",
-    no_counter: "нет счётчика",
-    timeout: "таймаут",
-    stopped: "стоп",
-    tab_error: "вкладка",
-    script_error: "скрипт",
-    exception: "ошибка"
-  };
-  return map[item?.status] || item?.status || "ошибка";
+  return STATUS_LABELS[item?.status] || item?.status || "ошибка";
 }
 
+/* ------------------------------------------------------------------ */
+/* радар                                                               */
+/* ------------------------------------------------------------------ */
+
 function blipDistance(a, b) {
-  const dx = a.x - b.x;
-  const dy = a.y - b.y;
-  return Math.hypot(dx, dy);
+  return Math.hypot(a.x - b.x, a.y - b.y);
 }
 
 function randomBlipPoint(minR, maxR) {
   const angle = Math.random() * Math.PI * 2;
   const radius = minR + Math.random() * (maxR - minR);
-  return {
-    x: 0.5 + Math.cos(angle) * radius,
-    y: 0.5 + Math.sin(angle) * radius
-  };
+  return { x: 0.5 + Math.cos(angle) * radius, y: 0.5 + Math.sin(angle) * radius };
 }
 
 function placeRadarBlip() {
   const dishR = 30 / 64;
   const minR = dishR * 0.4;
   const maxR = dishR * 0.86;
-  const minDist = Math.max(0.048, 0.078 - scanState.blips.length * 0.0007);
+  const minDist = Math.max(0.048, 0.078 - ui.blips.length * 0.0007);
 
-  for (let i = 0; i < 90; i += 1) {
+  for (let i = 0; i < 60; i += 1) {
     const point = randomBlipPoint(minR, maxR);
-    if (scanState.blips.every((other) => blipDistance(point, other) >= minDist)) {
-      return point;
-    }
+    if (ui.blips.every((other) => blipDistance(point, other) >= minDist)) return point;
   }
 
   let best = randomBlipPoint(minR, maxR);
   let bestGap = -1;
-  for (let i = 0; i < 70; i += 1) {
+  for (let i = 0; i < 40; i += 1) {
     const point = randomBlipPoint(minR, maxR);
-    const gap = scanState.blips.reduce((min, other) => Math.min(min, blipDistance(point, other)), Infinity);
+    const gap = ui.blips.reduce((min, other) => Math.min(min, blipDistance(point, other)), Infinity);
     if (gap > bestGap) {
       bestGap = gap;
       best = point;
@@ -304,10 +401,12 @@ function placeRadarBlip() {
 }
 
 function addRadarBlip(kind) {
-  const root = document.getElementById("radar-blips");
+  const root = $("radar-blips");
   if (!root) return;
+  if (root.children.length > 60) return;
   const point = placeRadarBlip();
-  scanState.blips.push(point);
+  ui.blips.push(point);
+
   const blip = document.createElement("span");
   blip.className = `radar__blip radar__blip--${kind}`;
   blip.style.left = `${point.x * 100}%`;
@@ -316,71 +415,289 @@ function addRadarBlip(kind) {
   core.className = "radar__blip-core";
   blip.appendChild(core);
   root.appendChild(blip);
+
   window.setTimeout(() => {
-    void blip.offsetWidth;
     blip.classList.add("is-gone");
     window.setTimeout(() => {
       blip.remove();
-      scanState.blips = scanState.blips.filter((item) => item !== point);
+      ui.blips = ui.blips.filter((item) => item !== point);
     }, 1800);
   }, 5000);
 }
 
 function resetRadarBlips() {
-  scanState.blips = [];
-  const root = document.getElementById("radar-blips");
+  ui.blips = [];
+  const root = $("radar-blips");
   if (root) root.innerHTML = "";
 }
+
+/* ------------------------------------------------------------------ */
+/* лента и вкладки                                                     */
+/* ------------------------------------------------------------------ */
 
 function renderFeed(item) {
   if (!item) return;
   const kind = classify(item);
-  const label = statusLabel(item);
-  const wide = label.length > 4 ? " tag--wide" : "";
   const li = document.createElement("li");
-  li.innerHTML = `
-    <span class="tag tag--${kind}${wide}">${label}</span>
-    <code>${item.posting}</code>
-    <span class="feed__count">${item.loaded || 0}/${item.expected || 0}</span>
-  `;
-  const feed = document.getElementById("feed");
+
+  const tag = document.createElement("span");
+  tag.className = `tag tag--${kind}`;
+  tag.textContent = statusLabel(item);
+
+  const code = document.createElement("code");
+  code.textContent = item.posting;
+
+  const via = document.createElement("span");
+  via.className = `feed__via${item.via === "api" ? " feed__via--api" : ""}`;
+  via.textContent = item.via === "api" ? "api" : "dom";
+
+  const count = document.createElement("span");
+  count.className = "feed__count";
+  count.textContent = `${item.loaded || 0}/${item.expected || 0}`;
+
+  li.append(tag, code, via, count);
+
+  const feed = $("feed");
   feed.prepend(li);
-  while (feed.children.length > 80) feed.lastElementChild.remove();
-  const empty = document.getElementById("feed-empty");
-  if (empty) empty.hidden = true;
+  while (feed.children.length > 120) feed.lastElementChild.remove();
+  $("feed-empty").hidden = true;
 }
 
-function updateScanHud() {
-  const total = Number(document.getElementById("scan-progress").dataset.total || 0);
-  const processed = scanState.hits + scanState.misses + scanState.issues;
-  const pct = total ? Math.round((processed / total) * 100) : 0;
-  document.getElementById("scan-progress").textContent = `${processed} / ${total}`;
-  document.getElementById("scan-hits").textContent = String(scanState.hits);
-  document.getElementById("scan-misses").textContent = String(scanState.misses);
-  document.getElementById("progress-label").textContent = `${processed} из ${total}`;
-  document.getElementById("progress-pct").textContent = `${pct}%`;
-  document.getElementById("progress-hit").style.width = total ? `${(scanState.hits / total) * 100}%` : "0%";
-  document.getElementById("progress-miss").style.width = total ? `${(scanState.misses / total) * 100}%` : "0%";
-  document.getElementById("progress-issue").style.width = total ? `${(scanState.issues / total) * 100}%` : "0%";
-  const sub = document.getElementById("progress-sub");
-  if (!processed) {
-    sub.textContent = total ? "Ожидание первых результатов" : "Ожидание запуска";
-  } else {
-    sub.textContent = `Есть ${scanState.hits} · нет ${scanState.misses} · ошибки ${scanState.issues}`;
+const PHASE_LABELS = {
+  idle: "ждёт",
+  open: "открывает",
+  history: "история",
+  rows: "строки",
+  api: "запрос"
+};
+
+function renderLanes() {
+  const list = $("lanes");
+  const empty = $("lanes-empty");
+  const count = $("lanes-count");
+  if (!list) return;
+
+  count.textContent = String(ui.workers.length);
+  empty.hidden = ui.workers.length > 0;
+  list.innerHTML = "";
+
+  for (const worker of ui.workers) {
+    const li = document.createElement("li");
+    const busy = worker.phase && worker.phase !== "idle";
+    li.className = `lane${busy ? " is-busy" : ""}${worker.via === "api" ? " is-api" : worker.via === "dom" ? " is-dom" : ""}`;
+
+    const id = document.createElement("span");
+    id.className = "lane__id";
+    id.textContent = String(worker.id);
+
+    const posting = document.createElement("span");
+    posting.className = "lane__posting";
+    posting.textContent = worker.posting || "—";
+
+    const phase = document.createElement("span");
+    phase.className = "lane__phase";
+    phase.textContent = PHASE_LABELS[worker.phase] || worker.phase || "ждёт";
+
+    li.append(id, posting, phase);
+    list.appendChild(li);
   }
 }
 
+/* ------------------------------------------------------------------ */
+/* HUD проверки                                                        */
+/* ------------------------------------------------------------------ */
+
+function bump(kind, delta) {
+  if (kind === "hit") ui.hits += delta;
+  else if (kind === "miss") ui.misses += delta;
+  else ui.issues += delta;
+}
+
+function applyItem(index, item) {
+  const prev = ui.byIndex.get(index);
+  if (prev) bump(classify(prev), -1);
+  ui.byIndex.set(index, item);
+  bump(classify(item), 1);
+}
+
+function dropItem(index) {
+  const prev = ui.byIndex.get(index);
+  if (!prev) return;
+  bump(classify(prev), -1);
+  ui.byIndex.delete(index);
+}
+
+function updateScanHud() {
+  const total = ui.total;
+  const processed = ui.byIndex.size;
+  const pct = total ? Math.round((processed / total) * 100) : 0;
+
+  $("progress-pct").textContent = `${pct}%`;
+  $("progress-label").textContent = `${processed} из ${total}`;
+  $("scan-hits").textContent = String(ui.hits);
+  $("scan-misses").textContent = String(ui.misses);
+  $("scan-issues").textContent = String(ui.issues);
+  $("progress-hit").style.width = total ? `${(ui.hits / total) * 100}%` : "0%";
+  $("progress-miss").style.width = total ? `${(ui.misses / total) * 100}%` : "0%";
+  $("progress-issue").style.width = total ? `${(ui.issues / total) * 100}%` : "0%";
+}
+
+function scanMode() {
+  if (ui.stopping) return "stopping";
+  if (ui.paused) return "paused";
+  if (ui.running) return "live";
+  return "idle";
+}
+
+function renderApiBadge() {
+  const badge = $("api-badge");
+  if (!badge) return;
+  const on = settings.useApi && ui.apiState === "trusted";
+  badge.hidden = !on;
+  badge.textContent = "быстрый путь";
+}
+
+function renderRunState() {
+  const mode = scanMode();
+  const screen = screens.scan;
+  screen.classList.toggle("is-live", mode === "live");
+  screen.classList.toggle("is-paused", mode === "paused");
+  screen.classList.toggle("is-stopping", mode === "stopping");
+  screen.classList.toggle("is-idle", mode === "idle");
+
+  const radar = $("radar");
+  if (radar) radar.classList.toggle("is-live", mode === "live");
+
+  const status = $("scan-status");
+  status.classList.toggle("badge--live", mode === "live");
+  status.classList.toggle("badge--paused", mode === "paused");
+  status.textContent =
+    mode === "live" ? "идёт" : mode === "paused" ? "пауза" : mode === "stopping" ? "стоп" : "ожидание";
+
+  const live = $("live");
+  live.hidden = !ui.running && !ui.hasResults;
+  live.classList.toggle("is-live", mode === "live");
+  live.classList.toggle("is-paused", mode === "paused");
+  live.classList.toggle("is-stopping", mode === "stopping");
+  $("live-state").textContent =
+    mode === "live" ? "проверяю" : mode === "paused" ? "на паузе" : mode === "stopping" ? "останавливаю" : "готово";
+
+  const pause = $("btn-pause");
+  pause.disabled = !ui.running || ui.stopping;
+  pause.classList.toggle("btn--wait", ui.paused);
+  pause.querySelector("[data-pause-label]").textContent = ui.paused ? "Продолжить" : "Пауза";
+  $("btn-stop").disabled = !ui.running;
+
+  const empty = $("feed-empty");
+  const hasItems = $("feed").children.length > 0;
+  empty.hidden = hasItems;
+  if (!hasItems) {
+    empty.textContent =
+      mode === "live"
+        ? "Жду первые результаты…"
+        : mode === "paused"
+          ? "Пауза. Очередь ждёт."
+          : mode === "stopping"
+            ? "Останавливаю проверку…"
+            : "Сейчас ничего не проверяется";
+  }
+
+  if (mode === "idle" && !ui.running) {
+    $("scan-current").textContent = hasItems ? "Проверка не идёт" : "Сейчас ничего не проверяется";
+  } else if (mode === "paused") {
+    $("scan-current").textContent = "Пауза — текущие вкладки дорабатывают";
+  }
+
+  updateFormState();
+  renderApiBadge();
+}
+
+function tickLive() {
+  if (!ui.running) return;
+  const drift = ui.paused ? 0 : Date.now() - ui.elapsedAt;
+  const elapsed = ui.elapsedMs + drift;
+  $("live-elapsed").textContent = fmtDuration(elapsed);
+
+  const processed = ui.byIndex.size;
+  const rate = elapsed > 1500 && processed ? (processed / elapsed) * 60000 : 0;
+  $("live-rate").textContent = fmtRate(rate);
+
+  const left = ui.total - processed;
+  $("live-eta").textContent = ui.paused ? "пауза" : rate && left > 0 ? fmtDuration((left / rate) * 60000) : left <= 0 ? "0:00" : "—";
+}
+
+window.setInterval(tickLive, 500);
+
 function resetScanHud(total) {
-  scanState.hits = 0;
-  scanState.misses = 0;
-  scanState.issues = 0;
-  scanState.items = [];
+  ui.byIndex = new Map();
+  ui.hits = 0;
+  ui.misses = 0;
+  ui.issues = 0;
+  ui.total = total;
+  ui.workers = [];
+  ui.elapsedMs = 0;
+  ui.elapsedAt = Date.now();
   resetRadarBlips();
-  document.getElementById("feed").innerHTML = "";
-  document.getElementById("scan-progress").dataset.total = String(total);
-  document.getElementById("scan-current").textContent = "Открываю историю…";
-  setScanMode("live");
+  $("feed").innerHTML = "";
+  $("scan-current").textContent = "Открываю историю…";
+  renderLanes();
   updateScanHud();
+  renderRunState();
+}
+
+/* ------------------------------------------------------------------ */
+/* форма ввода                                                         */
+/* ------------------------------------------------------------------ */
+
+function renderBrief() {
+  const list = $("brief");
+  if (!list) return;
+  const count = parsePostings(postingsEl.value).length;
+  const rate = Number(ui.rates[settings.mode]) || 0;
+
+  const rows = [
+    ["", `<b>${count}</b> ${plural(count, ["номер", "номера", "номеров"])} в очереди`],
+    ["", `<b>${settings.threads}</b> ${plural(settings.threads, ["вкладка", "вкладки", "вкладок"])} сразу`],
+    ["", `Режим <b>${MODE_LABELS[settings.mode]}</b>`]
+  ];
+  if (count && rate) rows.push(["", `Примерно <b>${fmtDuration((count / rate) * 60000)}</b> по прошлым запускам`]);
+  rows.push(["is-hint", "<kbd>Ctrl</kbd>+<kbd>↵</kbd> старт · <kbd>Space</kbd> пауза · <kbd>Esc</kbd> стоп"]);
+
+  list.innerHTML = "";
+  for (const [cls, html] of rows) {
+    const li = document.createElement("li");
+    if (cls) li.className = cls;
+    li.innerHTML = html;
+    list.appendChild(li);
+  }
+}
+
+function updateCount() {
+  const parsed = parsePostings(postingsEl.value);
+  $("count-badge").textContent = String(parsed.length);
+  const stats = $("input-stats");
+  if (!parsed.length) stats.textContent = "Пока пусто";
+  else if (parsed.duplicates) stats.textContent = `${parsed.length} уникальных · ${parsed.duplicates} дублей убрано`;
+  else stats.textContent = `${parsed.length} уникальных номеров`;
+  renderBrief();
+  updateFormState();
+}
+
+function updateFormState() {
+  const hasPostings = parsePostings(postingsEl.value).length > 0;
+  const hasWarehouse = warehouseEl.value.trim().length > 0;
+  $("btn-start").disabled = ui.running || !(hasPostings && hasWarehouse);
+  $("btn-clear").disabled = !postingsEl.value.trim();
+
+  for (const name of ["hits", "misses", "issues"]) {
+    const filled = $(name).value.trim().length > 0;
+    const button = document.querySelector(`[data-copy="${name}"]`);
+    if (button) button.disabled = !filled;
+    const col = document.querySelector(`.result-col[data-col="${name}"]`);
+    if (col) col.classList.toggle("is-empty", !filled);
+  }
+  $("btn-copy").disabled = !$("hits").value.trim();
+  $("btn-csv").disabled = !ui.finished;
 }
 
 function showError(message) {
@@ -388,11 +705,16 @@ function showError(message) {
   inputError.textContent = message || "";
 }
 
+/* ------------------------------------------------------------------ */
+/* результат                                                           */
+/* ------------------------------------------------------------------ */
+
 function splitResults(results) {
   const hits = [];
   const misses = [];
   const issues = [];
   for (const item of results) {
+    if (!item) continue;
     const kind = classify(item);
     if (kind === "hit") hits.push(item.posting);
     else if (kind === "miss") misses.push(item.posting);
@@ -401,151 +723,290 @@ function splitResults(results) {
   return { hits, misses, issues };
 }
 
+function renderList(name) {
+  const filterEl = document.querySelector(`[data-filter="${name}"]`);
+  const needle = (filterEl?.value || "").trim().toLowerCase();
+  const rows = ui.lists[name] || [];
+  const shown = needle ? rows.filter((row) => row.toLowerCase().includes(needle)) : rows;
+  $(name).value = shown.join("\n");
+  const counts = { hits: "hit-count", misses: "miss-count", issues: "issue-count" };
+  $(counts[name]).textContent = needle ? `${shown.length}/${rows.length}` : String(rows.length);
+  updateFormState();
+}
+
 function renderResults(payload) {
-  const results = payload?.results || scanState.items;
-  const { hits, misses, issues } = splitResults(results);
+  const results = (payload?.results || []).filter(Boolean);
+  ui.finished = payload || null;
+  ui.lists = splitResults(results);
+
   const inputCount = payload?.inputCount || results.length;
-  document.getElementById("result-title").textContent = `Было ${inputCount}, нашлось ${hits.length}`;
-  document.getElementById("result-sub").textContent = payload?.error
+  const hits = ui.lists.hits.length;
+  $("result-title").textContent = `Было ${inputCount}, нашлось ${hits}`;
+  $("result-sub").textContent = payload?.error
     ? payload.error
     : payload?.warehouse
       ? `Склад ${payload.warehouse} есть в истории этих номеров.`
       : "Номера, у которых этот склад есть в истории.";
-  document.getElementById("hits").value = hits.join("\n");
-  document.getElementById("misses").value = misses.join("\n");
-  document.getElementById("issues").value = issues.join("\n");
-  document.getElementById("hit-count").textContent = String(hits.length);
-  document.getElementById("miss-count").textContent = String(misses.length);
-  document.getElementById("issue-count").textContent = String(issues.length);
-  scanState.hasResults = true;
+
+  const meta = $("result-meta");
+  meta.innerHTML = "";
+  const chips = [];
+  if (payload?.durationMs) chips.push(["Время", fmtDuration(payload.durationMs)]);
+  if (payload?.durationMs && results.length) {
+    chips.push(["Скорость", fmtRate((results.length / payload.durationMs) * 60000)]);
+  }
+  if (payload?.mode) chips.push(["Режим", MODE_LABELS[payload.mode] || payload.mode]);
+  const apiCount = results.filter((item) => item?.via === "api").length;
+  if (apiCount) chips.push(["Быстрым путём", `${apiCount} из ${results.length}`]);
+  if (payload?.stopped) chips.push(["Статус", "остановлено"]);
+  for (const [label, value] of chips) {
+    const chip = document.createElement("span");
+    chip.className = "chip";
+    chip.append(document.createTextNode(`${label} `));
+    const bold = document.createElement("b");
+    bold.textContent = value;
+    chip.appendChild(bold);
+    meta.appendChild(chip);
+  }
+
+  for (const name of ["hits", "misses", "issues"]) {
+    const filterEl = document.querySelector(`[data-filter="${name}"]`);
+    if (filterEl) filterEl.value = "";
+    renderList(name);
+  }
+
+  /* Плашка сверху после финиша должна показывать итог, а не последний
+     тик живого таймера. */
+  const duration = Number(payload?.durationMs) || 0;
+  $("live-elapsed").textContent = duration ? fmtDuration(duration) : "—";
+  $("live-rate").textContent = fmtRate(duration && results.length ? (results.length / duration) * 60000 : 0);
+  $("live-eta").textContent = payload?.stopped ? "остановлено" : "—";
+
+  ui.hasResults = true;
   updateFormState();
   setStep("result");
+
+  if (duration > 4000 && results.length >= 5 && payload?.mode && !payload?.stopped) {
+    const measured = (results.length / duration) * 60000;
+    ui.rates = { ...ui.rates, [payload.mode]: measured };
+    void storageGet([STORAGE_SETTINGS]).then((saved) =>
+      storageSet({ [STORAGE_SETTINGS]: { ...(saved[STORAGE_SETTINGS] || {}), rates: ui.rates } })
+    );
+  }
+}
+
+function buildCsv() {
+  const results = (ui.finished?.results || []).filter(Boolean);
+  const rows = [["Номер", "Результат", "Статус", "Загружено", "Всего", "Путь"]];
+  for (const item of results) {
+    rows.push([
+      item.posting,
+      item.found ? "есть" : "нет",
+      statusLabel(item),
+      String(item.loaded || 0),
+      String(item.expected || 0),
+      item.via || ""
+    ]);
+  }
+  const escape = (value) => `"${String(value).replace(/"/g, '""')}"`;
+  return `﻿${rows.map((row) => row.map(escape).join(";")).join("\r\n")}`;
+}
+
+/* ------------------------------------------------------------------ */
+/* запуск / пауза / стоп                                               */
+/* ------------------------------------------------------------------ */
+
+async function rememberWarehouse(value) {
+  const clean = String(value || "").trim();
+  if (!clean) return;
+  ui.recentWarehouses = [clean, ...ui.recentWarehouses.filter((item) => item !== clean)].slice(0, 8);
+  renderRecentWarehouses();
+  const saved = await storageGet([STORAGE_SETTINGS]);
+  await storageSet({
+    [STORAGE_SETTINGS]: { ...(saved[STORAGE_SETTINGS] || {}), recentWarehouses: ui.recentWarehouses }
+  });
+}
+
+function renderRecentWarehouses() {
+  const list = $("warehouse-recent");
+  if (!list) return;
+  list.innerHTML = "";
+  for (const value of ui.recentWarehouses) {
+    const option = document.createElement("option");
+    option.value = value;
+    list.appendChild(option);
+  }
 }
 
 async function startScan() {
   const postings = parsePostings(postingsEl.value);
   const warehouse = warehouseEl.value.trim();
-  const settings = readSettings();
   showError("");
-
   if (!postings.length || !warehouse) {
     updateFormState();
     return;
   }
 
-  scanState.jobId = `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
+  ui.jobId = `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
+  ui.running = true;
+  ui.paused = false;
+  ui.stopping = false;
+  ui.hasResults = false;
+  ui.finished = null;
+  ui.apiState = "unknown";
+
+  const saved = await storageGet([STORAGE_SETTINGS]);
   await storageSet({
-    [STORAGE_SETTINGS]: { ...settings, warehouse, lastPostings: postingsEl.value }
+    [STORAGE_SETTINGS]: {
+      ...(saved[STORAGE_SETTINGS] || {}),
+      ...settings,
+      warehouse,
+      lastPostings: postingsEl.value
+    }
   });
-  scanState.scanning = true;
-  scanState.stopping = false;
-  scanState.hasResults = false;
+  void rememberWarehouse(warehouse);
+
   ensureKeepAlive();
   resetScanHud(postings.length);
   setStep("scan");
-  startBoostClient();
-  updateFormState();
 
-  chrome.runtime.sendMessage(
-    {
-      action: "startScan",
-      jobId: scanState.jobId,
-      postings,
-      warehouse,
-      settings
-    },
-    (response) => {
-      if (chrome.runtime.lastError) {
-        showError("Фон не отвечает. Перезагрузите расширение.");
-        scanState.scanning = false;
-        stopBoostClient();
-        setScanMode("idle");
-        setStep("input");
-        updateFormState();
-        return;
-      }
-      if (response && response.ok === false) {
-        showError(response.error || "Не получилось запустить.");
-        scanState.scanning = false;
-        stopBoostClient();
-        setScanMode("idle");
-        setStep("input");
-        updateFormState();
-      }
-    }
-  );
+  const reply = await send({
+    action: "startScan",
+    jobId: ui.jobId,
+    postings: [...postings],
+    warehouse,
+    lastPostings: postingsEl.value,
+    settings: { ...settings }
+  });
+
+  if (!reply) {
+    ui.running = false;
+    renderRunState();
+    setStep("input");
+    showError("Фон не отвечает. Перезагрузите расширение на chrome://extensions.");
+    return;
+  }
+  if (reply.ok === false) {
+    ui.running = false;
+    renderRunState();
+    setStep("input");
+    showError(reply.error || "Не получилось запустить.");
+  }
 }
+
+function togglePause() {
+  if (!ui.running || ui.stopping) return;
+  const next = !ui.paused;
+  ui.paused = next;
+  renderRunState();
+  void send({ action: "pauseScan", paused: next });
+  toast("ok", next ? "Пауза: очередь придержана" : "Продолжаю проверку");
+}
+
+function requestStop() {
+  if (!ui.running || ui.stopping) return;
+  ui.stopping = true;
+  ui.paused = false;
+  renderRunState();
+  $("scan-current").textContent = "Останавливаю…";
+  void send({ action: "stopScan" });
+}
+
+/* ------------------------------------------------------------------ */
+/* события                                                             */
+/* ------------------------------------------------------------------ */
 
 postingsEl.addEventListener("input", updateCount);
 warehouseEl.addEventListener("input", updateFormState);
-document.getElementById("threads").addEventListener("change", () => {
-  const input = document.getElementById("threads");
-  input.value = String(Math.max(1, Math.min(12, Number(input.value) || 4)));
-});
-document.getElementById("btn-clear").addEventListener("click", () => {
+warehouseEl.addEventListener("change", () => void rememberWarehouse(warehouseEl.value));
+
+$("btn-clear").addEventListener("click", () => {
   postingsEl.value = "";
   updateCount();
 });
-document.getElementById("btn-paste").addEventListener("click", async () => {
+
+$("btn-paste").addEventListener("click", async () => {
   try {
     const text = await navigator.clipboard.readText();
     if (!text) return;
     postingsEl.value = postingsEl.value.trim() ? `${postingsEl.value.trim()}\n${text}` : text;
     updateCount();
   } catch (_err) {
-    showError("Нет доступа к буферу.");
+    showError("Нет доступа к буферу обмена.");
   }
 });
-document.getElementById("btn-start").addEventListener("click", () => void startScan());
-document.querySelectorAll(".step").forEach((btn) => {
-  btn.addEventListener("click", () => {
-    if (btn.disabled) return;
-    const step = btn.dataset.step;
-    if (step === "result" && scanState.items.length) {
-      renderResults({
-        results: scanState.items,
-        inputCount: Number(document.getElementById("scan-progress").dataset.total || scanState.items.length),
-        warehouse: warehouseEl.value.trim()
-      });
-      return;
-    }
-    setStep(step);
-    updateFormState();
-  });
+
+$("btn-file").addEventListener("click", () => $("file-input").click());
+$("file-input").addEventListener("change", (event) => {
+  const file = event.target.files?.[0];
+  if (file) void readFile(file);
+  event.target.value = "";
 });
-document.getElementById("btn-stop").addEventListener("click", () => {
-  if (!scanState.scanning || scanState.stopping) return;
-  scanState.stopping = true;
-  stopBoostClient();
-  setScanMode("stopping");
-  document.getElementById("scan-current").textContent = "Останавливаю…";
-  chrome.runtime.sendMessage({ action: "stopScan" }, () => {
-    void chrome.runtime.lastError;
-  });
-  window.clearTimeout(scanState.stopTimer);
-  scanState.stopTimer = window.setTimeout(() => {
-    if (!scanState.stopping && !scanState.scanning) return;
-    finishScanUi({ stopped: true, results: scanState.items });
-  }, 3500);
+
+async function readFile(file) {
+  try {
+    const text = await file.text();
+    postingsEl.value = postingsEl.value.trim() ? `${postingsEl.value.trim()}\n${text}` : text;
+    updateCount();
+    toast("ok", `Загружено из ${file.name}`);
+  } catch (_err) {
+    showError("Не получилось прочитать файл.");
+  }
+}
+
+const drop = $("drop");
+["dragenter", "dragover"].forEach((type) =>
+  drop.addEventListener(type, (event) => {
+    event.preventDefault();
+    drop.classList.add("is-over");
+  })
+);
+["dragleave", "drop"].forEach((type) =>
+  drop.addEventListener(type, (event) => {
+    event.preventDefault();
+    if (type === "dragleave" && drop.contains(event.relatedTarget)) return;
+    drop.classList.remove("is-over");
+  })
+);
+drop.addEventListener("drop", (event) => {
+  const file = event.dataTransfer?.files?.[0];
+  if (file) void readFile(file);
 });
-document.getElementById("btn-again").addEventListener("click", () => {
+
+$("btn-start").addEventListener("click", () => void startScan());
+$("btn-pause").addEventListener("click", togglePause);
+$("btn-stop").addEventListener("click", requestStop);
+$("btn-again").addEventListener("click", () => {
   setStep("input");
   updateFormState();
 });
+$("btn-feed-clear").addEventListener("click", () => {
+  $("feed").innerHTML = "";
+  renderRunState();
+});
+
+for (const btn of $$(".step")) {
+  btn.addEventListener("click", () => {
+    if (btn.disabled) return;
+    setStep(btn.dataset.step);
+  });
+}
+
+for (const filter of $$("[data-filter]")) {
+  filter.addEventListener("input", () => renderList(filter.dataset.filter));
+}
 
 function flashCopied(button) {
   button.classList.add("is-copied");
   window.clearTimeout(button._copyTimer);
-  button._copyTimer = window.setTimeout(() => {
-    button.classList.remove("is-copied");
-  }, 1400);
+  button._copyTimer = window.setTimeout(() => button.classList.remove("is-copied"), 1400);
 }
 
-async function copyField(id, button) {
-  const raw = document.getElementById(id).value.trim();
+async function copyField(name, button) {
+  const raw = $(name).value.trim();
   if (!raw) return;
   const text =
-    id === "issues"
+    name === "issues"
       ? raw
           .split(/\r?\n/)
           .map((line) => line.split("\t")[0].trim())
@@ -557,76 +1018,197 @@ async function copyField(id, button) {
   flashCopied(button);
 }
 
-document.getElementById("btn-copy").addEventListener("click", async () => {
-  await copyField("hits", document.getElementById("btn-copy"));
+for (const button of $$("[data-copy]")) {
+  button.addEventListener("click", (event) => void copyField(button.dataset.copy, event.currentTarget));
+}
+$("btn-copy").addEventListener("click", (event) => void copyField("hits", event.currentTarget));
+
+$("btn-csv").addEventListener("click", () => {
+  if (!ui.finished) return;
+  const blob = new Blob([buildCsv()], { type: "text/csv;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  const stamp = new Date().toISOString().slice(0, 16).replace(/[:T]/g, "-");
+  link.href = url;
+  link.download = `hub-trace-${stamp}.csv`;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 4000);
 });
-document.getElementById("btn-copy-hits").addEventListener("click", async (event) => {
-  await copyField("hits", event.currentTarget);
+
+document.addEventListener("keydown", (event) => {
+  const inField = /^(INPUT|TEXTAREA)$/.test(event.target?.tagName || "");
+
+  if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
+    event.preventDefault();
+    if (!$("btn-start").disabled) void startScan();
+    return;
+  }
+  if (event.code === "Space" && !inField && ui.running) {
+    event.preventDefault();
+    togglePause();
+    return;
+  }
+  if (event.key === "Escape" && ui.running) {
+    event.preventDefault();
+    requestStop();
+  }
 });
-document.getElementById("btn-copy-misses").addEventListener("click", async (event) => {
-  await copyField("misses", event.currentTarget);
-});
-document.getElementById("btn-copy-issues").addEventListener("click", async (event) => {
-  await copyField("issues", event.currentTarget);
-});
+
+/* ------------------------------------------------------------------ */
+/* сообщения от фона                                                   */
+/* ------------------------------------------------------------------ */
+
+function absorbState(next) {
+  if (!next) return;
+  ui.running = Boolean(next.running);
+  ui.paused = Boolean(next.paused);
+  ui.stopping = Boolean(next.stopping);
+  ui.apiState = next.apiState || "unknown";
+  ui.workers = Array.isArray(next.workers) ? next.workers : [];
+  ui.elapsedMs = Number(next.elapsedMs) || 0;
+  ui.elapsedAt = Date.now();
+  if (next.total) ui.total = next.total;
+
+  const changed =
+    settings.mode !== next.mode ||
+    settings.threads !== next.threads ||
+    settings.focusMode !== next.focusMode ||
+    settings.workerWindow !== next.workerWindow ||
+    settings.useApi !== next.useApi;
+
+  if (changed && next.mode && Date.now() > settingsDirtyUntil) {
+    Object.assign(settings, {
+      mode: next.mode,
+      threads: next.threads,
+      focusMode: next.focusMode,
+      workerWindow: next.workerWindow,
+      useApi: next.useApi
+    });
+    writeDecks();
+  }
+
+  renderLanes();
+  renderRunState();
+  updateScanHud();
+  tickLive();
+}
 
 chrome.runtime.onMessage.addListener((message) => {
   if (message?.action === "scanProgress") {
-    if (scanState.stopping && !message.item) return;
-    if (message.item) {
-      scanState.items.push(message.item);
-      const kind = classify(message.item);
-      if (kind === "hit") scanState.hits += 1;
-      else if (kind === "miss") scanState.misses += 1;
-      else scanState.issues += 1;
+    if (message.total) ui.total = message.total;
+    if (message.item && typeof message.index === "number" && message.index >= 0) {
+      applyItem(message.index, message.item);
       renderFeed(message.item);
-      if (scanState.scanning && !scanState.stopping) addRadarBlip(kind);
-      document.getElementById("scan-current").textContent = `${message.item.posting} · ${statusLabel(message.item)}`;
-      if (scanState.items.length) scanState.hasResults = true;
+      if (ui.running && !ui.stopping) addRadarBlip(classify(message.item));
+      $("scan-current").textContent = `${message.item.posting} · ${statusLabel(message.item)}`;
+      ui.hasResults = true;
       syncSteps();
     }
-    if (message.total) document.getElementById("scan-progress").dataset.total = String(message.total);
     updateScanHud();
+    return;
   }
+
+  if (message?.action === "scanState") {
+    absorbState(message.state);
+    return;
+  }
+
+  if (message?.action === "scanNotice") {
+    toast(message.level === "error" ? "error" : message.level === "api" ? "api" : "ok", message.text);
+    return;
+  }
+
+  if (message?.action === "scanRevalidate") {
+    for (const index of message.indexes || []) dropItem(index);
+    updateScanHud();
+    toast("api", `Переснимаю ${message.indexes?.length || 0} номер(ов) обходом страницы`);
+    return;
+  }
+
   if (message?.action === "scanFinished") {
-    finishScanUi(message);
+    ui.running = false;
+    ui.paused = false;
+    ui.stopping = false;
+    renderRunState();
+    if (message.finished?.results?.length) {
+      renderResults(message.finished);
+      return;
+    }
+    void storageGet([STORAGE_FINISHED]).then((saved) => {
+      const finished = saved[STORAGE_FINISHED];
+      if (finished?.results?.length) renderResults(finished);
+      else {
+        $("scan-current").textContent = "Сейчас ничего не проверяется";
+        syncSteps();
+      }
+    });
   }
 });
 
+/* ------------------------------------------------------------------ */
+/* старт                                                               */
+/* ------------------------------------------------------------------ */
+
+function applySavedSettings(saved) {
+  if (!saved) return;
+  Object.assign(settings, {
+    mode: MODE_LABELS[saved.mode] ? saved.mode : settings.mode,
+    threads: Math.max(1, Math.min(12, Number(saved.threads) || settings.threads)),
+    focusMode: saved.focusMode !== false,
+    workerWindow: saved.workerWindow !== false,
+    useApi: saved.useApi !== false
+  });
+  if (saved.warehouse) warehouseEl.value = saved.warehouse;
+  if (Array.isArray(saved.recentWarehouses)) ui.recentWarehouses = saved.recentWarehouses;
+  if (saved.rates && typeof saved.rates === "object") ui.rates = saved.rates;
+  if (saved.lastPostings) postingsEl.value = saved.lastPostings;
+}
+
 async function boot() {
+  mountDecks();
   ensureKeepAlive();
-  const saved = await storageGet([STORAGE_SETTINGS, STORAGE_FINISHED, STORAGE_RUNTIME]);
-  applySettings(saved[STORAGE_SETTINGS]);
-  if (saved[STORAGE_SETTINGS]?.lastPostings) {
-    postingsEl.value = saved[STORAGE_SETTINGS].lastPostings;
-  }
+
+  const saved = await storageGet([STORAGE_SETTINGS, STORAGE_FINISHED]);
+  applySavedSettings(saved[STORAGE_SETTINGS]);
+  writeDecks();
+  renderRecentWarehouses();
   updateCount();
 
-  chrome.runtime.sendMessage({ action: "getScanState" }, (state) => {
-    if (state?.inProgress) {
-      scanState.scanning = true;
-      scanState.stopping = false;
-      resetScanHud(state.total || 0);
-      setStep("scan");
-      setScanMode("live");
-      startBoostClient();
-      document.getElementById("scan-current").textContent = `Идёт: ${state.processed}/${state.total}`;
-    } else if (saved[STORAGE_FINISHED]?.results?.length) {
-      scanState.hasResults = true;
-      scanState.items = saved[STORAGE_FINISHED].results;
-      setScanMode("idle");
-      renderResults(saved[STORAGE_FINISHED]);
-    } else {
-      setScanMode("idle");
+  const live = await send({ action: "getScanState" });
+  if (live?.running) {
+    resetScanHud(live.total || 0);
+    for (const entry of live.results || []) {
+      applyItem(entry.index, entry.item);
+      renderFeed(entry.item);
     }
-  });
+    absorbState(live);
+    setStep("scan");
+    ui.hasResults = ui.byIndex.size > 0;
+    updateScanHud();
+    syncSteps();
+    return;
+  }
+
+  const finished = saved[STORAGE_FINISHED];
+  if (finished?.results?.length) {
+    renderResults(finished);
+  } else {
+    renderRunState();
+    syncSteps();
+  }
 }
+
+/* ------------------------------------------------------------------ */
+/* подпись автора                                                      */
+/* ------------------------------------------------------------------ */
 
 const SIGNATURE_EVERY_MS = 5 * 60 * 1000;
 const SIGNATURE_DURATION_MS = 16000;
 
 function playSignature() {
-  const el = document.getElementById("signature");
+  const el = $("signature");
   if (!el || document.hidden) return;
   document.body.classList.add("has-sig");
   el.classList.remove("is-on");
