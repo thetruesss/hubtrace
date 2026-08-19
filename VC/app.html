@@ -1,0 +1,235 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Hub Trace</title>
+    <link rel="stylesheet" href="app.css" />
+  </head>
+  <body>
+    <div class="bg" aria-hidden="true">
+      <div class="bg__glow bg__glow--a"></div>
+      <div class="bg__glow bg__glow--b"></div>
+      <div class="bg__noise"></div>
+    </div>
+
+    <div class="signature" id="signature" aria-hidden="true">
+      <div class="signature__band"></div>
+      <div class="signature__track">
+        <span class="signature__item"><span class="signature__word">@eovakimyan</span></span>
+        <span class="signature__sep"></span>
+        <span class="signature__item"><span class="signature__word">@eovakimyan</span></span>
+        <span class="signature__sep"></span>
+        <span class="signature__item"><span class="signature__word">@eovakimyan</span></span>
+        <span class="signature__sep"></span>
+        <span class="signature__item"><span class="signature__word">@eovakimyan</span></span>
+      </div>
+    </div>
+
+    <div class="shell">
+      <header class="top glass">
+        <div class="brand">
+          <img class="brand__icon" src="icons/radar.svg" width="32" height="32" alt="" />
+          <div>
+            <h1>Hub Trace</h1>
+            <p>Склад в истории Hub</p>
+          </div>
+        </div>
+        <nav class="steps glass glass--inset" aria-label="Этапы">
+          <button class="step is-active" data-step="input" type="button">Номера</button>
+          <button class="step" data-step="scan" type="button" disabled>Проверка</button>
+          <button class="step" data-step="result" type="button" disabled>Результат</button>
+        </nav>
+      </header>
+
+      <main>
+        <section id="screen-input" class="screen">
+          <div class="layout">
+            <section class="panel glass panel--numbers">
+              <div class="panel__head">
+                <h2>Номера</h2>
+                <span id="count-badge" class="badge glass glass--inset">0</span>
+              </div>
+              <p class="hint">Один на строку. Можно вставить столбец из Excel.</p>
+              <textarea id="postings" spellcheck="false" placeholder="551373007622000"></textarea>
+              <div class="row-actions">
+                <button id="btn-paste" class="btn glass" type="button">Вставить</button>
+                <button id="btn-clear" class="btn glass" type="button" disabled>Очистить</button>
+              </div>
+            </section>
+
+            <aside class="side">
+              <section class="panel glass">
+                <h2>Склад</h2>
+                <label class="field">
+                  <span>Какой ищем в истории</span>
+                  <input id="warehouse" type="text" placeholder="МО_ИСТРА_3_ХАБ" autocomplete="off" />
+                </label>
+                <p class="hint">Как в Hub: целиком или кусок названия.</p>
+              </section>
+
+              <section class="panel glass">
+                <h2>Параметры</h2>
+                <label class="field field--inline">
+                  <span>Вкладок сразу</span>
+                  <input id="threads" type="number" min="1" max="12" value="4" />
+                </label>
+                <label class="check">
+                  <input id="focus-mode" type="checkbox" checked />
+                  <span>Агрессивный режим</span>
+                </label>
+                <label class="check">
+                  <input id="worker-window" type="checkbox" checked />
+                  <span>Отдельное окно под Hub</span>
+                </label>
+              </section>
+
+              <button id="btn-start" class="btn btn--primary" type="button" disabled>Проверить</button>
+              <p id="input-error" class="error" hidden></p>
+            </aside>
+          </div>
+        </section>
+
+        <section id="screen-scan" class="screen is-idle" hidden>
+          <div class="scan-grid">
+            <section class="panel glass radar-card">
+              <div class="radar-stage">
+                <div class="radar" id="radar" aria-hidden="true">
+                  <svg class="radar__dish" viewBox="0 0 64 64">
+                    <defs>
+                      <radialGradient id="radar-dish" cx="50%" cy="42%" r="58%">
+                        <stop offset="0%" stop-color="#12356e" />
+                        <stop offset="100%" stop-color="#07101f" />
+                      </radialGradient>
+                    </defs>
+                    <circle cx="32" cy="32" r="31" fill="#080e1c" />
+                    <circle cx="32" cy="32" r="30" fill="url(#radar-dish)" stroke="#1d4fb8" stroke-width="1.15" />
+                    <circle cx="32" cy="32" r="22.5" fill="none" stroke="#4d8dff" stroke-opacity=".42" />
+                    <circle cx="32" cy="32" r="15" fill="none" stroke="#7ad0ff" stroke-opacity=".36" />
+                    <circle cx="32" cy="32" r="7.5" fill="none" stroke="#9ec4ff" stroke-opacity=".4" />
+                    <path d="M32 2 V62 M2 32 H62" stroke="#9ec4ff" stroke-opacity=".22" stroke-width=".7" />
+                    <circle cx="32" cy="32" r="2.4" fill="#005BFF" />
+                    <circle cx="32" cy="32" r="1.1" fill="#E8EEF8" />
+                  </svg>
+                  <div class="radar__beam">
+                    <span class="radar__beam-arm"></span>
+                  </div>
+                  <div class="radar__contacts">
+                    <div class="radar__blips" id="radar-blips"></div>
+                  </div>
+                </div>
+              </div>
+              <div class="scan-stats">
+                <div class="glass glass--inset">
+                  <span>Проверено</span>
+                  <strong id="scan-progress">0 / 0</strong>
+                </div>
+                <div class="glass glass--inset">
+                  <span>Есть склад</span>
+                  <strong id="scan-hits">0</strong>
+                </div>
+                <div class="glass glass--inset">
+                  <span>Нет склада</span>
+                  <strong id="scan-misses">0</strong>
+                </div>
+              </div>
+              <div class="progress-block">
+                <div class="progress-block__meta">
+                  <span id="progress-label">0 из 0</span>
+                  <strong id="progress-pct">0%</strong>
+                </div>
+                <div class="progress glass glass--inset">
+                  <div class="progress__stack">
+                    <i class="progress__hit" id="progress-hit"></i>
+                    <i class="progress__miss" id="progress-miss"></i>
+                    <i class="progress__issue" id="progress-issue"></i>
+                  </div>
+                </div>
+                <p id="progress-sub" class="progress-block__sub">Ожидание запуска</p>
+              </div>
+              <p id="scan-current" class="scan-current">Сейчас ничего не проверяется</p>
+              <button id="btn-stop" class="btn glass btn--danger" type="button" disabled>Стоп</button>
+            </section>
+
+            <section class="panel glass panel--feed">
+              <div class="panel__head">
+                <h2>Ход проверки</h2>
+                <span id="scan-status" class="badge">ожидание</span>
+              </div>
+              <p id="feed-empty" class="feed-empty">Сейчас ничего не проверяется</p>
+              <ol id="feed" class="feed"></ol>
+            </section>
+          </div>
+        </section>
+
+        <section id="screen-result" class="screen" hidden>
+          <div class="result-hero glass">
+            <div>
+              <h2 id="result-title">Было 0, нашлось 0</h2>
+              <p id="result-sub" class="hint">Номера, у которых этот склад есть в истории.</p>
+            </div>
+            <div class="hero-actions">
+              <button id="btn-copy" class="btn btn--primary" type="button" disabled>
+                <span class="btn__swap">
+                  <span class="btn__idle">Копировать</span>
+                  <span class="btn__done">Скопировано</span>
+                </span>
+              </button>
+              <button id="btn-again" class="btn glass" type="button">Ещё раз</button>
+            </div>
+          </div>
+
+          <div class="result-grid">
+            <section class="panel glass">
+              <div class="panel__head">
+                <div class="panel__title">
+                  <h2>Есть склад</h2>
+                  <span id="hit-count" class="badge glass glass--inset">0</span>
+                </div>
+                <button id="btn-copy-hits" class="btn glass btn--copy" type="button" data-copy="hits" disabled>
+                  <span class="btn__swap">
+                    <span class="btn__idle">Копировать</span>
+                    <span class="btn__done">Скопировано</span>
+                  </span>
+                </button>
+              </div>
+              <textarea id="hits" class="result-list" readonly spellcheck="false"></textarea>
+            </section>
+            <section class="panel glass">
+              <div class="panel__head">
+                <div class="panel__title">
+                  <h2>Нет склада</h2>
+                  <span id="miss-count" class="badge glass glass--inset">0</span>
+                </div>
+                <button id="btn-copy-misses" class="btn glass btn--copy" type="button" data-copy="misses" disabled>
+                  <span class="btn__swap">
+                    <span class="btn__idle">Копировать</span>
+                    <span class="btn__done">Скопировано</span>
+                  </span>
+                </button>
+              </div>
+              <textarea id="misses" class="result-list" readonly spellcheck="false"></textarea>
+            </section>
+            <section class="panel glass">
+              <div class="panel__head">
+                <div class="panel__title">
+                  <h2>Не проверились</h2>
+                  <span id="issue-count" class="badge glass glass--inset">0</span>
+                </div>
+                <button id="btn-copy-issues" class="btn glass btn--copy" type="button" data-copy="issues" disabled>
+                  <span class="btn__swap">
+                    <span class="btn__idle">Копировать</span>
+                    <span class="btn__done">Скопировано</span>
+                  </span>
+                </button>
+              </div>
+              <textarea id="issues" class="result-list" readonly spellcheck="false"></textarea>
+            </section>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <script src="app.js"></script>
+  </body>
+</html>

@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
+  <defs>
+    <radialGradient id="dish" cx="50%" cy="42%" r="58%">
+      <stop offset="0%" stop-color="#12356e"/>
+      <stop offset="100%" stop-color="#07101f"/>
+    </radialGradient>
+    <linearGradient id="sweep" x1="32" y1="32" x2="56" y2="12" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#005BFF" stop-opacity="0"/>
+      <stop offset="70%" stop-color="#005BFF" stop-opacity=".28"/>
+      <stop offset="100%" stop-color="#7AD0FF" stop-opacity=".7"/>
+    </linearGradient>
+  </defs>
+  <rect x="2" y="2" width="60" height="60" rx="16" fill="#080e1c"/>
+  <circle cx="32" cy="32" r="22" fill="url(#dish)" stroke="#1d4fb8" stroke-width="1.4"/>
+  <circle cx="32" cy="32" r="16.2" stroke="#4d8dff" stroke-opacity=".45" stroke-width="1"/>
+  <circle cx="32" cy="32" r="10.4" stroke="#7ad0ff" stroke-opacity=".4" stroke-width="1"/>
+  <circle cx="32" cy="32" r="4.8" stroke="#9ec4ff" stroke-opacity=".45" stroke-width="1"/>
+  <path d="M32 32 L48.2 14.6 A22 22 0 0 1 52.4 28.2 Z" fill="url(#sweep)"/>
+  <path d="M32 32 L51.2 24.4" stroke="#7AD0FF" stroke-width="1.2" stroke-linecap="round"/>
+  <path d="M32 11.5 V52.5 M11.5 32 H52.5" stroke="#9ec4ff" stroke-opacity=".28" stroke-width=".8"/>
+  <circle cx="32" cy="32" r="2.1" fill="#005BFF"/>
+  <circle cx="32" cy="32" r="1" fill="#E8EEF8"/>
+</svg>
