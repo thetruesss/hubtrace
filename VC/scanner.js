@@ -450,15 +450,29 @@
     return document.querySelectorAll('[class*="data-grid__row"]');
   }
 
+  /* «Всего: 1 234» — число может идти с разрядами через пробел или nbsp,
+     поэтому забираем всю группу и вычищаем из неё нецифры. */
+  const TOTAL_RE = new RegExp("Всего:\\s*([0-9][0-9\\s\\u00a0\\u202f\\u2009]*)", "i");
+
+  function readTotal(el) {
+    if (!el) return null;
+    const match = textOf(el).match(TOTAL_RE);
+    if (!match) return null;
+    const digits = match[1].replace(/[^0-9]/g, "");
+    return digits ? Number(digits) : null;
+  }
+
   function parseCounter() {
-    const nodes = document.querySelectorAll('[class*="table-tools__counter"]');
-    for (const node of nodes) {
-      const match = textOf(node).match(/Всего:\s*(\d+)/i);
-      if (match) return Number(match[1]);
+    const scoped = document.querySelectorAll(
+      '[class*="table-tools__counter"], [class*="counter"], [class*="Counter"], [class*="total"], [class*="Total"]'
+    );
+    for (const node of scoped) {
+      const value = readTotal(node);
+      if (value != null) return value;
     }
-    const history = document.querySelector('[class*="_history_"]');
-    const match = textOf(history || document.body).match(/Всего:\s*(\d+)/i);
-    return match ? Number(match[1]) : null;
+    /* Только контейнер истории: «Всего» из чужого блока страницы дало бы
+       неверный ориентир. */
+    return readTotal(historyContainer());
   }
 
   function historyReady() {
@@ -534,6 +548,12 @@
   function room(el) {
     if (!el) return 0;
     return Math.max(0, (el.scrollHeight || 0) - (el.clientHeight || 0));
+  }
+
+  function atBottom(el) {
+    if (!el) return true;
+    const max = room(el);
+    return max < 8 || (el.scrollTop || 0) >= max - 4;
   }
 
   function pickScroller() {
@@ -686,22 +706,56 @@
       return { ok: false, status: "no_history", found: false, expected: 0, loaded: 0 };
     }
 
-    /* 2. Счётчик «Всего: N» — нужен, чтобы понимать, дочитали ли мы список. */
-    let expected = parseCounter();
-    if (expected == null) {
-      await waitFor(() => (expected = parseCounter()) != null, Math.min(10000, left()));
+    /*
+     * 2. Счётчик «Всего: N» — ориентир, дочитали ли мы список.
+     *
+     * Ноль в нём почти всегда означает «данные ещё не приехали». Раньше он
+     * принимался за настоящий итог, и дальше вся загрузка пропускалась:
+     * условие цикла было expected > 0. В ленте это видно как «N/0», а по
+     * сути читалась только первая отрисованная страница истории.
+     *
+     * Теперь total может быть null — «неизвестно». В этом случае список
+     * догружается до тех пор, пока он перестанет расти.
+     */
+    let total = parseCounter();
+    if (total == null) {
+      /* Ждём счётчик, но не дольше, чем до появления строк: без счётчика
+         список всё равно можно вычитать, а вот стоять по 10 секунд на
+         каждом номере нельзя. */
+      await waitFor(() => {
+        total = parseCounter();
+        return total != null || rowNodes().length > 0;
+      }, Math.min(10000, left()));
+      /* Счётчик мог отрисоваться чуть позже строк — даём короткую отсрочку. */
+      if (total == null) {
+        await waitFor(() => (total = parseCounter()) != null, Math.min(600, Math.max(100, left())));
+      }
     }
-    if (expected == null) {
+    if (total === 0) {
+      await waitFor(() => {
+        const next = parseCounter();
+        if (next != null) total = next;
+        return (next != null && next > 0) || rowNodes().length > 0;
+      }, Math.min(2500, Math.max(200, left())));
+    }
+
+    const hasRows = () => rowNodes().length > 0;
+
+    if (total == null) {
       if (detectMissing()) return { ok: false, status: "missing", found: false, expected: 0, loaded: 0 };
-      return { ok: false, status: "no_counter", found: false, expected: 0, loaded: 0 };
+      /* Счётчика нет, но строки есть — ориентируемся по ним. */
+      if (!hasRows()) return { ok: false, status: "no_counter", found: false, expected: 0, loaded: 0 };
+    } else if (total === 0 && hasRows()) {
+      /* Счётчик говорит «ноль», а строки на месте — значит он не про историю. */
+      total = null;
     }
 
     if (job.uncheckCurrentOnly && clickUncheckCurrentOnly()) {
-      const before = expected;
+      const before = total;
       await waitFor(() => {
         const next = parseCounter();
         if (next != null && next !== before) {
-          expected = next;
+          total = next;
           return true;
         }
         return false;
@@ -718,16 +772,20 @@
     }
 
     /* 3. Догружаем список прыжками в конец. */
-    if (!found && expected > 0 && seen.size < expected) {
+    const needMore = () => total == null || seen.size < total;
+    /* drained — список перестал расти, то есть прочитан до конца. */
+    let drained = !needMore();
+
+    if (!found && needMore()) {
       let scroller = pickScroller();
       let stall = 0;
 
-      while (!dead() && !found && seen.size < expected) {
+      while (!dead() && !found && needMore()) {
         const rows = rowNodes();
         const before = rows.length;
         jumpToBottom(scroller, rows);
 
-        const grew = await waitRowGrowth(before, Math.min(stall ? 1200 : 600, Math.max(120, left())));
+        const grew = await waitRowGrowth(before, Math.min(stall ? 800 : 600, Math.max(120, left())));
         harvest();
         if (found) break;
 
@@ -738,8 +796,15 @@
 
         stall += 1;
         if (stall === 2) scroller = pickScroller();
-        if (stall >= 4) break;
+        /* Итог неизвестен и список внизу не растёт — значит дочитали, хватит
+           одного подтверждения. Если же счётчик known и до него не добрали,
+           терпим дольше: там точно должно приехать ещё. */
+        if ((total == null && atBottom(scroller) && stall >= 2) || stall >= 4) {
+          drained = true;
+          break;
+        }
       }
+      if (!drained && !needMore()) drained = true;
     }
 
     harvest();
@@ -751,7 +816,12 @@
 
     const loaded = seen.size;
     /* Нашли — значит дочитали ровно столько, сколько было нужно. */
-    const complete = found || loaded >= expected;
+    const complete = found || (total != null ? loaded >= total : drained);
+    /* Итог неизвестен: если список вычитан до конца или искомое уже нашлось,
+       «всего» = сколько прочли. Ноль остаётся только там, где мы правда не
+       дочитали — в ленте это и читается как «мало строк». */
+    const expected = total != null ? total : drained || found ? loaded : 0;
+
     if (abortFlag && !found && !complete) {
       return { ok: false, status: "paused", found, expected, loaded, via: "dom" };
     }

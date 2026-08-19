@@ -644,7 +644,6 @@ input[type="text"],
 input[type="search"],
 input[type="number"] {
   width: 100%;
-  height: 36px;
   border: 1px solid var(--stroke-2);
   border-radius: var(--r-sm);
   background: rgba(6, 10, 19, 0.55);
@@ -711,6 +710,14 @@ input:focus {
 .field > span {
   color: var(--muted);
   font-size: 11.5px;
+}
+
+/* Фиксированная высота — только полям в одну строку. Раньше она стояла в
+   общем правиле вместе с textarea, и поле для номеров схлопывалось в 36px. */
+input[type="text"],
+input[type="search"],
+input[type="number"] {
+  height: 36px;
 }
 
 .filter {
