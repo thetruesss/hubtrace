@@ -14,16 +14,16 @@
       <div class="bg__noise"></div>
     </div>
 
-    <div class="signature" id="signature" aria-hidden="true">
-      <div class="signature__band"></div>
-      <div class="signature__track">
-        <span class="signature__item"><span class="signature__word">@eovakimyan</span></span>
-        <span class="signature__sep"></span>
-        <span class="signature__item"><span class="signature__word">@eovakimyan</span></span>
-        <span class="signature__sep"></span>
-        <span class="signature__item"><span class="signature__word">@eovakimyan</span></span>
-        <span class="signature__sep"></span>
-        <span class="signature__item"><span class="signature__word">@eovakimyan</span></span>
+    <div class="sig" id="signature" aria-hidden="true">
+      <span class="sig__veil"></span>
+      <div class="sig__stage">
+        <div class="sig__row">
+          <span class="sig__spark"></span>
+          <span class="sig__name" data-text="@eovakimyan">@eovakimyan</span>
+          <span class="sig__spark"></span>
+        </div>
+        <span class="sig__rule"></span>
+        <span class="sig__caption">Hub Trace</span>
       </div>
     </div>
 
@@ -33,7 +33,7 @@
           <img class="brand__icon" src="icons/radar.svg" width="34" height="34" alt="" />
           <div class="brand__text">
             <h1>Hub Trace</h1>
-            <p>Склад в истории Hub</p>
+            <p>Склад в истории Hub<span class="brand__version" id="app-version"></span></p>
           </div>
         </div>
 
@@ -225,7 +225,6 @@
                 </span>
               </button>
               <button id="btn-xlsx" class="btn btn--ghost" type="button" disabled>Excel</button>
-              <button id="btn-csv" class="btn btn--ghost" type="button" disabled>CSV</button>
               <button id="btn-again" class="btn btn--ghost" type="button">Ещё раз</button>
             </div>
           </div>

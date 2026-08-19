@@ -347,11 +347,6 @@ main {
   z-index: 1;
 }
 
-body.has-sig .glass {
-  background: rgba(255, 255, 255, 0.028);
-  border-color: rgba(173, 216, 255, 0.26);
-}
-
 /* ================================================================== */
 /*  шапка                                                              */
 /* ================================================================== */
@@ -397,9 +392,28 @@ body.has-sig .glass {
 }
 
 .brand p {
+  display: flex;
+  align-items: center;
+  gap: 7px;
   margin: 2px 0 0;
   color: var(--muted);
   font-size: 11.5px;
+}
+
+.brand__version {
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid var(--stroke-2);
+  color: var(--faint);
+  font-size: 10px;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+  line-height: 15px;
+}
+
+.brand__version:empty {
+  display: none;
 }
 
 .steps {
@@ -644,7 +658,6 @@ input[type="text"],
 input[type="search"],
 input[type="number"] {
   width: 100%;
-  height: 36px;
   border: 1px solid var(--stroke-2);
   border-radius: var(--r-sm);
   background: rgba(6, 10, 19, 0.55);
@@ -711,6 +724,14 @@ input:focus {
 .field > span {
   color: var(--muted);
   font-size: 11.5px;
+}
+
+/* Фиксированная высота — только полям в одну строку. Раньше она стояла в
+   общем правиле вместе с textarea, и поле для номеров схлопывалось в 36px. */
+input[type="text"],
+input[type="search"],
+input[type="number"] {
+  height: 36px;
 }
 
 .filter {
@@ -1879,113 +1900,129 @@ input:focus {
 
 /* ================================================================== */
 /*  подпись автора                                                     */
+/*                                                                     */
+/*  Раньше это была бегущая строка под слоем панелей (z-index 1 против  */
+/*  2 у .shell), поэтому её съедало матовое стекло. Теперь подпись —    */
+/*  отдельная сцена поверх интерфейса с собственной подложкой.         */
 /* ================================================================== */
 
-.signature {
+.sig {
   position: fixed;
   inset: 0;
-  z-index: 1;
-  display: flex;
-  align-items: center;
-  overflow: hidden;
+  z-index: 30;
+  display: grid;
+  place-items: center;
   pointer-events: none;
-  opacity: 0;
   visibility: hidden;
+  --sig-dur: 3.6s;
 }
 
-.signature.is-on {
+.sig.is-on {
   visibility: visible;
-  opacity: 1;
 }
 
-.signature__band {
+.sig__veil {
   position: absolute;
-  left: 0;
-  right: 0;
-  height: 28%;
-  top: 36%;
-  background: linear-gradient(
-    180deg,
-    transparent 0%,
-    rgba(0, 91, 255, 0.07) 28%,
-    rgba(122, 208, 255, 0.12) 50%,
-    rgba(0, 91, 255, 0.07) 72%,
-    transparent 100%
-  );
-  filter: blur(8px);
+  inset: 0;
   opacity: 0;
+  background:
+    radial-gradient(1100px 640px at 50% 50%, rgba(8, 14, 28, 0.62) 0%, rgba(4, 6, 13, 0.9) 100%);
+  backdrop-filter: blur(7px) saturate(115%);
+  -webkit-backdrop-filter: blur(7px) saturate(115%);
 }
 
-.signature.is-on .signature__band {
-  animation: sig-band 16s ease-in-out both;
+.sig.is-on .sig__veil {
+  animation: sig-veil var(--sig-dur) ease both;
 }
 
-.signature__track {
+.sig__stage {
+  position: relative;
+  display: grid;
+  justify-items: center;
+  gap: 22px;
+  padding: 0 6vw;
+}
+
+.sig__row {
   display: flex;
   align-items: center;
-  gap: 4.5vw;
+  gap: clamp(18px, 3vw, 40px);
+}
+
+.sig__spark {
+  width: 11px;
+  height: 11px;
+  border-radius: 2px;
+  opacity: 0;
+  transform: rotate(45deg) scale(0.4);
+  background: #dff0ff;
+  box-shadow: 0 0 12px rgba(255, 255, 255, 0.9), 0 0 26px rgba(122, 208, 255, 0.85);
+  flex-shrink: 0;
+}
+
+.sig.is-on .sig__spark {
+  animation: sig-spark var(--sig-dur) ease both;
+}
+
+.sig__name {
+  position: relative;
+  font-size: clamp(38px, 6.6vw, 86px);
+  font-weight: 750;
+  letter-spacing: 0.14em;
+  line-height: 1.05;
   white-space: nowrap;
-  will-change: transform;
-  transform: translateX(20vw);
-}
-
-.signature.is-on .signature__track {
-  animation: sig-drift 16s var(--ease) both;
-}
-
-.signature__item {
-  position: relative;
-  display: block;
-}
-
-.signature__word {
-  position: relative;
-  display: block;
-  font-family: "Segoe UI Variable Display", "Segoe UI", system-ui, sans-serif;
-  font-size: clamp(52px, 8.4vw, 108px);
-  font-weight: 650;
-  letter-spacing: 0.22em;
-  line-height: 1;
-  color: #f4f9ff;
-  text-shadow:
-    0 0 6px rgba(255, 255, 255, 0.95),
-    0 0 18px rgba(173, 216, 255, 0.9),
-    0 0 42px rgba(122, 208, 255, 0.7),
-    0 0 88px rgba(0, 91, 255, 0.45);
-  background: linear-gradient(92deg, #9fd4ff 0%, #ffffff 38%, #7ad0ff 62%, #cfe8ff 100%);
-  background-size: 180% 100%;
+  opacity: 0;
+  background: linear-gradient(100deg, #79ccff 0%, #ffffff 34%, #a7d8ff 56%, #e2f1ff 100%);
+  background-size: 260% 100%;
   -webkit-background-clip: text;
   background-clip: text;
   -webkit-text-fill-color: transparent;
 }
 
-.signature.is-on .signature__word {
-  animation: sig-sheen 16s linear both;
-}
-
-.signature__word::before {
-  content: "@eovakimyan";
+/* Свечение — копия текста под ним, размытая. */
+.sig__name::before {
+  content: attr(data-text);
   position: absolute;
-  left: 0;
-  top: 0;
+  inset: 0;
+  z-index: -1;
   color: #7ad0ff;
   -webkit-text-fill-color: #7ad0ff;
   background: none;
-  filter: blur(16px);
-  opacity: 0.8;
-  z-index: -1;
-  letter-spacing: 0.22em;
+  filter: blur(18px);
+  opacity: 0.75;
+  letter-spacing: inherit;
 }
 
-.signature__sep {
-  width: 9px;
-  height: 9px;
-  border-radius: 2px;
-  transform: rotate(45deg);
-  background: #d7eeff;
-  box-shadow: 0 0 10px rgba(255, 255, 255, 0.9), 0 0 22px rgba(122, 208, 255, 0.8);
-  opacity: 0.8;
-  flex-shrink: 0;
+.sig.is-on .sig__name {
+  animation: sig-rise var(--sig-dur) cubic-bezier(0.2, 0.7, 0.25, 1) both,
+    sig-sweep var(--sig-dur) linear both;
+}
+
+.sig__rule {
+  width: min(46vw, 430px);
+  height: 1px;
+  opacity: 0;
+  transform: scaleX(0);
+  background: linear-gradient(90deg, transparent, rgba(122, 208, 255, 0.95), transparent);
+  box-shadow: 0 0 14px rgba(122, 208, 255, 0.55);
+}
+
+.sig.is-on .sig__rule {
+  animation: sig-rule var(--sig-dur) cubic-bezier(0.2, 0.7, 0.25, 1) both;
+}
+
+.sig__caption {
+  opacity: 0;
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0.42em;
+  text-transform: uppercase;
+  color: #9fb4d4;
+  padding-left: 0.42em;
+}
+
+.sig.is-on .sig__caption {
+  animation: sig-caption var(--sig-dur) ease both;
 }
 
 /* ================================================================== */
@@ -2143,38 +2180,95 @@ input:focus {
   }
 }
 
-@keyframes sig-drift {
+@keyframes sig-veil {
   0% {
-    transform: translateX(18vw);
     opacity: 0;
   }
-  10%,
-  88% {
+  14%,
+  76% {
     opacity: 1;
   }
   100% {
-    transform: translateX(calc(-100% - 12vw));
     opacity: 0;
   }
 }
 
-@keyframes sig-band {
+@keyframes sig-rise {
+  0% {
+    opacity: 0;
+    transform: translateY(16px) scale(0.985);
+    filter: blur(7px);
+  }
+  20%,
+  78% {
+    opacity: 1;
+    transform: none;
+    filter: blur(0);
+  }
+  100% {
+    opacity: 0;
+    transform: translateY(-10px);
+    filter: blur(5px);
+  }
+}
+
+@keyframes sig-sweep {
+  0% {
+    background-position: 0% 50%;
+  }
+  100% {
+    background-position: 260% 50%;
+  }
+}
+
+@keyframes sig-rule {
+  0% {
+    opacity: 0;
+    transform: scaleX(0);
+  }
+  24% {
+    opacity: 1;
+  }
+  46%,
+  78% {
+    opacity: 1;
+    transform: scaleX(1);
+  }
+  100% {
+    opacity: 0;
+    transform: scaleX(1);
+  }
+}
+
+@keyframes sig-spark {
+  0% {
+    opacity: 0;
+    transform: rotate(45deg) scale(0.35);
+  }
+  26%,
+  76% {
+    opacity: 0.92;
+    transform: rotate(45deg) scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: rotate(45deg) scale(0.35);
+  }
+}
+
+@keyframes sig-caption {
   0%,
+  12% {
+    opacity: 0;
+    letter-spacing: 0.18em;
+  }
+  34%,
+  78% {
+    opacity: 0.72;
+    letter-spacing: 0.42em;
+  }
   100% {
     opacity: 0;
-  }
-  12%,
-  84% {
-    opacity: 1;
-  }
-}
-
-@keyframes sig-sheen {
-  0% {
-    background-position: 0 50%;
-  }
-  100% {
-    background-position: 180% 50%;
   }
 }
 
@@ -2264,7 +2358,11 @@ input:focus {
   .bg__glow {
     animation: none !important;
   }
-  .signature.is-on .signature__track {
-    animation: sig-drift 8s linear both !important;
+  .sig.is-on .sig__veil,
+  .sig.is-on .sig__name,
+  .sig.is-on .sig__rule,
+  .sig.is-on .sig__spark,
+  .sig.is-on .sig__caption {
+    animation: sig-veil var(--sig-dur) linear both !important;
   }
 }

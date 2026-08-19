@@ -538,10 +538,20 @@ async function spawnWorkerInner(id) {
   }
 
   state.workerTabIds.add(tab.id);
-  /* Chrome мог отдать вкладку не в то окно (например, окно закрылось между
-     проверкой и созданием) — переносим принудительно. */
-  if (tab.windowId != null && tab.windowId !== windowId) {
+
+  /* Проверяем по факту, а не по ответу create: рабочая вкладка не должна
+     оказаться в окне пользователя ни при каких обстоятельствах. Если
+     перенести не вышло — закрываем её и падаем с понятной ошибкой, это
+     лучше, чем тихо засорять основное окно. */
+  let placed = tab.windowId != null ? tab : await getTab(tab.id);
+  if (placed && placed.windowId !== windowId) {
     await moveWorkerTabsTo(windowId, [tab.id]);
+    placed = await getTab(tab.id);
+  }
+  if (placed && placed.windowId !== windowId) {
+    state.workerTabIds.delete(tab.id);
+    removeTab(tab.id);
+    throw new Error("вкладка не попала в рабочее окно");
   }
 
   const worker = {
