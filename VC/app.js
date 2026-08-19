@@ -30,7 +30,6 @@ const settings = {
   mode: "balance",
   threads: 5,
   focusMode: true,
-  workerWindow: true,
   useApi: true
 };
 
@@ -226,8 +225,6 @@ function writeDecks() {
     if (api) api.checked = settings.useApi;
     const focus = deck.querySelector('[data-ctl="focus"]');
     if (focus) focus.checked = settings.focusMode;
-    const win = deck.querySelector('[data-ctl="window"]');
-    if (win) win.checked = settings.workerWindow;
   }
 
   const badge = $("live-mode-badge");
@@ -282,7 +279,6 @@ document.addEventListener("change", (event) => {
   const target = event.target;
   if (target.matches('[data-ctl="api"]')) void setSetting({ useApi: target.checked });
   else if (target.matches('[data-ctl="focus"]')) void setSetting({ focusMode: target.checked });
-  else if (target.matches('[data-ctl="window"]')) void setSetting({ workerWindow: target.checked });
 });
 
 /* ------------------------------------------------------------------ */
@@ -661,13 +657,18 @@ function renderBrief() {
     ["", `Режим <b>${MODE_LABELS[settings.mode]}</b>`]
   ];
   if (count && rate) rows.push(["", `Примерно <b>${fmtDuration((count / rate) * 60000)}</b> по прошлым запускам`]);
-  rows.push(["is-hint", "<kbd>Ctrl</kbd>+<kbd>↵</kbd> старт · <kbd>Space</kbd> пауза · <kbd>Esc</kbd> стоп"]);
+  rows.push([
+    "is-hint",
+    "<kbd>Ctrl</kbd><kbd>↵</kbd><i>старт</i><kbd>Space</kbd><i>пауза</i><kbd>Esc</kbd><i>стоп</i>"
+  ]);
 
   list.innerHTML = "";
   for (const [cls, html] of rows) {
     const li = document.createElement("li");
     if (cls) li.className = cls;
-    li.innerHTML = html;
+    const text = document.createElement("span");
+    text.innerHTML = html;
+    li.appendChild(text);
     list.appendChild(li);
   }
 }
@@ -698,6 +699,7 @@ function updateFormState() {
   }
   $("btn-copy").disabled = !$("hits").value.trim();
   $("btn-csv").disabled = !ui.finished;
+  $("btn-xlsx").disabled = !ui.finished;
 }
 
 function showError(message) {
@@ -795,21 +797,94 @@ function renderResults(payload) {
   }
 }
 
+function hubUrl(posting) {
+  const clean = String(posting || "").trim().replace(/^Lozon:/i, "");
+  return `https://hub.o3t.ru/management/stock/item/Lozon:${encodeURIComponent(clean)}?&tab=history`;
+}
+
+/* В выгрузке «Результат» и «Статус» — разные колонки, поэтому статус
+   берём технический, а не подпись для ленты (там у найденных всегда «есть»). */
+const EXPORT_STATUS = {
+  complete: "проверено",
+  partial: "мало строк",
+  missing: "нет страницы",
+  auth: "нет входа",
+  no_history: "нет истории",
+  no_counter: "нет счётчика",
+  bad_input: "не указан склад",
+  timeout: "таймаут",
+  stopped: "остановлено",
+  paused: "пауза",
+  tab_error: "ошибка вкладки",
+  script_error: "ошибка скрипта",
+  exception: "ошибка"
+};
+
+const EXPORT_COLUMNS = [
+  { title: "Номер", width: 22 },
+  { title: "Результат", width: 12 },
+  { title: "Статус", width: 16 },
+  { title: "Загружено", width: 11 },
+  { title: "Всего", width: 9 },
+  { title: "Путь", width: 8 },
+  { title: "Ссылка", width: 62 }
+];
+
+function exportRows() {
+  return (ui.finished?.results || []).filter(Boolean).map((item) => ({
+    posting: item.posting,
+    url: hubUrl(item.posting),
+    result: item.found ? "есть" : "нет",
+    status: EXPORT_STATUS[item.status] || item.status || "неизвестно",
+    loaded: Number(item.loaded) || 0,
+    expected: Number(item.expected) || 0,
+    via: item.via || ""
+  }));
+}
+
 function buildCsv() {
-  const results = (ui.finished?.results || []).filter(Boolean);
-  const rows = [["Номер", "Результат", "Статус", "Загружено", "Всего", "Путь"]];
-  for (const item of results) {
-    rows.push([
-      item.posting,
-      item.found ? "есть" : "нет",
-      statusLabel(item),
-      String(item.loaded || 0),
-      String(item.expected || 0),
-      item.via || ""
-    ]);
+  const rows = [EXPORT_COLUMNS.map((col) => col.title)];
+  for (const row of exportRows()) {
+    rows.push([row.posting, row.result, row.status, String(row.loaded), String(row.expected), row.via, row.url]);
   }
   const escape = (value) => `"${String(value).replace(/"/g, '""')}"`;
   return `﻿${rows.map((row) => row.map(escape).join(";")).join("\r\n")}`;
+}
+
+function buildXlsx() {
+  const rows = [EXPORT_COLUMNS.map((col) => col.title)];
+  for (const row of exportRows()) {
+    rows.push([
+      { text: row.posting, link: row.url },
+      row.result,
+      row.status,
+      { number: row.loaded },
+      { number: row.expected },
+      row.via,
+      { text: row.url, link: row.url }
+    ]);
+  }
+  return buildXlsxBlob({
+    sheetName: ui.finished?.warehouse ? `Hub Trace ${ui.finished.warehouse}`.slice(0, 31) : "Hub Trace",
+    columns: EXPORT_COLUMNS,
+    rows
+  });
+}
+
+function saveBlob(blob, name) {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = name;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 4000);
+}
+
+function exportName(extension) {
+  const stamp = new Date().toISOString().slice(0, 16).replace(/[:T]/g, "-");
+  return `hub-trace-${stamp}.${extension}`;
 }
 
 /* ------------------------------------------------------------------ */
@@ -1025,16 +1100,16 @@ $("btn-copy").addEventListener("click", (event) => void copyField("hits", event.
 
 $("btn-csv").addEventListener("click", () => {
   if (!ui.finished) return;
-  const blob = new Blob([buildCsv()], { type: "text/csv;charset=utf-8" });
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement("a");
-  const stamp = new Date().toISOString().slice(0, 16).replace(/[:T]/g, "-");
-  link.href = url;
-  link.download = `hub-trace-${stamp}.csv`;
-  document.body.appendChild(link);
-  link.click();
-  link.remove();
-  window.setTimeout(() => URL.revokeObjectURL(url), 4000);
+  saveBlob(new Blob([buildCsv()], { type: "text/csv;charset=utf-8" }), exportName("csv"));
+});
+
+$("btn-xlsx").addEventListener("click", () => {
+  if (!ui.finished) return;
+  try {
+    saveBlob(buildXlsx(), exportName("xlsx"));
+  } catch (error) {
+    toast("error", `Не получилось собрать файл: ${String(error?.message || error)}`);
+  }
 });
 
 document.addEventListener("keydown", (event) => {
@@ -1075,7 +1150,6 @@ function absorbState(next) {
     settings.mode !== next.mode ||
     settings.threads !== next.threads ||
     settings.focusMode !== next.focusMode ||
-    settings.workerWindow !== next.workerWindow ||
     settings.useApi !== next.useApi;
 
   if (changed && next.mode && Date.now() > settingsDirtyUntil) {
@@ -1083,7 +1157,6 @@ function absorbState(next) {
       mode: next.mode,
       threads: next.threads,
       focusMode: next.focusMode,
-      workerWindow: next.workerWindow,
       useApi: next.useApi
     });
     writeDecks();
@@ -1157,7 +1230,6 @@ function applySavedSettings(saved) {
     mode: MODE_LABELS[saved.mode] ? saved.mode : settings.mode,
     threads: Math.max(1, Math.min(12, Number(saved.threads) || settings.threads)),
     focusMode: saved.focusMode !== false,
-    workerWindow: saved.workerWindow !== false,
     useApi: saved.useApi !== false
   });
   if (saved.warehouse) warehouseEl.value = saved.warehouse;

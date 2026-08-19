@@ -1,3 +1,71 @@
+/* ================================================================== */
+/*  шрифты                                                             */
+/*                                                                     */
+/*  Лежат внутри расширения: раньше стек начинался с "Segoe UI         */
+/*  Variable", которого на многих машинах нет, и подхватывался         */
+/*  системный фолбэк без нормального хинтинга — отсюда «лесенки».      */
+/* ================================================================== */
+
+@font-face {
+  font-family: "Inter";
+  font-style: normal;
+  font-weight: 400 800;
+  font-display: block;
+  src: url("fonts/inter-cyrillic.woff2") format("woff2");
+  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+}
+
+@font-face {
+  font-family: "Inter";
+  font-style: normal;
+  font-weight: 400 800;
+  font-display: block;
+  src: url("fonts/inter-latin.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC,
+    U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215,
+    U+FEFF, U+FFFD;
+}
+
+@font-face {
+  font-family: "JetBrains Mono";
+  font-style: normal;
+  font-weight: 400;
+  font-display: block;
+  src: url("fonts/jbmono-cyrillic-400.woff2") format("woff2");
+  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+}
+
+@font-face {
+  font-family: "JetBrains Mono";
+  font-style: normal;
+  font-weight: 400;
+  font-display: block;
+  src: url("fonts/jbmono-latin-400.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC,
+    U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215,
+    U+FEFF, U+FFFD;
+}
+
+@font-face {
+  font-family: "JetBrains Mono";
+  font-style: normal;
+  font-weight: 500;
+  font-display: block;
+  src: url("fonts/jbmono-cyrillic-500.woff2") format("woff2");
+  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+}
+
+@font-face {
+  font-family: "JetBrains Mono";
+  font-style: normal;
+  font-weight: 500;
+  font-display: block;
+  src: url("fonts/jbmono-latin-500.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC,
+    U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215,
+    U+FEFF, U+FFFD;
+}
+
 @property --radar-sweep {
   syntax: "<angle>";
   inherits: true;
@@ -39,13 +107,23 @@
   --ease: cubic-bezier(0.22, 0.61, 0.36, 1);
   --sp: cubic-bezier(0.34, 1.3, 0.5, 1);
 
-  font-family: "Segoe UI Variable", "Segoe UI", Inter, system-ui, -apple-system, sans-serif;
+  --sans: "Inter", "Segoe UI Variable", "Segoe UI", system-ui, -apple-system, sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, "Cascadia Mono", Consolas, monospace;
+
+  font-family: var(--sans);
   font-size: 14px;
+  font-weight: 450;
   color-scheme: dark;
+  font-synthesis-weight: none;
 }
 
 * {
   box-sizing: border-box;
+}
+
+/* Мы задаём display почти всем плашкам, а это перебивает атрибут hidden. */
+[hidden] {
+  display: none !important;
 }
 
 html,
@@ -56,7 +134,15 @@ body {
   overflow: hidden;
   background: var(--bg);
   color: var(--text);
+  /* Chrome сам ставит body { font-family } в UA-стилях страниц расширения,
+     и это правило перебивает наследование от :root. Поэтому шрифт нужно
+     задавать именно здесь, иначе весь интерфейс рисуется системным
+     дефолтом — как раз он и давал «лесенки». */
+  font-family: var(--sans);
+  font-size: 14px;
+  font-weight: 450;
   -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
 }
 
 button,
@@ -305,7 +391,7 @@ body.has-sig .glass {
 .brand h1 {
   margin: 0;
   font-size: 16px;
-  font-weight: 650;
+  font-weight: 700;
   letter-spacing: -0.025em;
   line-height: 1.15;
 }
@@ -341,13 +427,18 @@ body.has-sig .glass {
   position: relative;
   z-index: 1;
   flex: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 28px;
   border: 0;
   background: transparent;
   color: var(--muted);
-  padding: 6px 15px;
+  padding: 0 15px;
   border-radius: var(--r-xs);
   font-size: 12px;
-  font-weight: 550;
+  font-weight: 600;
+  line-height: 1;
   white-space: nowrap;
   cursor: pointer;
   transition: color 0.25s var(--ease), opacity 0.25s var(--ease);
@@ -404,7 +495,7 @@ body.has-sig .glass {
 
 .live__state {
   color: var(--text-dim);
-  font-weight: 550;
+  font-weight: 650;
 }
 
 .live__sep {
@@ -430,7 +521,7 @@ body.has-sig .glass {
 
 .live__metric b {
   font-size: 12.5px;
-  font-weight: 650;
+  font-weight: 700;
   font-variant-numeric: tabular-nums;
 }
 
@@ -448,14 +539,14 @@ body.has-sig .glass {
 .panel h2 {
   margin: 0;
   font-size: 13px;
-  font-weight: 650;
+  font-weight: 700;
   letter-spacing: -0.01em;
 }
 
 .panel h3 {
   margin: 0;
   font-size: 11px;
-  font-weight: 600;
+  font-weight: 700;
   letter-spacing: 0.07em;
   text-transform: uppercase;
   color: var(--muted);
@@ -500,13 +591,16 @@ body.has-sig .glass {
 }
 
 .badge {
-  min-width: 24px;
-  padding: 3px 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 20px;
+  min-width: 22px;
+  padding: 0 8px;
   font-size: 11px;
-  font-weight: 650;
-  text-align: center;
+  font-weight: 700;
+  line-height: 1;
   flex-shrink: 0;
-  line-height: 1.2;
   border-radius: 999px;
   font-variant-numeric: tabular-nums;
 }
@@ -550,12 +644,14 @@ input[type="text"],
 input[type="search"],
 input[type="number"] {
   width: 100%;
+  height: 36px;
   border: 1px solid var(--stroke-2);
   border-radius: var(--r-sm);
   background: rgba(6, 10, 19, 0.55);
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
   padding: 9px 11px;
   outline: none;
+  font-weight: 450;
   transition: border-color 0.2s var(--ease), background 0.2s var(--ease);
 }
 
@@ -566,8 +662,8 @@ input::placeholder {
 
 textarea {
   resize: none;
-  font: 12px/1.55 ui-monospace, "Cascadia Mono", Consolas, monospace;
-  letter-spacing: 0.01em;
+  font: 400 12px/1.6 var(--mono);
+  letter-spacing: 0;
 }
 
 textarea:focus,
@@ -618,9 +714,10 @@ input:focus {
 }
 
 .filter {
+  height: 30px;
   margin-bottom: 8px;
+  padding: 0 10px;
   font-size: 12px;
-  padding: 6px 10px;
 }
 
 .filter::-webkit-search-cancel-button {
@@ -639,9 +736,11 @@ input:focus {
   gap: 7px;
   border: 1px solid transparent;
   border-radius: var(--r-sm);
-  padding: 9px 14px;
+  min-height: 34px;
+  padding: 0 14px;
   font-size: 12.5px;
   font-weight: 600;
+  line-height: 1;
   cursor: pointer;
   white-space: nowrap;
   transition:
@@ -677,13 +776,17 @@ input:focus {
 
 .btn--lg {
   width: 100%;
-  padding: 12px 16px;
+  min-height: 46px;
+  padding: 0 16px;
   font-size: 14px;
+  font-weight: 650;
   border-radius: 12px;
 }
 
 .btn--sm {
-  padding: 5px 10px;
+  min-height: 26px;
+  height: 26px;
+  padding: 0 10px;
   font-size: 11px;
   border-radius: var(--r-xs);
 }
@@ -720,11 +823,16 @@ input:focus {
 }
 
 .btn kbd {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 17px;
+  padding: 0 5px;
   font: inherit;
   font-size: 9.5px;
   font-weight: 650;
+  line-height: 1;
   letter-spacing: 0.02em;
-  padding: 2px 5px;
   border-radius: 5px;
   background: rgba(0, 0, 0, 0.26);
   border: 1px solid rgba(255, 255, 255, 0.14);
@@ -785,17 +893,26 @@ input:focus {
   gap: var(--gap);
 }
 
+/* Панели скроллятся вместе, а кнопка запуска всегда остаётся на виду. */
+.side__scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap);
+  padding-right: 2px;
+}
+
 .side__foot {
+  flex: 0 0 auto;
   display: grid;
   gap: 2px;
-  margin-top: auto;
-  padding-top: 2px;
 }
 
 .panel--deck {
-  flex: 0 1 auto;
-  min-height: 0;
-  overflow-y: auto;
+  flex: 0 0 auto;
 }
 
 .panel--brief {
@@ -811,11 +928,14 @@ input:focus {
 }
 
 .brief li {
-  display: flex;
+  display: grid;
+  /* Содержимое строки лежит в одном span: иначе каждый инлайн-кусок стал бы
+     отдельным grid-элементом и текст рассыпался бы по строкам. */
+  grid-template-columns: 5px minmax(0, 1fr);
   gap: 9px;
-  align-items: baseline;
+  align-items: start;
   font-size: 12px;
-  line-height: 1.4;
+  line-height: 1.45;
   color: var(--text-dim);
 }
 
@@ -823,10 +943,10 @@ input:focus {
   content: "";
   width: 5px;
   height: 5px;
+  /* Половина строки минус половина точки — центрируется при любом кегле. */
+  margin-top: calc(0.725em - 2.5px);
   border-radius: 50%;
   background: var(--blue);
-  flex-shrink: 0;
-  transform: translateY(-2px);
 }
 
 .brief li b {
@@ -844,12 +964,36 @@ input:focus {
   background: rgba(255, 255, 255, 0.18);
 }
 
+/* Флексом клавиши и подписи центрируются друг относительно друга сами,
+   без подгонки vertical-align. */
+.brief li.is-hint > span {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 5px;
+}
+
+.brief li.is-hint i {
+  font-style: normal;
+  margin-right: 7px;
+}
+
+.brief li.is-hint i:last-child {
+  margin-right: 0;
+}
+
 .brief kbd {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 16px;
+  padding: 0 5px;
   font: inherit;
   font-size: 10px;
   font-weight: 650;
-  padding: 1px 5px;
+  line-height: 1;
   border-radius: 4px;
+  vertical-align: -3px;
   background: rgba(255, 255, 255, 0.07);
   border: 1px solid var(--stroke-2);
   color: var(--muted);
@@ -884,14 +1028,14 @@ input:focus {
 .deck__label {
   color: var(--muted);
   font-size: 11px;
-  font-weight: 600;
+  font-weight: 700;
   letter-spacing: 0.07em;
   text-transform: uppercase;
 }
 
 .deck__value {
-  font-size: 15px;
-  font-weight: 650;
+  font-size: 16px;
+  font-weight: 700;
   font-variant-numeric: tabular-nums;
   letter-spacing: -0.02em;
 }
@@ -943,13 +1087,18 @@ input:focus {
   position: relative;
   z-index: 1;
   flex: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 28px;
   border: 0;
   background: transparent;
   color: var(--muted);
-  padding: 7px 4px;
+  padding: 0 4px;
   border-radius: var(--r-xs);
   font-size: 11.5px;
-  font-weight: 600;
+  font-weight: 650;
+  line-height: 1;
   cursor: pointer;
   transition: color 0.24s var(--ease);
 }
@@ -1028,8 +1177,7 @@ input:focus {
 .switch__track {
   position: relative;
   width: 34px;
-  height: 19px;
-  margin-top: 1px;
+  height: 20px;
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.1);
   border: 1px solid var(--stroke-2);
@@ -1042,8 +1190,8 @@ input:focus {
   position: absolute;
   top: 2px;
   left: 2px;
-  width: 13px;
-  height: 13px;
+  width: 14px;
+  height: 14px;
   border-radius: 50%;
   background: #cfd8e8;
   box-shadow: 0 1px 4px rgba(0, 0, 0, 0.5);
@@ -1056,7 +1204,7 @@ input:focus {
 }
 
 .switch input:checked + .switch__track::after {
-  transform: translateX(15px);
+  transform: translateX(14px);
   background: #fff;
 }
 
@@ -1067,15 +1215,18 @@ input:focus {
 
 .switch__text {
   display: grid;
-  gap: 2px;
+  gap: 1px;
   font-size: 12.5px;
+  font-weight: 550;
   color: var(--text-dim);
-  line-height: 1.3;
+  /* Высота первой строки = высоте тумблера, тогда они совпадают без сдвигов. */
+  line-height: 20px;
 }
 
 .switch__text em {
   color: var(--faint);
   font-style: normal;
+  font-weight: 450;
   font-size: 11px;
   line-height: 1.35;
 }
@@ -1247,7 +1398,7 @@ input:focus {
 
 .radar__hud b {
   font-size: clamp(26px, 4.6vh, 38px);
-  font-weight: 680;
+  font-weight: 750;
   letter-spacing: -0.045em;
   font-variant-numeric: tabular-nums;
   line-height: 1;
@@ -1349,9 +1500,9 @@ input:focus {
 
 .stat strong {
   display: block;
-  margin-top: 1px;
-  font-size: 21px;
-  font-weight: 680;
+  margin-top: 2px;
+  font-size: 22px;
+  font-weight: 700;
   letter-spacing: -0.035em;
   font-variant-numeric: tabular-nums;
 }
@@ -1457,13 +1608,12 @@ input:focus {
   height: 20px;
   border-radius: 6px;
   background: rgba(255, 255, 255, 0.07);
-  font-size: 10px;
-  font-weight: 650;
+  font: 700 10px/1 var(--mono);
   color: var(--muted);
 }
 
 .lane__posting {
-  font-family: ui-monospace, Consolas, monospace;
+  font: 500 11.5px/1 var(--mono);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1471,10 +1621,15 @@ input:focus {
 }
 
 .lane__phase {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 18px;
+  padding: 0 8px;
   font-size: 10px;
   font-weight: 650;
+  line-height: 1;
   letter-spacing: 0.03em;
-  padding: 2px 7px;
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.08);
   color: var(--muted);
@@ -1497,8 +1652,9 @@ input:focus {
   bottom: 0;
   height: 2px;
   width: 34%;
+  opacity: 0.75;
   background: linear-gradient(90deg, transparent, var(--cyan), transparent);
-  animation: lane-run 1.25s linear infinite;
+  animation: lane-run 1.4s linear infinite;
 }
 
 /* ================================================================== */
@@ -1533,7 +1689,9 @@ input:focus {
 
 .feed li {
   display: grid;
-  grid-template-columns: max-content minmax(0, 1fr) max-content max-content;
+  /* Фиксированная колонка под статус: каждая строка ленты — самостоятельный
+     grid, и при max-content номера прыгали бы по горизонтали. */
+  grid-template-columns: 94px minmax(0, 1fr) max-content max-content;
   column-gap: 9px;
   align-items: center;
   padding: 7px 10px;
@@ -1545,7 +1703,7 @@ input:focus {
 }
 
 .feed code {
-  font-family: ui-monospace, Consolas, monospace;
+  font: 500 11.5px/1 var(--mono);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1560,11 +1718,16 @@ input:focus {
 }
 
 .feed__via {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 16px;
+  padding: 0 5px;
   font-size: 9px;
   font-weight: 700;
+  line-height: 1;
   letter-spacing: 0.06em;
   text-transform: uppercase;
-  padding: 2px 5px;
   border-radius: 4px;
   color: var(--faint);
   background: rgba(255, 255, 255, 0.05);
@@ -1576,11 +1739,12 @@ input:focus {
 }
 
 .tag {
+  justify-self: start;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-width: 54px;
-  height: 21px;
+  min-width: 56px;
+  height: 22px;
   padding: 0 8px;
   border-radius: 6px;
   font-size: 10.5px;
@@ -1620,7 +1784,7 @@ input:focus {
 .result-hero h2 {
   margin: 0 0 5px;
   font-size: clamp(19px, 2.4vw, 24px);
-  font-weight: 680;
+  font-weight: 750;
   letter-spacing: -0.035em;
 }
 
@@ -1639,9 +1803,11 @@ input:focus {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  padding: 4px 10px;
+  height: 24px;
+  padding: 0 10px;
   border-radius: 999px;
   font-size: 11px;
+  line-height: 1;
   color: var(--text-dim);
   background: var(--glass-2);
   border: 1px solid var(--stroke-2);
@@ -1649,7 +1815,7 @@ input:focus {
 }
 
 .chip b {
-  font-weight: 650;
+  font-weight: 700;
 }
 
 .hero-actions {

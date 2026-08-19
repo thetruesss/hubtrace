@@ -80,6 +80,7 @@
             </section>
 
             <aside class="side">
+              <div class="side__scroll">
               <section class="panel glass">
                 <h2>Склад</h2>
                 <label class="field">
@@ -102,6 +103,7 @@
                 <h2>Что будет</h2>
                 <ul class="brief" id="brief"></ul>
               </section>
+              </div>
 
               <div class="side__foot">
                 <button id="btn-start" class="btn btn--primary btn--lg" type="button" disabled>
@@ -222,6 +224,7 @@
                   <span class="btn__done">Скопировано</span>
                 </span>
               </button>
+              <button id="btn-xlsx" class="btn btn--ghost" type="button" disabled>Excel</button>
               <button id="btn-csv" class="btn btn--ghost" type="button" disabled>CSV</button>
               <button id="btn-again" class="btn btn--ghost" type="button">Ещё раз</button>
             </div>
@@ -318,14 +321,10 @@
           <span class="switch__track"></span>
           <span class="switch__text">Агрессивный режим<em>дёргать вкладки, пока идёт обход DOM</em></span>
         </label>
-        <label class="switch">
-          <input type="checkbox" data-ctl="window" />
-          <span class="switch__track"></span>
-          <span class="switch__text">Отдельное окно<em>рабочие вкладки не мешают</em></span>
-        </label>
       </div>
     </template>
 
+    <script src="xlsx.js"></script>
     <script src="app.js"></script>
   </body>
 </html>

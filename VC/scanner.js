@@ -369,13 +369,60 @@
   /* надёжный путь: обход таблицы                                        */
   /* ------------------------------------------------------------------ */
 
-  function historyRoot() {
+  /*
+   * Подстраховка на случай, если наши селекторы не нашли строки таблицы.
+   *
+   * Раньше здесь был откат на document.body — и это давало ложное «есть»:
+   * в шапке Hub стоит кнопка с текущим складом («СЦ_Истра-ХАБ_Возвраты»),
+   * и если искали именно его, совпадение находилось на каждом номере.
+   * Теперь читаем только контейнер истории и вырезаем из него всю обвязку:
+   * кнопки, поповеры, фильтры, панель инструментов таблицы.
+   */
+  const CHROME_SELECTOR = [
+    "header",
+    "nav",
+    "button",
+    "select",
+    "input",
+    "label",
+    '[role="button"]',
+    '[role="tablist"]',
+    '[class*="header"]',
+    '[class*="Header"]',
+    '[class*="popover"]',
+    '[class*="Popover"]',
+    '[class*="dropdown"]',
+    '[class*="table-tools"]',
+    '[class*="toolbar"]',
+    '[class*="Toolbar"]',
+    '[class*="filter"]',
+    '[class*="Filter"]',
+    '[class*="breadcrumb"]',
+    '[class*="__button__"]',
+    '[class*="tabs"]'
+  ].join(",");
+
+  function historyContainer() {
     return (
-      document.querySelector("table.ozi__table__table__HAe8A tbody") ||
-      document.querySelector("table tbody") ||
       document.querySelector('[class*="_history_"]') ||
-      document.body
+      document.querySelector('[class*="data-grid"]') ||
+      null
     );
+  }
+
+  function fallbackHistoryText() {
+    /* Строки нашлись — обходить контейнер целиком незачем. */
+    if (rowNodes().length) return "";
+    const root = historyContainer();
+    if (!root) return "";
+    let clone;
+    try {
+      clone = root.cloneNode(true);
+    } catch (_err) {
+      return "";
+    }
+    for (const node of clone.querySelectorAll(CHROME_SELECTOR)) node.remove();
+    return norm(clone.textContent).toLowerCase();
   }
 
   /* Поиск таблицы стоит нескольких querySelectorAll по документу, а звать
@@ -665,13 +712,9 @@
     ensureScrollCss();
     harvest();
 
-    /* Дешёвая страховка: вдруг наши селекторы не поймали нужные строки. */
-    if (!found) {
-      const rootText = textOf(historyRoot()).toLowerCase();
-      if (rootText.includes(needle)) {
-        found = true;
-        sample = needle;
-      }
+    if (!found && fallbackHistoryText().includes(needle)) {
+      found = true;
+      sample = needle;
     }
 
     /* 3. Догружаем список прыжками в конец. */
@@ -701,12 +744,9 @@
 
     harvest();
 
-    if (!found) {
-      const rootText = textOf(historyRoot()).toLowerCase();
-      if (rootText.includes(needle)) {
-        found = true;
-        sample = needle;
-      }
+    if (!found && fallbackHistoryText().includes(needle)) {
+      found = true;
+      sample = needle;
     }
 
     const loaded = seen.size;

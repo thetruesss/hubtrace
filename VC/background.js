@@ -57,7 +57,6 @@ const DEFAULT_SETTINGS = {
   mode: "balance",
   threads: 5,
   focusMode: true,
-  workerWindow: true,
   useApi: true,
   uncheckCurrentOnly: false
 };
@@ -81,7 +80,6 @@ const state = {
   mode: DEFAULT_SETTINGS.mode,
   threads: DEFAULT_SETTINGS.threads,
   focusMode: DEFAULT_SETTINGS.focusMode,
-  workerWindow: DEFAULT_SETTINGS.workerWindow,
   useApi: DEFAULT_SETTINGS.useApi,
   uncheckCurrentOnly: false,
 
@@ -98,7 +96,8 @@ const state = {
 
   workerWindowId: null,
   ownsWorkerWindow: false,
-  seedTabId: null,
+  anchorTabId: null,
+  workerTabIds: new Set(),
 
   recipe: null,
   startedAt: 0,
@@ -245,7 +244,6 @@ function snapshot() {
     mode: state.mode,
     threads: state.threads,
     focusMode: state.focusMode,
-    workerWindow: state.workerWindow,
     useApi: state.useApi,
     apiState: state.apiState,
     apiNote: state.apiNote,
@@ -383,6 +381,19 @@ function stopScan() {
 /* окно и вкладки-воркеры                                              */
 /* ------------------------------------------------------------------ */
 
+function createWindow(options) {
+  return new Promise((resolve) => {
+    try {
+      chrome.windows.create(options, (created) => {
+        ignoreLastError();
+        resolve(created || null);
+      });
+    } catch (_err) {
+      resolve(null);
+    }
+  });
+}
+
 function getWindow(windowId) {
   return new Promise((resolve) => {
     if (windowId == null) {
@@ -396,21 +407,41 @@ function getWindow(windowId) {
   });
 }
 
-async function ensureWorkerWindow() {
-  if (!state.workerWindow) return null;
-  if (state.workerWindowId != null && (await getWindow(state.workerWindowId))) return state.workerWindowId;
+/* Рабочие вкладки живут только в своём окне: рядом с окном приложения им
+   делать нечего — они перехватывают фокус и мешают работать.
+   Воркеры стартуют одновременно, поэтому создание окна — синглтон, иначе
+   каждый откроет своё. */
+let workerWindowPromise = null;
 
-  const win = await new Promise((resolve) => {
-    chrome.windows.create({ url: "about:blank", focused: false, state: "maximized", type: "normal" }, (created) => {
-      ignoreLastError();
-      resolve(created || null);
-    });
-  });
-  if (!win?.id) return null;
-  state.workerWindowId = win.id;
-  state.ownsWorkerWindow = true;
-  state.seedTabId = win.tabs?.[0]?.id ?? null;
-  return win.id;
+async function ensureWorkerWindow() {
+  if (state.workerWindowId != null && (await getWindow(state.workerWindowId))) return state.workerWindowId;
+  if (workerWindowPromise) return workerWindowPromise;
+
+  workerWindowPromise = (async () => {
+    /* Chrome отвергает state:"maximized" вместе с focused:false
+       («Invalid value for state»), поэтому разворачиваем окно отдельным
+       вызовом. Раньше создание молча падало, и рабочие вкладки открывались
+       рядом с окном приложения. */
+    let win = await createWindow({ url: "about:blank", focused: false, type: "normal" });
+    if (!win?.id) win = await createWindow({ url: "about:blank", type: "normal" });
+    if (!win?.id) return null;
+
+    state.workerWindowId = win.id;
+    state.ownsWorkerWindow = true;
+    /* Стартовая вкладка остаётся якорем: если окно останется без вкладок,
+       Chrome его закроет, а мы примем это за «пользователь закрыл окно»
+       и остановим проверку. */
+    state.anchorTabId = win.tabs?.[0]?.id ?? null;
+    if (state.anchorTabId != null) state.workerTabIds.add(state.anchorTabId);
+    chrome.windows.update(win.id, { state: "maximized" }, ignoreLastError);
+    return win.id;
+  })();
+
+  try {
+    return await workerWindowPromise;
+  } finally {
+    workerWindowPromise = null;
+  }
 }
 
 function closeWorkerWindow() {
@@ -418,7 +449,13 @@ function closeWorkerWindow() {
   const owns = state.ownsWorkerWindow;
   state.workerWindowId = null;
   state.ownsWorkerWindow = false;
-  state.seedTabId = null;
+  state.anchorTabId = null;
+
+  /* Сначала вкладки: даже если окно уже закрыли руками, за нами не должно
+     остаться ни одной вкладки Hub. */
+  for (const tabId of [...state.workerTabIds]) removeTab(tabId);
+  state.workerTabIds.clear();
+
   if (id != null && owns) {
     try {
       chrome.windows.remove(id, ignoreLastError);
@@ -472,23 +509,39 @@ function activateTab(tabId) {
 async function spawnWorker(id) {
   if (state.workers.has(id)) return;
   state.liveWorkers += 1;
-
-  const options = { url: "about:blank", active: false };
-  if (state.workerWindowId != null) options.windowId = state.workerWindowId;
-
-  let tab = null;
-  if (state.seedTabId != null) {
-    tab = { id: state.seedTabId };
-    state.seedTabId = null;
-  } else {
-    tab = await createTab(options);
+  try {
+    await spawnWorkerInner(id);
+  } catch (error) {
+    /* Иначе воркер молча повиснет: liveWorkers уже увеличен, а цикл не стартовал. */
+    state.liveWorkers -= 1;
+    notice("error", `Не удалось поднять вкладку: ${String(error?.message || error)}`);
+    maybeFinalize();
   }
+}
+
+async function spawnWorkerInner(id) {
+  const windowId = await ensureWorkerWindow();
+  if (windowId == null || state.stopping || !state.running) {
+    if (windowId == null && state.running) throw new Error("не удалось открыть окно для рабочих вкладок");
+    state.liveWorkers -= 1;
+    maybeFinalize();
+    return;
+  }
+
+  const tab = await createTab({ url: "about:blank", active: false, windowId });
 
   if (!tab?.id || state.stopping || !state.running) {
     if (tab?.id) removeTab(tab.id);
     state.liveWorkers -= 1;
     maybeFinalize();
     return;
+  }
+
+  state.workerTabIds.add(tab.id);
+  /* Chrome мог отдать вкладку не в то окно (например, окно закрылось между
+     проверкой и созданием) — переносим принудительно. */
+  if (tab.windowId != null && tab.windowId !== windowId) {
+    await moveWorkerTabsTo(windowId, [tab.id]);
   }
 
   const worker = {
@@ -509,8 +562,11 @@ async function spawnWorker(id) {
 function retireWorker(worker) {
   if (!state.workers.has(worker.id)) return;
   state.workers.delete(worker.id);
-  pendingByTab.delete(worker.tabId);
-  removeTab(worker.tabId);
+  if (worker.tabId != null) {
+    pendingByTab.delete(worker.tabId);
+    state.workerTabIds.delete(worker.tabId);
+    removeTab(worker.tabId);
+  }
   state.liveWorkers -= 1;
   emitState();
   maybeFinalize();
@@ -524,8 +580,8 @@ function ensureWorkers() {
   }
 }
 
-async function moveWorkerTabsTo(windowId) {
-  const tabIds = [...state.workers.values()].map((worker) => worker.tabId).filter((id) => id != null);
+async function moveWorkerTabsTo(windowId, only) {
+  const tabIds = only || [...state.workers.values()].map((worker) => worker.tabId).filter((id) => id != null);
   if (!tabIds.length || windowId == null) return;
   await new Promise((resolve) => {
     chrome.tabs.move(tabIds, { windowId, index: -1 }, () => {
@@ -628,7 +684,8 @@ async function domScan(worker, posting) {
        вообще увело. Ждать полный таймаут на странице логина незачем. */
     const strayCheck = await Promise.race([
       answer.then((value) => ({ answered: value })),
-      sleep(conf.navTimeoutMs).then(() => ({ answered: null }))
+      sleep(conf.navTimeoutMs).then(() => ({ answered: null })),
+      waitForStop().then(() => ({ answered: { status: "stopped", found: false, expected: 0, loaded: 0, ok: false } }))
     ]);
     if (strayCheck.answered === null) {
       const pending = pendingByTab.get(tabId);
@@ -969,7 +1026,6 @@ async function finalize() {
   releaseGate();
   releaseStop();
   pendingByTab.clear();
-  for (const worker of [...state.workers.values()]) removeTab(worker.tabId);
   state.workers.clear();
   state.liveWorkers = 0;
   closeWorkerWindow();
@@ -1013,7 +1069,6 @@ function normalizeSettings(raw) {
     mode,
     threads: Math.max(1, Math.min(MAX_THREADS, Number(raw?.threads) || MODES[mode].threads)),
     focusMode: raw?.focusMode !== false,
-    workerWindow: raw?.workerWindow !== false,
     useApi: raw?.useApi !== false,
     uncheckCurrentOnly: raw?.uncheckCurrentOnly === true
   };
@@ -1047,7 +1102,6 @@ async function runScan(payload, postings, warehouse) {
   state.mode = settings.mode;
   state.threads = settings.threads;
   state.focusMode = settings.focusMode;
-  state.workerWindow = settings.workerWindow;
   state.useApi = settings.useApi;
   state.uncheckCurrentOnly = settings.uncheckCurrentOnly;
   state.apiState = "unknown";
@@ -1057,6 +1111,8 @@ async function runScan(payload, postings, warehouse) {
   state.apiIndexes = new Set();
   state.apiDigests = [];
   state.domInFlight = 0;
+  state.anchorTabId = null;
+  state.workerTabIds = new Set();
   state.startedAt = Date.now();
   state.pausedAt = 0;
   state.pausedMs = 0;
@@ -1086,7 +1142,6 @@ async function runScan(payload, postings, warehouse) {
   emitState(true);
 
   try {
-    await ensureWorkerWindow();
     ensureWorkers();
     if (!state.liveWorkers) {
       notice("error", "Не удалось открыть вкладки для проверки.");
@@ -1104,10 +1159,7 @@ async function runScan(payload, postings, warehouse) {
 /* ------------------------------------------------------------------ */
 
 async function applyLiveSettings(raw) {
-  const before = {
-    threads: state.threads,
-    workerWindow: state.workerWindow
-  };
+  const before = { threads: state.threads };
 
   if (raw?.mode && MODES[raw.mode] && raw.mode !== state.mode) {
     state.mode = raw.mode;
@@ -1126,32 +1178,10 @@ async function applyLiveSettings(raw) {
     if (next && !state.useApi && state.apiState === "blocked") state.apiState = "unknown";
     state.useApi = next;
   }
-  if (raw?.workerWindow != null) state.workerWindow = Boolean(raw.workerWindow);
 
   if (state.running) {
     /* Сжатие пула: лишние воркеры уходят после текущего номера. */
     for (const worker of state.workers.values()) worker.retire = worker.id > state.threads;
-
-    if (state.workerWindow !== before.workerWindow) {
-      if (state.workerWindow) {
-        const windowId = await ensureWorkerWindow();
-        if (windowId != null) await moveWorkerTabsTo(windowId);
-      } else {
-        const windowId = state.workerWindowId;
-        state.workerWindowId = null;
-        state.ownsWorkerWindow = false;
-        const app = await new Promise((resolve) => {
-          chrome.tabs.query({ url: chrome.runtime.getURL(APP_PATH) }, (tabs) => {
-            ignoreLastError();
-            resolve(tabs && tabs[0] ? tabs[0].windowId : null);
-          });
-        });
-        if (app != null) await moveWorkerTabsTo(app);
-        if (windowId != null) {
-          chrome.windows.remove(windowId, ignoreLastError);
-        }
-      }
-    }
 
     if (state.threads > before.threads && !state.paused) ensureWorkers();
     syncBoost();
@@ -1161,7 +1191,6 @@ async function applyLiveSettings(raw) {
     mode: state.mode,
     threads: state.threads,
     focusMode: state.focusMode,
-    workerWindow: state.workerWindow,
     useApi: state.useApi,
     uncheckCurrentOnly: state.uncheckCurrentOnly
   };
@@ -1203,6 +1232,7 @@ chrome.tabs.onRemoved.addListener((tabId) => {
     pendingByTab.delete(tabId);
     pending.resolve({ status: "tab_error", found: false, expected: 0, loaded: 0, ok: false });
   }
+  state.workerTabIds.delete(tabId);
   for (const worker of state.workers.values()) {
     if (worker.tabId !== tabId) continue;
     worker.retire = true;
