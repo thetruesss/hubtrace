@@ -698,7 +698,6 @@ function updateFormState() {
     if (col) col.classList.toggle("is-empty", !filled);
   }
   $("btn-copy").disabled = !$("hits").value.trim();
-  $("btn-csv").disabled = !ui.finished;
   $("btn-xlsx").disabled = !ui.finished;
 }
 
@@ -840,15 +839,6 @@ function exportRows() {
     expected: Number(item.expected) || 0,
     via: item.via || ""
   }));
-}
-
-function buildCsv() {
-  const rows = [EXPORT_COLUMNS.map((col) => col.title)];
-  for (const row of exportRows()) {
-    rows.push([row.posting, row.result, row.status, String(row.loaded), String(row.expected), row.via, row.url]);
-  }
-  const escape = (value) => `"${String(value).replace(/"/g, '""')}"`;
-  return `﻿${rows.map((row) => row.map(escape).join(";")).join("\r\n")}`;
 }
 
 function buildXlsx() {
@@ -1098,11 +1088,6 @@ for (const button of $$("[data-copy]")) {
 }
 $("btn-copy").addEventListener("click", (event) => void copyField("hits", event.currentTarget));
 
-$("btn-csv").addEventListener("click", () => {
-  if (!ui.finished) return;
-  saveBlob(new Blob([buildCsv()], { type: "text/csv;charset=utf-8" }), exportName("csv"));
-});
-
 $("btn-xlsx").addEventListener("click", () => {
   if (!ui.finished) return;
   try {
@@ -1242,6 +1227,9 @@ async function boot() {
   mountDecks();
   ensureKeepAlive();
 
+  const version = chrome.runtime.getManifest?.()?.version;
+  if (version) $("app-version").textContent = `v${version}`;
+
   const saved = await storageGet([STORAGE_SETTINGS, STORAGE_FINISHED]);
   applySavedSettings(saved[STORAGE_SETTINGS]);
   writeDecks();
@@ -1274,27 +1262,49 @@ async function boot() {
 
 /* ------------------------------------------------------------------ */
 /* подпись автора                                                      */
+/*                                                                     */
+/* Логика показа: приветствие вскоре после открытия и дальше — только  */
+/* когда приложение простаивает. Во время проверки и на скрытой        */
+/* вкладке подпись не появляется, чтобы не лезть под руку.             */
 /* ------------------------------------------------------------------ */
 
-const SIGNATURE_EVERY_MS = 5 * 60 * 1000;
-const SIGNATURE_DURATION_MS = 16000;
+const SIGNATURE = {
+  greetAfterMs: 9000,
+  idleEveryMs: 12 * 60 * 1000,
+  durationMs: 3600,
+  minGapMs: 60 * 1000
+};
 
-function playSignature() {
+let signatureShownAt = 0;
+let signatureTimer = null;
+
+function playSignature(reason) {
   const el = $("signature");
-  if (!el || document.hidden) return;
-  document.body.classList.add("has-sig");
+  if (!el) return false;
+  if (document.hidden) return false;
+  /* Проверка важнее пасхалки. */
+  if (ui.running) return false;
+  if (reason !== "manual" && Date.now() - signatureShownAt < SIGNATURE.minGapMs) return false;
+
+  signatureShownAt = Date.now();
   el.classList.remove("is-on");
   void el.offsetWidth;
   el.classList.add("is-on");
-  window.setTimeout(() => {
-    el.classList.remove("is-on");
-    document.body.classList.remove("has-sig");
-  }, SIGNATURE_DURATION_MS);
+
+  window.clearTimeout(signatureTimer);
+  signatureTimer = window.setTimeout(() => el.classList.remove("is-on"), SIGNATURE.durationMs);
+  return true;
 }
 
-window.setTimeout(() => {
-  playSignature();
-  window.setInterval(playSignature, SIGNATURE_EVERY_MS);
-}, SIGNATURE_EVERY_MS);
+window.setTimeout(() => playSignature("greet"), SIGNATURE.greetAfterMs);
+window.setInterval(() => playSignature("idle"), SIGNATURE.idleEveryMs);
+
+/* Пропущенное из-за занятости приложение показываем, когда оно освободилось. */
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden || ui.running) return;
+  if (Date.now() - signatureShownAt < SIGNATURE.idleEveryMs) return;
+  window.setTimeout(() => playSignature("idle"), 1500);
+});
+
 
 void boot();
