@@ -292,6 +292,9 @@
 
     const deadline = Date.now() + Math.max(4000, Number(job.timeoutMs) || 20000);
     const sizeModes = [DEFAULT_PAGE_SIZE, null];
+    /* Конкретная причина отказа: без неё в интерфейс уходило безликое
+       «быстрый режим недоступен», и понять, что чинить, было нельзя. */
+    let failure = "";
 
     for (const pageSize of sizeModes) {
       let loaded = 0;
@@ -310,6 +313,10 @@
         const response = await replay(built.request, built.timeoutMs);
 
         if (!response || !response.ok || !response.text) {
+          if (!response) failure = "нет ответа";
+          else if (response.error) failure = `сеть: ${response.error}`;
+          else if (!response.ok) failure = `ответ ${response.status || "?"}`;
+          else failure = "пустой ответ";
           failed = true;
           break;
         }
@@ -318,12 +325,14 @@
         try {
           json = JSON.parse(response.text);
         } catch (_err) {
+          failure = "ответ не JSON";
           failed = true;
           break;
         }
 
         const rows = findRows(json);
         if (!rows) {
+          failure = "в ответе не нашлось списка строк";
           failed = true;
           break;
         }
@@ -362,7 +371,7 @@
       };
     }
 
-    return { ok: false, reason: "api_unusable" };
+    return { ok: false, reason: failure || "запрос не подошёл" };
   }
 
   /* ------------------------------------------------------------------ */
