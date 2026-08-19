@@ -529,19 +529,19 @@
       style.id = "hub-trace-expand";
       (document.head || document.documentElement).appendChild(style);
     }
+    /*
+     * Раньше здесь принудительно навешивались max-height и overflow на
+     * контейнеры таблицы. Это создавало второй контейнер прокрутки вокруг
+     * настоящего: мы крутили внешний, строки жили во внутреннем, список не
+     * рос — и всё сваливалось в «мало строк».
+     *
+     * Оставляем только отключение плавной прокрутки: с ней присваивание
+     * scrollTop анимируется и позиция «плывёт».
+     */
     style.textContent = `
-      [class*="data-grid__scroller"],
-      [data-overlayscrollbars="host"],
-      [class*="ozi__scroller__scroller"] {
-        max-height: 88vh !important;
-        overflow: auto !important;
+      html, body, [data-overlayscrollbars-viewport], [class*="scroller"], [class*="Scroller"] {
+        scroll-behavior: auto !important;
       }
-      [data-overlayscrollbars-viewport] {
-        overflow-y: scroll !important;
-        overflow-x: hidden !important;
-        max-height: 88vh !important;
-      }
-      * { scroll-behavior: auto !important; }
     `;
   }
 
@@ -556,26 +556,47 @@
     return max < 8 || (el.scrollTop || 0) >= max - 4;
   }
 
-  function pickScroller() {
-    const list = [];
-    const add = (el) => {
-      if (el && !list.includes(el)) list.push(el);
-    };
-    add(document.querySelector("[data-overlayscrollbars-viewport]"));
-    add(document.querySelector('[data-overlayscrollbars="host"]'));
-    add(document.querySelector('[class*="data-grid__scroller"]'));
-    add(document.querySelector('[class*="ozi__scroller__scroller"]'));
-    add(document.querySelector('[class*="_wrapperContainer"]'));
-    add(document.querySelector('[class*="_history_"]'));
-    const table = document.querySelector("table.ozi__table__table__HAe8A") || document.querySelector("table");
-    add(table?.parentElement);
-    add(table?.parentElement?.parentElement);
-    add(document.scrollingElement);
-    add(document.documentElement);
-    add(document.body);
+  function scrolls(el) {
+    if (!el || el.nodeType !== 1) return false;
+    if (room(el) <= 4) return false;
+    const overflow = getComputedStyle(el).overflowY;
+    return overflow === "auto" || overflow === "scroll" || overflow === "overlay";
+  }
 
-    const ranked = list.sort((a, b) => room(b) - room(a));
-    return ranked.find((el) => room(el) > 8) || ranked[0] || document.scrollingElement;
+  /*
+   * Контейнер прокрутки берём от самой строки вверх по родителям, а не
+   * угадыванием по списку селекторов с сортировкой по «запасу прокрутки».
+   * Угадывание попадало то во внешнюю обёртку, то в документ — оттуда и
+   * дёрганье: одно место крутили мы, другое — scrollIntoView.
+   */
+  function findScroller() {
+    const rows = rowNodes();
+
+    /* Путь от строки вверх — единственный надёжный: он гарантированно
+       приводит в контейнер, в котором эта строка и лежит. */
+    if (rows.length) {
+      let node = rows[rows.length - 1];
+      while (node && node !== document.documentElement) {
+        node = node.parentElement;
+        if (scrolls(node)) return node;
+      }
+      return null;
+    }
+
+    /*
+     * Строк ещё нет. Подниматься по родителям здесь нельзя: пустая таблица
+     * не прокручивается, и поиск уходил во внешнюю обёртку страницы — её и
+     * начинали крутить. Поэтому только явные контейнеры списка.
+     */
+    for (const selector of [
+      "[data-overlayscrollbars-viewport]",
+      '[class*="data-grid__scroller"]',
+      '[class*="ozi__scroller__scroller"]'
+    ]) {
+      const el = document.querySelector(selector);
+      if (scrolls(el)) return el;
+    }
+    return null;
   }
 
   function fireWheel(el, deltaY) {
@@ -600,26 +621,46 @@
     );
   }
 
-  /* Один прыжок в конец списка вместо десятка мелких шагов. */
-  function jumpToBottom(scroller, rows) {
-    const last = rows.length ? rows[rows.length - 1] : null;
-    if (last && typeof last.scrollIntoView === "function") {
-      try {
-        last.scrollIntoView({ block: "end", inline: "nearest" });
-      } catch (_err) {
-        /* ignore */
-      }
-    }
-    if (!scroller) return;
+  /* Максимум, куда уже доскроллили: назад не откатываемся никогда. */
+  let scrollReached = 0;
+
+  /*
+   * Ровно один способ прокрутки — присваивание scrollTop выбранному
+   * контейнеру. scrollIntoView убран: он двигает все прокручиваемые
+   * родители сразу, включая окно, и вместе с нашим scrollTop давал
+   * качание вверх-вниз. Колесо осталось только как запасной вариант,
+   * если элемент не реагирует на присваивание.
+   */
+  function jumpToBottom(scroller) {
+    if (!scroller) return false;
+
+    const before = scroller.scrollTop || 0;
     const max = room(scroller);
-    scroller.scrollTop = max;
-    try {
-      scroller.scrollTo?.({ top: max, left: 0, behavior: "auto" });
-    } catch (_err) {
-      /* ignore */
+    if (before >= max - 2) {
+      scrollReached = Math.max(scrollReached, before);
+      return false;
     }
-    scroller.dispatchEvent(new Event("scroll", { bubbles: true }));
+
+    scroller.scrollTop = Math.max(max, scrollReached);
+    const after = scroller.scrollTop || 0;
+    scrollReached = Math.max(scrollReached, after);
+
+    if (after > before) {
+      /*
+       * Нативное событие scroll приходит только на следующем обновлении
+       * отрисовки, а в скрытой вкладке оно ещё и придушено — обход из-за
+       * этого замедлялся в разы. Поэтому дублируем его синхронно.
+       *
+       * bubbles: false обязателен: настоящие scroll на элементах не
+       * всплывают, а всплывающий дубль будил обработчики внешних обёрток.
+       */
+      scroller.dispatchEvent(new Event("scroll", { bubbles: false }));
+      return true;
+    }
+
+    /* Присваивание не сработало — пробуем колесом. */
     fireWheel(scroller, Math.max(600, (scroller.clientHeight || 400) * 1.5));
+    return (scroller.scrollTop || 0) > before;
   }
 
   function clickUncheckCurrentOnly() {
@@ -777,15 +818,22 @@
     let drained = !needMore();
 
     if (!found && needMore()) {
-      let scroller = pickScroller();
+      scrollReached = 0;
       let stall = 0;
 
       while (!dead() && !found && needMore()) {
-        const rows = rowNodes();
-        const before = rows.length;
-        jumpToBottom(scroller, rows);
+        /* Ищем контейнер на каждом круге: пока строк не было, подходящего
+           контейнера могло не существовать вовсе. */
+        const scroller = findScroller();
+        const before = rowNodes().length;
+        const moved = jumpToBottom(scroller);
 
-        const grew = await waitRowGrowth(before, Math.min(stall ? 800 : 600, Math.max(120, left())));
+        /* Пока счётчик известен и до него не добрали — там точно должно
+           приехать ещё, поэтому ждём заметно дольше. Медленный ответ Hub
+           не должен превращаться в «мало строк». */
+        const patient = total != null;
+        const wait = moved ? (patient ? 1200 : 700) : patient ? 1500 : 900;
+        const grew = await waitRowGrowth(before, Math.min(wait, Math.max(150, left())));
         harvest();
         if (found) break;
 
@@ -795,12 +843,18 @@
         }
 
         stall += 1;
-        if (stall === 2) scroller = pickScroller();
-        /* Итог неизвестен и список внизу не растёт — значит дочитали, хватит
-           одного подтверждения. Если же счётчик known и до него не добрали,
-           терпим дольше: там точно должно приехать ещё. */
-        if ((total == null && atBottom(scroller) && stall >= 2) || stall >= 4) {
-          drained = true;
+
+        if (total == null) {
+          /* Итог неизвестен: внизу и не растёт — значит дочитали. */
+          if (atBottom(scroller) && stall >= 2) {
+            drained = true;
+            break;
+          }
+          if (stall >= 4) {
+            drained = true;
+            break;
+          }
+        } else if (stall >= 6) {
           break;
         }
       }
