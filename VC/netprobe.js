@@ -1,0 +1,347 @@
+/*
+ * Hub Trace · сетевой пробник (MAIN world, document_start).
+ *
+ * Страница Hub тянет историю предмета обычным XHR/fetch. Пробник запоминает
+ * этот запрос («рецепт») и умеет повторить его для любого другого номера.
+ * Благодаря этому расширению не нужно рендерить целую SPA-страницу на каждый
+ * номер: один сетевой round-trip вместо загрузки бандла, гидрации и скролла.
+ *
+ * Пробник ничего не отправляет наружу сам — он только кладёт рецепт в
+ * window.postMessage, откуда его забирает scanner.js (ISOLATED world).
+ */
+(() => {
+  if (window.__hubTraceProbe) return;
+
+  const CHANNEL = "hub-trace";
+  const ORIGIN = location.origin;
+  const CAPTURE_WINDOW_MS = 120000;
+  const MAX_BODY_CHARS = 6 * 1024 * 1024;
+  const GOOD_ENOUGH_SCORE = 70;
+
+  const originalFetch = window.fetch ? window.fetch.bind(window) : null;
+  const XHR = window.XMLHttpRequest;
+  const protoOpen = XHR && XHR.prototype.open;
+  const protoSend = XHR && XHR.prototype.send;
+  const protoSetHeader = XHR && XHR.prototype.setRequestHeader;
+  const INFO = "__hubTraceInfo";
+
+  const probe = {
+    recipe: null,
+    score: -1,
+    startedAt: Date.now(),
+    capturing: true
+  };
+  window.__hubTraceProbe = probe;
+
+  function post(payload) {
+    try {
+      window.postMessage({ channel: CHANNEL, ...payload }, ORIGIN);
+    } catch (_err) {
+      /* страница может заменить postMessage — не наша проблема */
+    }
+  }
+
+  function itemIdFromHref(href) {
+    const match = String(href || "").match(/\/stock\/item\/(?:Lozon:)?([^/?#]+)/i);
+    if (!match) return "";
+    try {
+      return decodeURIComponent(match[1]);
+    } catch (_err) {
+      return match[1];
+    }
+  }
+
+  function sameOrigin(url) {
+    try {
+      return new URL(url, location.href).origin === ORIGIN;
+    } catch (_err) {
+      return false;
+    }
+  }
+
+  function absolute(url) {
+    try {
+      return new URL(url, location.href).toString();
+    } catch (_err) {
+      return String(url || "");
+    }
+  }
+
+  function headersToObject(input) {
+    const out = {};
+    if (!input) return out;
+    try {
+      if (typeof Headers !== "undefined" && input instanceof Headers) {
+        input.forEach((value, key) => {
+          out[key] = value;
+        });
+        return out;
+      }
+      if (Array.isArray(input)) {
+        for (const pair of input) if (pair && pair.length === 2) out[String(pair[0])] = String(pair[1]);
+        return out;
+      }
+      if (typeof input === "object") {
+        for (const key of Object.keys(input)) out[key] = String(input[key]);
+      }
+    } catch (_err) {
+      /* ignore */
+    }
+    return out;
+  }
+
+  /* Заголовки, которые браузер обязан выставлять сам. Повторять их нельзя. */
+  const FORBIDDEN_HEADERS = new Set([
+    "host",
+    "connection",
+    "content-length",
+    "origin",
+    "referer",
+    "cookie",
+    "cookie2",
+    "date",
+    "dnt",
+    "expect",
+    "keep-alive",
+    "te",
+    "trailer",
+    "transfer-encoding",
+    "upgrade",
+    "via"
+  ]);
+
+  function cleanHeaders(raw) {
+    const out = {};
+    for (const key of Object.keys(raw || {})) {
+      const lower = key.toLowerCase();
+      if (FORBIDDEN_HEADERS.has(lower)) continue;
+      if (lower.startsWith("sec-") || lower.startsWith("proxy-")) continue;
+      out[key] = raw[key];
+    }
+    return out;
+  }
+
+  function looksLikeJson(text) {
+    if (!text) return false;
+    const head = text.slice(0, 400).trimStart();
+    return head.startsWith("{") || head.startsWith("[");
+  }
+
+  function scoreCandidate(request, responseText) {
+    const url = String(request.url || "").toLowerCase();
+    const body = typeof request.body === "string" ? request.body : "";
+    const itemId = itemIdFromHref(location.href);
+    let score = 0;
+
+    if (/histor|истор/.test(url)) score += 45;
+    if (/histor/i.test(body)) score += 30;
+    if (/\/api\/|\/graphql|\/v\d+\//.test(url)) score += 6;
+    if (itemId && `${request.url}\n${body}`.includes(itemId)) score += 28;
+    if (/event|movement|operation|log|trace/.test(url)) score += 8;
+
+    if (responseText) {
+      if (/"(total|totalCount|totalRows|count|rowCount|itemsCount)"\s*:/i.test(responseText)) score += 10;
+      if (/\[\s*[{[]/.test(responseText)) score += 8;
+      if (/warehouse|склад|sklad/i.test(responseText)) score += 14;
+      score += Math.min(12, Math.floor(responseText.length / 3000));
+    }
+
+    /* Статика и телеметрия нам не нужны ни при каких обстоятельствах. */
+    if (/\.(js|css|png|jpe?g|svg|woff2?|ico|map)(\?|$)/.test(url)) return -1;
+    if (/analytics|metrics|sentry|telemetry|tracker/.test(url)) return -1;
+
+    return score;
+  }
+
+  function consider(request, responseText) {
+    if (!probe.capturing) return;
+    if (Date.now() - probe.startedAt > CAPTURE_WINDOW_MS) {
+      probe.capturing = false;
+      return;
+    }
+    if (!request || !request.url || !sameOrigin(request.url)) return;
+    if (!looksLikeJson(responseText)) return;
+    if (responseText.length > MAX_BODY_CHARS) return;
+
+    const score = scoreCandidate(request, responseText);
+    if (score <= 0 || score <= probe.score) return;
+
+    const itemId = itemIdFromHref(location.href);
+    const recipe = {
+      id: `r${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`,
+      url: absolute(request.url),
+      method: String(request.method || "GET").toUpperCase(),
+      headers: cleanHeaders(request.headers),
+      body: typeof request.body === "string" ? request.body : null,
+      itemId,
+      score,
+      sampleLength: responseText.length,
+      capturedAt: Date.now()
+    };
+
+    probe.recipe = recipe;
+    probe.score = score;
+    if (score >= GOOD_ENOUGH_SCORE) probe.capturing = false;
+    post({ type: "recipe", recipe });
+  }
+
+  /* ---------- перехват fetch ---------- */
+
+  if (originalFetch) {
+    window.fetch = function hubTraceFetch(input, init) {
+      let request = null;
+      try {
+        if (typeof Request !== "undefined" && input instanceof Request) {
+          request = {
+            url: input.url,
+            method: input.method,
+            headers: headersToObject(input.headers),
+            body: typeof init?.body === "string" ? init.body : null
+          };
+        } else {
+          request = {
+            url: String(input && input.url ? input.url : input),
+            method: (init && init.method) || "GET",
+            headers: headersToObject(init && init.headers),
+            body: typeof init?.body === "string" ? init.body : null
+          };
+        }
+      } catch (_err) {
+        request = null;
+      }
+
+      const promise = originalFetch(input, init);
+      if (!request || !probe.capturing) return promise;
+
+      promise
+        .then((response) => {
+          if (!response || !response.ok) return;
+          const type = response.headers && response.headers.get("content-type");
+          if (type && !/json|text/i.test(type)) return;
+          let clone = null;
+          try {
+            clone = response.clone();
+          } catch (_err) {
+            return;
+          }
+          clone
+            .text()
+            .then((text) => consider(request, text))
+            .catch(() => {});
+        })
+        .catch(() => {});
+
+      return promise;
+    };
+  }
+
+  /* ---------- перехват XHR ---------- */
+
+  if (XHR && protoOpen && protoSend) {
+    XHR.prototype.open = function hubTraceOpen(method, url) {
+      try {
+        this[INFO] = {
+          method: String(method || "GET").toUpperCase(),
+          url: String(url || ""),
+          headers: {},
+          body: null
+        };
+      } catch (_err) {
+        /* ignore */
+      }
+      return protoOpen.apply(this, arguments);
+    };
+
+    if (protoSetHeader) {
+      XHR.prototype.setRequestHeader = function hubTraceSetHeader(key, value) {
+        try {
+          if (this[INFO]) this[INFO].headers[String(key)] = String(value);
+        } catch (_err) {
+          /* ignore */
+        }
+        return protoSetHeader.apply(this, arguments);
+      };
+    }
+
+    XHR.prototype.send = function hubTraceSend(body) {
+      try {
+        const info = this[INFO];
+        if (info) {
+          if (typeof body === "string") info.body = body;
+          this.addEventListener("load", () => {
+            try {
+              if (this.status < 200 || this.status >= 300) return;
+              if (this.responseType && this.responseType !== "text" && this.responseType !== "json") return;
+              const text =
+                this.responseType === "json" ? JSON.stringify(this.response) : String(this.responseText || "");
+              consider(info, text);
+            } catch (_err) {
+              /* ignore */
+            }
+          });
+        }
+      } catch (_err) {
+        /* ignore */
+      }
+      return protoSend.apply(this, arguments);
+    };
+  }
+
+  /* ---------- повтор запроса по рецепту ---------- */
+
+  window.addEventListener("message", (event) => {
+    if (event.source !== window) return;
+    if (event.origin && event.origin !== ORIGIN) return;
+    const data = event.data;
+    if (!data || data.channel !== CHANNEL || data.type !== "replay") return;
+
+    const { ticket, url, method, headers, body, timeoutMs } = data;
+    const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
+    const timer = setTimeout(() => {
+      try {
+        controller?.abort();
+      } catch (_err) {
+        /* ignore */
+      }
+    }, Math.max(1000, Number(timeoutMs) || 20000));
+
+    const init = {
+      method: method || "GET",
+      headers: headers || {},
+      credentials: "include",
+      cache: "no-store"
+    };
+    if (body != null && init.method !== "GET" && init.method !== "HEAD") init.body = body;
+    if (controller) init.signal = controller.signal;
+
+    const runner = originalFetch || window.fetch;
+    Promise.resolve()
+      .then(() => runner(url, init))
+      .then((response) =>
+        response.text().then((text) => ({
+          ok: response.ok,
+          status: response.status,
+          text
+        }))
+      )
+      .then((result) => {
+        clearTimeout(timer);
+        post({ type: "replayResult", ticket, ...result });
+      })
+      .catch((error) => {
+        clearTimeout(timer);
+        post({ type: "replayResult", ticket, ok: false, status: 0, error: String(error?.message || error) });
+      });
+  });
+
+  /* Рецепт может быть пойман до того, как scanner.js подпишется на канал —
+     поэтому отвечаем и на запрос «что уже есть». */
+  window.addEventListener("message", (event) => {
+    if (event.source !== window) return;
+    if (event.origin && event.origin !== ORIGIN) return;
+    if (event.data?.channel !== CHANNEL || event.data?.type !== "askRecipe") return;
+    if (probe.recipe) post({ type: "recipe", recipe: probe.recipe });
+  });
+
+  post({ type: "probeReady" });
+})();

@@ -1,39 +1,129 @@
+/*
+ * Hub Trace · движок сканирования.
+ *
+ * Что изменилось по сравнению с 1.x:
+ *   · быстрый путь через повтор запроса истории (см. netprobe.js) — вкладку
+ *     больше не нужно перезагружать на каждый номер;
+ *   · сканер приезжает как content script на document_start, поэтому ушли
+ *     ожидание tabs.status === "complete" и два раунда executeScript;
+ *   · очередь умеет возвращать номера обратно, отсюда честная пауза;
+ *   · режим, число потоков и переключатели меняются прямо во время работы;
+ *   · «агрессивный режим» дёргает вкладки только когда реально идёт обход
+ *     DOM — на быстром пути фокус не воруется вообще.
+ */
+
 const APP_PATH = "app.html";
 const STORAGE_RUNTIME = "hubTraceRuntime";
 const STORAGE_FINISHED = "hubTraceFinished";
 const STORAGE_SETTINGS = "hubTraceSettings";
 
-const DEFAULT_SETTINGS = {
-  threads: 4,
-  zoom: 0.25,
-  timeoutSec: 180,
-  focusMode: true,
-  uncheckCurrentOnly: false,
-  workerWindow: true
+const MODES = {
+  turbo: {
+    label: "Турбо",
+    threads: 8,
+    api: true,
+    retryPartial: 0,
+    retryFail: 1,
+    navTimeoutMs: 20000,
+    scanTimeoutMs: 25000,
+    apiTimeoutMs: 15000,
+    spotCheckEvery: 50
+  },
+  balance: {
+    label: "Баланс",
+    threads: 5,
+    api: true,
+    retryPartial: 1,
+    retryFail: 1,
+    navTimeoutMs: 28000,
+    scanTimeoutMs: 45000,
+    apiTimeoutMs: 20000,
+    spotCheckEvery: 25
+  },
+  deep: {
+    label: "Глубокий",
+    threads: 3,
+    api: false,
+    retryPartial: 3,
+    retryFail: 2,
+    navTimeoutMs: 40000,
+    scanTimeoutMs: 90000,
+    apiTimeoutMs: 25000,
+    spotCheckEvery: 0
+  }
 };
 
+const DEFAULT_SETTINGS = {
+  mode: "balance",
+  threads: 5,
+  focusMode: true,
+  workerWindow: true,
+  useApi: true,
+  uncheckCurrentOnly: false
+};
+
+const MAX_THREADS = 12;
+
 const state = {
-  inProgress: false,
-  stopRequested: false,
+  running: false,
+  paused: false,
+  stopping: false,
+  finalized: true,
+
   jobId: null,
+  warehouse: "",
+  postings: [],
+  results: [],
+  cursor: 0,
+  requeue: [],
   processed: 0,
-  total: 0,
-  threads: 0,
-  activeTabIds: new Set(),
+
+  mode: DEFAULT_SETTINGS.mode,
+  threads: DEFAULT_SETTINGS.threads,
+  focusMode: DEFAULT_SETTINGS.focusMode,
+  workerWindow: DEFAULT_SETTINGS.workerWindow,
+  useApi: DEFAULT_SETTINGS.useApi,
+  uncheckCurrentOnly: false,
+
+  apiState: "unknown",
+  apiNote: "",
+  apiFailStreak: 0,
+  apiSinceCheck: 0,
+  apiIndexes: new Set(),
+  apiDigests: [],
+
+  workers: new Map(),
+  liveWorkers: 0,
+  domInFlight: 0,
+
   workerWindowId: null,
-  blankTabId: null,
   ownsWorkerWindow: false,
-  aggressive: false,
-  poolTabIds: [],
+  seedTabId: null,
+
+  recipe: null,
+  startedAt: 0,
+  pausedAt: 0,
+  pausedMs: 0,
+
   boostTimerId: null,
   boostIndex: 0
 };
 
-const stopWaiters = new Set();
+const pauseWaiters = new Set();
+const pendingByTab = new Map();
+let taskSeq = 0;
+let stateEmitAt = 0;
+let stateEmitTimer = null;
+
+/* ------------------------------------------------------------------ */
+/* обёртки над chrome.*                                                */
+/* ------------------------------------------------------------------ */
 
 function ignoreLastError() {
   void chrome.runtime.lastError;
 }
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 function storageSet(payload) {
   return new Promise((resolve) => chrome.storage.local.set(payload, resolve));
@@ -44,149 +134,20 @@ function storageRemove(keys) {
 }
 
 function emit(payload) {
-  chrome.runtime.sendMessage(payload, ignoreLastError);
-}
-
-function stoppedItem(posting) {
-  return { posting, status: "stopped", found: false, expected: 0, loaded: 0, ok: false };
-}
-
-function notifyStop() {
-  for (const resolve of stopWaiters) resolve();
-  stopWaiters.clear();
-}
-
-function waitForStop() {
-  if (state.stopRequested) return Promise.resolve();
-  return new Promise((resolve) => stopWaiters.add(resolve));
-}
-
-async function persistRuntime() {
-  await storageSet({
-    [STORAGE_RUNTIME]: {
-      inProgress: state.inProgress,
-      processed: state.processed,
-      total: state.total,
-      threads: state.threads,
-      jobId: state.jobId,
-      activeTabs: state.activeTabIds.size,
-      updatedAt: Date.now()
-    }
-  });
-}
-
-function buildHistoryUrl(posting) {
-  const clean = String(posting || "").trim().replace(/^Lozon:/i, "");
-  return `https://hub.o3t.ru/management/stock/item/Lozon:${encodeURIComponent(clean)}?&tab=history`;
-}
-
-function waitTabComplete(tabId, timeoutMs) {
-  return new Promise((resolve) => {
-    let done = false;
-    const timer = setTimeout(() => finish("timeout"), timeoutMs);
-
-    function finish(reason) {
-      if (done) return;
-      done = true;
-      clearTimeout(timer);
-      chrome.tabs.onUpdated.removeListener(onUpdated);
-      chrome.tabs.onRemoved.removeListener(onRemoved);
-      resolve(reason);
-    }
-
-    function onUpdated(updatedId, info) {
-      if (updatedId === tabId && info.status === "complete") finish("complete");
-    }
-
-    function onRemoved(removedId) {
-      if (removedId === tabId) finish("removed");
-    }
-
-    chrome.tabs.get(tabId, (tab) => {
-      if (chrome.runtime.lastError) {
-        finish("missing");
-        return;
-      }
-      if (tab?.status === "complete") finish("complete");
-    });
-    chrome.tabs.onUpdated.addListener(onUpdated);
-    chrome.tabs.onRemoved.addListener(onRemoved);
-  });
-}
-
-function setTabZoom(tabId, zoom) {
-  const value = Math.max(0.25, Math.min(1, Number(zoom) || 0.25));
-  return new Promise((resolve) => {
-    chrome.tabs.getZoom(tabId, (current) => {
-      ignoreLastError();
-      if (Math.abs((Number(current) || 1) - value) < 0.02) {
-        resolve(false);
-        return;
-      }
-      chrome.tabs.setZoomSettings(tabId, { mode: "automatic", scope: "per-tab" }, () => {
-        ignoreLastError();
-        chrome.tabs.setZoom(tabId, value, () => {
-          ignoreLastError();
-          resolve(true);
-        });
-      });
-    });
-  });
+  try {
+    chrome.runtime.sendMessage(payload, ignoreLastError);
+  } catch (_err) {
+    /* приложение закрыто — не страшно */
+  }
 }
 
 function createTab(options) {
   return new Promise((resolve) => {
     chrome.tabs.create(options, (tab) => {
-      if (chrome.runtime.lastError || !tab?.id) resolve(null);
-      else resolve(tab);
+      ignoreLastError();
+      resolve(tab && tab.id ? tab : null);
     });
   });
-}
-
-async function ensureWorkerWindow(enabled, aggressive) {
-  if (!enabled) return null;
-  if (state.workerWindowId) {
-    const existing = await new Promise((resolve) => {
-      chrome.windows.get(state.workerWindowId, {}, (win) => {
-        if (chrome.runtime.lastError || !win) resolve(null);
-        else resolve(win.id);
-      });
-    });
-    if (existing) return existing;
-    state.workerWindowId = null;
-  }
-
-  const win = await new Promise((resolve) => {
-    chrome.windows.create(
-      {
-        url: "about:blank",
-        focused: Boolean(aggressive),
-        state: "maximized",
-        type: "normal"
-      },
-      resolve
-    );
-  });
-  if (!win?.id) return null;
-  state.workerWindowId = win.id;
-  state.ownsWorkerWindow = true;
-  state.blankTabId = win.tabs?.[0]?.id || null;
-  return win.id;
-}
-
-function closeWorkerWindow() {
-  const id = state.workerWindowId;
-  const owns = state.ownsWorkerWindow;
-  state.workerWindowId = null;
-  state.blankTabId = null;
-  state.poolTabIds = [];
-  state.ownsWorkerWindow = false;
-  if (!id || !owns) return;
-  chrome.windows.remove(id, ignoreLastError);
-}
-
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function updateTab(tabId, props) {
@@ -200,6 +161,10 @@ function updateTab(tabId, props) {
 
 function getTab(tabId) {
   return new Promise((resolve) => {
+    if (tabId == null) {
+      resolve(null);
+      return;
+    }
     chrome.tabs.get(tabId, (tab) => {
       ignoreLastError();
       resolve(tab || null);
@@ -207,154 +172,1009 @@ function getTab(tabId) {
   });
 }
 
-function reloadTab(tabId) {
+function removeTab(tabId) {
+  if (tabId == null) return;
+  try {
+    chrome.tabs.remove(tabId, ignoreLastError);
+  } catch (_err) {
+    /* ignore */
+  }
+}
+
+function sendTab(tabId, message) {
   return new Promise((resolve) => {
-    chrome.tabs.reload(tabId, { bypassCache: true }, () => {
+    try {
+      chrome.tabs.sendMessage(tabId, message, (reply) => {
+        ignoreLastError();
+        resolve(reply || null);
+      });
+    } catch (_err) {
+      resolve(null);
+    }
+  });
+}
+
+/* ------------------------------------------------------------------ */
+/* общее состояние                                                     */
+/* ------------------------------------------------------------------ */
+
+function cfg() {
+  return MODES[state.mode] || MODES.balance;
+}
+
+function elapsedMs() {
+  if (!state.startedAt) return 0;
+  const paused = state.pausedMs + (state.paused && state.pausedAt ? Date.now() - state.pausedAt : 0);
+  return Math.max(0, Date.now() - state.startedAt - paused);
+}
+
+function ratePerMin() {
+  const ms = elapsedMs();
+  if (ms < 1500 || !state.processed) return 0;
+  return (state.processed / ms) * 60000;
+}
+
+function etaMs() {
+  const rate = ratePerMin();
+  if (!rate) return null;
+  const left = state.postings.length - state.processed;
+  if (left <= 0) return 0;
+  return Math.round((left / rate) * 60000);
+}
+
+function workerSnapshot() {
+  return [...state.workers.values()]
+    .sort((a, b) => a.id - b.id)
+    .map((worker) => ({
+      id: worker.id,
+      posting: worker.posting,
+      phase: worker.phase,
+      via: worker.via
+    }));
+}
+
+function snapshot() {
+  return {
+    running: state.running,
+    paused: state.paused,
+    stopping: state.stopping,
+    jobId: state.jobId,
+    warehouse: state.warehouse,
+    processed: state.processed,
+    total: state.postings.length,
+    mode: state.mode,
+    threads: state.threads,
+    focusMode: state.focusMode,
+    workerWindow: state.workerWindow,
+    useApi: state.useApi,
+    apiState: state.apiState,
+    apiNote: state.apiNote,
+    elapsedMs: elapsedMs(),
+    rate: ratePerMin(),
+    etaMs: etaMs(),
+    workers: workerSnapshot()
+  };
+}
+
+function emitState(force) {
+  const now = Date.now();
+  if (!force && now - stateEmitAt < 220) {
+    if (stateEmitTimer) return;
+    stateEmitTimer = setTimeout(() => {
+      stateEmitTimer = null;
+      emitState(true);
+    }, 220);
+    return;
+  }
+  stateEmitAt = now;
+  emit({ action: "scanState", state: snapshot() });
+}
+
+function notice(level, text) {
+  state.apiNote = level === "api" ? text : state.apiNote;
+  emit({ action: "scanNotice", level, text, at: Date.now() });
+}
+
+/* Раньше писали в storage на каждый номер. Теперь номер закрывается за
+   десятки миллисекунд, так что запись надо придержать. */
+let runtimeWriteAt = 0;
+let runtimeWriteTimer = null;
+
+function persistRuntimeSoon() {
+  if (runtimeWriteTimer) return;
+  const wait = Math.max(0, 1000 - (Date.now() - runtimeWriteAt));
+  runtimeWriteTimer = setTimeout(() => {
+    runtimeWriteTimer = null;
+    void persistRuntime();
+  }, wait);
+}
+
+async function persistRuntime() {
+  runtimeWriteAt = Date.now();
+  await storageSet({
+    [STORAGE_RUNTIME]: {
+      inProgress: state.running,
+      paused: state.paused,
+      processed: state.processed,
+      total: state.postings.length,
+      threads: state.threads,
+      mode: state.mode,
+      jobId: state.jobId,
+      updatedAt: Date.now()
+    }
+  });
+}
+
+/* ------------------------------------------------------------------ */
+/* пауза и остановка                                                   */
+/* ------------------------------------------------------------------ */
+
+function gate() {
+  if (!state.paused || state.stopping) return Promise.resolve();
+  return new Promise((resolve) => pauseWaiters.add(resolve));
+}
+
+function releaseGate() {
+  for (const resolve of pauseWaiters) resolve();
+  pauseWaiters.clear();
+}
+
+/* Один общий промис на всю задачу: иначе на каждый номер копился
+   собственный резолвер и они жили до самой остановки. */
+let stopSignal = null;
+let releaseStopSignal = null;
+
+function resetStopSignal() {
+  stopSignal = new Promise((resolve) => {
+    releaseStopSignal = resolve;
+  });
+}
+
+function waitForStop() {
+  if (state.stopping) return Promise.resolve("stopped");
+  if (!stopSignal) resetStopSignal();
+  return stopSignal;
+}
+
+function releaseStop() {
+  releaseStopSignal?.("stopped");
+}
+
+function abortActiveTabs() {
+  for (const worker of state.workers.values()) {
+    if (worker.tabId != null) void sendTab(worker.tabId, { action: "ht:abort" });
+  }
+}
+
+function setPaused(value) {
+  const next = Boolean(value);
+  if (!state.running || state.paused === next) return;
+  state.paused = next;
+  if (next) {
+    state.pausedAt = Date.now();
+    abortActiveTabs();
+    stopBoost();
+  } else {
+    state.pausedMs += Date.now() - (state.pausedAt || Date.now());
+    state.pausedAt = 0;
+    releaseGate();
+    ensureWorkers();
+    syncBoost();
+  }
+  emitState(true);
+  void persistRuntime();
+}
+
+function stopScan() {
+  if (!state.running) {
+    closeWorkerWindow();
+    return;
+  }
+  state.stopping = true;
+  state.paused = false;
+  releaseGate();
+  releaseStop();
+  abortActiveTabs();
+  stopBoost();
+  emitState(true);
+}
+
+/* ------------------------------------------------------------------ */
+/* окно и вкладки-воркеры                                              */
+/* ------------------------------------------------------------------ */
+
+function getWindow(windowId) {
+  return new Promise((resolve) => {
+    if (windowId == null) {
+      resolve(null);
+      return;
+    }
+    chrome.windows.get(windowId, {}, (win) => {
+      ignoreLastError();
+      resolve(win || null);
+    });
+  });
+}
+
+async function ensureWorkerWindow() {
+  if (!state.workerWindow) return null;
+  if (state.workerWindowId != null && (await getWindow(state.workerWindowId))) return state.workerWindowId;
+
+  const win = await new Promise((resolve) => {
+    chrome.windows.create({ url: "about:blank", focused: false, state: "maximized", type: "normal" }, (created) => {
+      ignoreLastError();
+      resolve(created || null);
+    });
+  });
+  if (!win?.id) return null;
+  state.workerWindowId = win.id;
+  state.ownsWorkerWindow = true;
+  state.seedTabId = win.tabs?.[0]?.id ?? null;
+  return win.id;
+}
+
+function closeWorkerWindow() {
+  const id = state.workerWindowId;
+  const owns = state.ownsWorkerWindow;
+  state.workerWindowId = null;
+  state.ownsWorkerWindow = false;
+  state.seedTabId = null;
+  if (id != null && owns) {
+    try {
+      chrome.windows.remove(id, ignoreLastError);
+    } catch (_err) {
+      /* ignore */
+    }
+  }
+}
+
+const BOOST_INTERVAL_MS = 450;
+
+function stopBoost() {
+  if (state.boostTimerId == null) return;
+  clearInterval(state.boostTimerId);
+  state.boostTimerId = null;
+}
+
+/* Фон дёргает вкладку, только когда она реально листает DOM: скрытые
+   вкладки Chrome тормозит, и бесконечный скролл в них залипает. */
+function boostTick() {
+  if (!state.running || state.stopping || state.paused) return;
+  if (!state.focusMode || state.domInFlight <= 0) return;
+  const candidates = [...state.workers.values()].filter((worker) => worker.phase !== "idle" && worker.via !== "api");
+  if (!candidates.length) return;
+  if (state.boostIndex >= candidates.length) state.boostIndex = 0;
+  const worker = candidates[state.boostIndex];
+  state.boostIndex += 1;
+  activateTab(worker.tabId);
+}
+
+function syncBoost() {
+  if (!state.running || state.stopping || state.paused || !state.focusMode) {
+    stopBoost();
+    return;
+  }
+  if (state.boostTimerId != null) return;
+  state.boostIndex = 0;
+  boostTick();
+  state.boostTimerId = setInterval(boostTick, BOOST_INTERVAL_MS);
+}
+
+function activateTab(tabId) {
+  if (tabId == null) return;
+  chrome.tabs.get(tabId, (tab) => {
+    ignoreLastError();
+    if (!tab?.id) return;
+    chrome.tabs.update(tabId, { active: true, autoDiscardable: false }, ignoreLastError);
+  });
+}
+
+async function spawnWorker(id) {
+  if (state.workers.has(id)) return;
+  state.liveWorkers += 1;
+
+  const options = { url: "about:blank", active: false };
+  if (state.workerWindowId != null) options.windowId = state.workerWindowId;
+
+  let tab = null;
+  if (state.seedTabId != null) {
+    tab = { id: state.seedTabId };
+    state.seedTabId = null;
+  } else {
+    tab = await createTab(options);
+  }
+
+  if (!tab?.id || state.stopping || !state.running) {
+    if (tab?.id) removeTab(tab.id);
+    state.liveWorkers -= 1;
+    maybeFinalize();
+    return;
+  }
+
+  const worker = {
+    id,
+    tabId: tab.id,
+    posting: "",
+    phase: "idle",
+    via: "",
+    hubReady: false,
+    retire: false
+  };
+  state.workers.set(id, worker);
+  await updateTab(tab.id, { autoDiscardable: false });
+  emitState();
+  void workerLoop(worker);
+}
+
+function retireWorker(worker) {
+  if (!state.workers.has(worker.id)) return;
+  state.workers.delete(worker.id);
+  pendingByTab.delete(worker.tabId);
+  removeTab(worker.tabId);
+  state.liveWorkers -= 1;
+  emitState();
+  maybeFinalize();
+}
+
+function ensureWorkers() {
+  if (!state.running || state.stopping) return;
+  if (!hasWork()) return;
+  for (let id = 1; id <= state.threads; id += 1) {
+    if (!state.workers.has(id)) void spawnWorker(id);
+  }
+}
+
+async function moveWorkerTabsTo(windowId) {
+  const tabIds = [...state.workers.values()].map((worker) => worker.tabId).filter((id) => id != null);
+  if (!tabIds.length || windowId == null) return;
+  await new Promise((resolve) => {
+    chrome.tabs.move(tabIds, { windowId, index: -1 }, () => {
       ignoreLastError();
       resolve();
     });
   });
 }
 
-function activatePoolTab(tabId) {
-  if (tabId == null) return;
-  chrome.tabs.get(tabId, (tab) => {
-    ignoreLastError();
-    if (!tab?.id) return;
-    chrome.tabs.highlight({ windowId: tab.windowId, tabs: [tab.index] }, ignoreLastError);
-    chrome.tabs.update(
-      tabId,
-      { active: true, highlighted: true, autoDiscardable: false },
+/* ------------------------------------------------------------------ */
+/* очередь                                                             */
+/* ------------------------------------------------------------------ */
+
+function hasWork() {
+  return state.requeue.length > 0 || state.cursor < state.postings.length;
+}
+
+function takeNext() {
+  if (state.requeue.length) return state.requeue.shift();
+  if (state.cursor < state.postings.length) return state.cursor++;
+  return null;
+}
+
+function putBack(index) {
+  if (index == null) return;
+  if (!state.requeue.includes(index)) state.requeue.unshift(index);
+}
+
+function setPhase(worker, phase, posting, via) {
+  worker.phase = phase;
+  if (posting !== undefined) worker.posting = posting;
+  if (via !== undefined) worker.via = via;
+  emitState();
+}
+
+function cleanPosting(posting) {
+  return String(posting || "").trim().replace(/^Lozon:/i, "");
+}
+
+function buildHistoryUrl(posting) {
+  return `https://hub.o3t.ru/management/stock/item/Lozon:${encodeURIComponent(cleanPosting(posting))}?&tab=history`;
+}
+
+function failItem(posting, status, extra) {
+  return { posting, status, found: false, expected: 0, loaded: 0, ok: false, via: "dom", ...(extra || {}) };
+}
+
+/* ------------------------------------------------------------------ */
+/* сканирование одного номера                                          */
+/* ------------------------------------------------------------------ */
+
+async function domScan(worker, posting) {
+  const conf = cfg();
+  const tabId = worker.tabId;
+  /* tabs.update(null, ...) уедет в активную вкладку пользователя. */
+  if (tabId == null) {
+    worker.retire = true;
+    return failItem(posting, "tab_error");
+  }
+  const taskId = `k${++taskSeq}`;
+  const url = buildHistoryUrl(posting);
+
+  let settle = null;
+  const answer = new Promise((resolve) => {
+    settle = resolve;
+  });
+
+  pendingByTab.set(tabId, {
+    taskId,
+    /* content script достаёт номер из адреса, там префикса Lozon: уже нет */
+    posting: cleanPosting(posting),
+    claimed: false,
+    resolve: settle,
+    job: {
+      taskId,
+      warehouse: state.warehouse,
+      timeoutMs: conf.scanTimeoutMs,
+      uncheckCurrentOnly: state.uncheckCurrentOnly
+    }
+  });
+
+  state.domInFlight += 1;
+  syncBoost();
+  setPhase(worker, "open", posting, "dom");
+
+  try {
+    const moved = await updateTab(tabId, { url, autoDiscardable: false });
+    if (!moved) return failItem(posting, "tab_error");
+    if (state.focusMode) activateTab(tabId);
+
+    /* Страховка: если content script не поднялся (например, расширение
+       только что обновили) — доставляем его руками. */
+    const rescue = setTimeout(() => {
+      const pending = pendingByTab.get(tabId);
+      if (!pending || pending.taskId !== taskId || pending.claimed) return;
+      injectScanner(tabId);
+    }, Math.min(7000, conf.navTimeoutMs));
+
+    /* Если за время навигации никто не забрал задание — смотрим, куда нас
+       вообще увело. Ждать полный таймаут на странице логина незачем. */
+    const strayCheck = await Promise.race([
+      answer.then((value) => ({ answered: value })),
+      sleep(conf.navTimeoutMs).then(() => ({ answered: null }))
+    ]);
+    if (strayCheck.answered === null) {
+      const pending = pendingByTab.get(tabId);
+      if (pending && pending.taskId === taskId && !pending.claimed) {
+        const current = await getTab(tabId);
+        const href = String(current?.url || "");
+        if (!href) {
+          clearTimeout(rescue);
+          return failItem(posting, "tab_error");
+        }
+        if (!/\/stock\/item\//i.test(href)) {
+          clearTimeout(rescue);
+          return failItem(posting, /login|sso|auth/i.test(href) ? "auth" : "no_history");
+        }
+      }
+    }
+
+    const verdict =
+      strayCheck.answered ||
+      (await Promise.race([
+        answer,
+        sleep(conf.scanTimeoutMs).then(() => ({ timeout: true })),
+        waitForStop().then(() => ({ stopped: true }))
+      ]));
+    clearTimeout(rescue);
+
+    if (verdict?.stopped) return failItem(posting, "stopped");
+    if (verdict?.timeout) return failItem(posting, "timeout");
+    return { posting, ...verdict };
+  } catch (error) {
+    return failItem(posting, "exception", { error: String(error?.message || error) });
+  } finally {
+    pendingByTab.delete(tabId);
+    state.domInFlight = Math.max(0, state.domInFlight - 1);
+    syncBoost();
+    setPhase(worker, "idle", "", "");
+  }
+}
+
+function injectScanner(tabId) {
+  try {
+    chrome.scripting.executeScript(
+      { target: { tabId }, files: ["netprobe.js"], world: "MAIN" },
       ignoreLastError
     );
-    if (state.aggressive) {
-      chrome.windows.update(tab.windowId, { focused: true, drawAttention: true }, ignoreLastError);
+    chrome.scripting.executeScript({ target: { tabId }, files: ["scanner.js"] }, ignoreLastError);
+  } catch (_err) {
+    /* ignore */
+  }
+}
+
+async function apiScan(worker, posting) {
+  const conf = cfg();
+  if (worker.tabId == null) {
+    worker.retire = true;
+    return null;
+  }
+  setPhase(worker, "api", posting, "api");
+  const reply = await Promise.race([
+    sendTab(worker.tabId, {
+      action: "ht:apiScan",
+      posting,
+      warehouse: state.warehouse,
+      timeoutMs: conf.apiTimeoutMs
+    }),
+    sleep(conf.apiTimeoutMs + 4000).then(() => null)
+  ]);
+  setPhase(worker, "idle", "", "");
+  if (!reply?.ok || !reply.result) return null;
+  return { posting, ...reply.result };
+}
+
+function isHardStop(item) {
+  return ["auth", "missing", "stopped", "paused"].includes(item?.status);
+}
+
+function betterOf(a, b) {
+  if (!b) return a;
+  if (!a) return b;
+  if (b.found !== a.found) return b.found ? b : a;
+  const aLoaded = Number(a.loaded) || 0;
+  const bLoaded = Number(b.loaded) || 0;
+  if (aLoaded !== bLoaded) return bLoaded > aLoaded ? b : a;
+  if (b.ok !== a.ok) return b.ok ? b : a;
+  return a;
+}
+
+function needsRetry(item, attempt) {
+  if (state.stopping || state.paused) return false;
+  if (!item) return true;
+  if (item.found) return false;
+  if (isHardStop(item)) return false;
+  if (item.ok && item.status === "complete") return false;
+  const conf = cfg();
+  if (item.status === "partial") return attempt <= conf.retryPartial;
+  return attempt <= conf.retryFail;
+}
+
+async function domScanWithRetry(worker, posting) {
+  let best = await domScan(worker, posting);
+  let attempt = 1;
+  while (needsRetry(best, attempt)) {
+    attempt += 1;
+    await sleep(150);
+    if (state.stopping) break;
+    best = betterOf(best, await domScan(worker, posting));
+  }
+  return best;
+}
+
+function apiAllowed(worker) {
+  return (
+    state.useApi &&
+    cfg().api &&
+    Boolean(state.recipe) &&
+    worker.hubReady &&
+    state.apiState !== "blocked"
+  );
+}
+
+const SAME_DIGEST_LIMIT = 4;
+
+/* Если на четыре разных номера подряд приходит байт-в-байт один ответ —
+   подстановка номера не работает и быстрому пути верить нельзя. */
+function watchDigest(item) {
+  const digest = item?.digest;
+  if (!digest) return;
+  state.apiDigests.push({ digest, posting: item.posting });
+  if (state.apiDigests.length > SAME_DIGEST_LIMIT) state.apiDigests.shift();
+  if (state.apiDigests.length < SAME_DIGEST_LIMIT) return;
+
+  const first = state.apiDigests[0].digest;
+  if (!state.apiDigests.every((entry) => entry.digest === first)) return;
+  const postings = new Set(state.apiDigests.map((entry) => entry.posting));
+  if (postings.size < SAME_DIGEST_LIMIT) return;
+
+  const back = requeueApiResults();
+  blockApi(
+    back
+      ? `Быстрый путь отдаёт одинаковый ответ на разные номера. Отключил его и переснимаю ${back} номер(ов).`
+      : "Быстрый путь отдаёт одинаковый ответ на разные номера. Отключил его."
+  );
+}
+
+function spotCheckDue() {
+  const every = cfg().spotCheckEvery;
+  if (!every) return false;
+  return state.apiSinceCheck >= every;
+}
+
+function blockApi(reason) {
+  if (state.apiState === "blocked") return;
+  state.apiState = "blocked";
+  state.apiDigests = [];
+  notice("api", reason);
+  emitState(true);
+}
+
+function requeueApiResults() {
+  if (!state.apiIndexes.size) return 0;
+  const indexes = [...state.apiIndexes];
+  state.apiIndexes.clear();
+  for (const index of indexes) {
+    if (state.results[index]) {
+      state.results[index] = null;
+      state.processed = Math.max(0, state.processed - 1);
     }
-  });
-}
-
-const WORKER_BOOST_INTERVAL_MS = 450;
-
-function stopWorkerBoost() {
-  if (state.boostTimerId != null) {
-    clearInterval(state.boostTimerId);
-    state.boostTimerId = null;
+    putBack(index);
   }
+  emit({ action: "scanRevalidate", indexes });
+  return indexes.length;
 }
 
-function workerBoostTick() {
-  if (!state.inProgress || state.stopRequested || !state.aggressive) return;
-  const tabIds = state.poolTabIds.slice();
-  if (!tabIds.length) return;
-  if (state.boostIndex >= tabIds.length) state.boostIndex = 0;
-  const tabId = tabIds[state.boostIndex];
-  state.boostIndex += 1;
-  activatePoolTab(tabId);
-}
-
-function startWorkerBoost() {
-  stopWorkerBoost();
-  if (!state.aggressive) return;
-  state.boostIndex = 0;
-  workerBoostTick();
-  state.boostTimerId = setInterval(workerBoostTick, WORKER_BOOST_INTERVAL_MS);
-}
-
-async function createTabPool(count, windowId) {
-  const tabIds = [];
-  if (state.blankTabId) {
-    tabIds.push(state.blankTabId);
-    state.blankTabId = null;
-  }
-  while (tabIds.length < count) {
-    const options = { url: "about:blank", active: false };
-    if (windowId) options.windowId = windowId;
-    const tab = await createTab(options);
-    if (!tab?.id) break;
-    tabIds.push(tab.id);
-  }
-  if (windowId) {
-    const tabs = await new Promise((resolve) => chrome.tabs.query({ windowId }, resolve));
-    const ordered = (tabs || [])
-      .slice()
-      .sort((a, b) => (a.index ?? 0) - (b.index ?? 0))
-      .map((tab) => tab.id)
-      .filter(Boolean);
-    if (ordered.length) {
-      tabIds.length = 0;
-      tabIds.push(...ordered.slice(0, count));
-    }
-  }
-  for (const id of tabIds) {
-    state.activeTabIds.add(id);
-    await updateTab(id, { autoDiscardable: false });
-  }
-  state.poolTabIds = tabIds.slice();
-  return state.poolTabIds;
-}
-
-function waitTabNavigate(tabId, timeoutMs) {
-  let finish = () => {};
-  const promise = new Promise((resolve) => {
-    let done = false;
-    let loading = false;
-    const timer = setTimeout(() => finish("timeout"), timeoutMs);
-
-    finish = (reason) => {
-      if (done) return;
-      done = true;
-      clearTimeout(timer);
-      chrome.tabs.onUpdated.removeListener(onUpdated);
-      chrome.tabs.onRemoved.removeListener(onRemoved);
-      resolve(reason);
-    };
-
-    function onUpdated(updatedId, info) {
-      if (updatedId !== tabId) return;
-      if (info.status === "loading") loading = true;
-      if (info.status === "complete" && loading) finish("complete");
-    }
-
-    function onRemoved(removedId) {
-      if (removedId === tabId) finish("removed");
-    }
-
-    chrome.tabs.get(tabId, (tab) => {
-      if (chrome.runtime.lastError) {
-        finish("missing");
-        return;
-      }
-      if (tab?.status === "loading") loading = true;
-    });
-    chrome.tabs.onUpdated.addListener(onUpdated);
-    chrome.tabs.onRemoved.addListener(onRemoved);
-  });
-  promise.cancel = (reason = "cancelled") => finish(reason);
-  return promise;
-}
-
-function closeTab(tabId) {
-  if (!tabId) return;
-  state.activeTabIds.delete(tabId);
-  state.poolTabIds = state.poolTabIds.filter((id) => id !== tabId);
-  chrome.tabs.remove(tabId, ignoreLastError);
-}
-
-function stopScan() {
-  if (state.stopRequested && !state.inProgress) {
-    closeWorkerWindow();
+function calibrate(api, dom, index) {
+  if (!api) {
+    state.apiFailStreak += 1;
+    if (state.apiFailStreak >= 3) blockApi("Быстрый режим недоступен на этой странице — работаю через DOM.");
     return;
   }
-  state.stopRequested = true;
-  notifyStop();
-  stopWorkerBoost();
-  for (const tabId of [...state.activeTabIds]) {
-    chrome.tabs.remove(tabId, ignoreLastError);
+  if (isHardStop(dom) || dom?.status === "timeout" || dom?.status === "tab_error") {
+    /* Сверить не с чем, но и застревать в двойном проходе на каждом номере
+       тоже не надо — отложим следующую сверку. */
+    state.apiSinceCheck = 0;
+    return;
   }
-  state.activeTabIds.clear();
-  closeWorkerWindow();
-  void persistRuntime();
+
+  state.apiSinceCheck = 0;
+  if (Boolean(api.found) === Boolean(dom?.found)) {
+    state.apiFailStreak = 0;
+    if (state.apiState !== "trusted") {
+      state.apiState = "trusted";
+      notice("api", "Быстрый режим включён: история читается напрямую.");
+      emitState(true);
+    }
+    return;
+  }
+
+  const back = requeueApiResults();
+  blockApi(
+    back
+      ? `Быстрый режим разошёлся с обходом DOM на ${dom?.posting || index}. Отключил его и переснимаю ${back} номер(ов).`
+      : `Быстрый режим разошёлся с обходом DOM на ${dom?.posting || index}. Отключил его.`
+  );
 }
+
+async function processOne(worker, posting, index) {
+  if (apiAllowed(worker)) {
+    if (state.apiState === "trusted" && !spotCheckDue()) {
+      const api = await apiScan(worker, posting);
+      if (api) {
+        state.apiFailStreak = 0;
+        state.apiSinceCheck += 1;
+        state.apiIndexes.add(index);
+        watchDigest(api);
+        return api;
+      }
+      state.apiFailStreak += 1;
+      if (state.apiFailStreak >= 3) blockApi("Быстрый режим перестал отвечать — вернулся к обходу DOM.");
+    } else {
+      /* Калибровка и периодические сверки: считаем оба пути и сравниваем. */
+      const api = await apiScan(worker, posting);
+      if (state.stopping) return failItem(posting, "stopped");
+      const dom = await domScanWithRetry(worker, posting);
+      calibrate(api, dom, index);
+      return dom;
+    }
+  }
+
+  return domScanWithRetry(worker, posting);
+}
+
+/* ------------------------------------------------------------------ */
+/* цикл воркера                                                        */
+/* ------------------------------------------------------------------ */
+
+function commit(index, item) {
+  state.results[index] = item;
+  state.processed += 1;
+  emit({
+    action: "scanProgress",
+    jobId: state.jobId,
+    index,
+    item,
+    processed: state.processed,
+    total: state.postings.length,
+    elapsedMs: elapsedMs(),
+    rate: ratePerMin(),
+    etaMs: etaMs()
+  });
+  persistRuntimeSoon();
+}
+
+async function workerLoop(worker) {
+  try {
+    while (state.running && !state.stopping && !worker.retire && worker.id <= state.threads) {
+      await gate();
+      if (!state.running || state.stopping || worker.retire || worker.id > state.threads) break;
+
+      const index = takeNext();
+      if (index == null) break;
+
+      const posting = state.postings[index];
+      let item;
+      try {
+        item = await processOne(worker, posting, index);
+      } catch (error) {
+        item = failItem(posting, "exception", { error: String(error?.message || error) });
+      }
+
+      if (state.stopping) {
+        putBack(index);
+        break;
+      }
+      if (item?.status === "paused" || item?.status === "stopped") {
+        putBack(index);
+        continue;
+      }
+      /* Пока мы решали, что быстрому пути верить нельзя, соседний воркер мог
+         уже получить по нему ответ. Такой результат не засчитываем. */
+      if (item?.via === "api" && state.apiState === "blocked") {
+        state.apiIndexes.delete(index);
+        putBack(index);
+        continue;
+      }
+      commit(index, item || failItem(posting, "script_error"));
+    }
+  } finally {
+    retireWorker(worker);
+  }
+}
+
+function maybeFinalize() {
+  if (!state.running || state.finalized) return;
+  if (state.liveWorkers > 0) return;
+  if (!state.stopping && state.paused) return;
+  if (!state.stopping && hasWork()) {
+    ensureWorkers();
+    if (state.liveWorkers > 0) return;
+  }
+  void finalize();
+}
+
+async function finalize() {
+  if (state.finalized) return;
+  state.finalized = true;
+
+  const stopped = state.stopping || state.processed < state.postings.length;
+  const results = [];
+  for (let i = 0; i < state.postings.length; i += 1) {
+    results.push(
+      state.results[i] || {
+        posting: state.postings[i],
+        status: "stopped",
+        found: false,
+        expected: 0,
+        loaded: 0,
+        ok: false
+      }
+    );
+  }
+
+  const finished = {
+    jobId: state.jobId,
+    stopped,
+    warehouse: state.warehouse,
+    mode: state.mode,
+    inputCount: state.postings.length,
+    durationMs: elapsedMs(),
+    results,
+    finishedAt: Date.now()
+  };
+
+  state.running = false;
+  state.paused = false;
+  state.stopping = false;
+  state.domInFlight = 0;
+  stopBoost();
+  releaseGate();
+  releaseStop();
+  pendingByTab.clear();
+  for (const worker of [...state.workers.values()]) removeTab(worker.tabId);
+  state.workers.clear();
+  state.liveWorkers = 0;
+  closeWorkerWindow();
+
+  await storageSet({ [STORAGE_FINISHED]: finished });
+  await persistRuntime();
+  notifyFinished(finished);
+  emit({ action: "scanFinished", jobId: finished.jobId, stopped, finished });
+  emitState(true);
+}
+
+function notifyFinished(finished) {
+  const results = Array.isArray(finished?.results) ? finished.results : [];
+  const hits = results.filter((item) => item?.found).length;
+  const checked = results.filter((item) => item?.status !== "stopped").length;
+  const total = Number(finished?.inputCount) || results.length;
+  const seconds = Math.round((Number(finished?.durationMs) || 0) / 1000);
+  const title = finished?.stopped ? "Hub Trace · остановлено" : "Hub Trace · готово";
+  const message = finished?.stopped
+    ? `Проверено ${checked} из ${total}. Нашлось ${hits}.`
+    : `Было ${total}, нашлось ${hits}. За ${seconds} с.`;
+
+  try {
+    chrome.notifications.create(
+      `hub-trace-done-${Date.now()}`,
+      { type: "basic", iconUrl: "icons/icon-128.png", title, message, priority: 2 },
+      ignoreLastError
+    );
+  } catch (_err) {
+    /* ignore */
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* запуск                                                              */
+/* ------------------------------------------------------------------ */
+
+function normalizeSettings(raw) {
+  const mode = MODES[raw?.mode] ? raw.mode : DEFAULT_SETTINGS.mode;
+  return {
+    mode,
+    threads: Math.max(1, Math.min(MAX_THREADS, Number(raw?.threads) || MODES[mode].threads)),
+    focusMode: raw?.focusMode !== false,
+    workerWindow: raw?.workerWindow !== false,
+    useApi: raw?.useApi !== false,
+    uncheckCurrentOnly: raw?.uncheckCurrentOnly === true
+  };
+}
+
+function validateScan(payload) {
+  const postings = Array.isArray(payload?.postings) ? payload.postings.filter(Boolean) : [];
+  const warehouse = String(payload?.warehouse || "").trim();
+  if (state.running) return { ok: false, error: "Уже идёт проверка" };
+  if (!postings.length) return { ok: false, error: "Нет номеров отправлений" };
+  if (!warehouse) return { ok: false, error: "Не указан склад" };
+  return { ok: true, postings, warehouse };
+}
+
+async function runScan(payload, postings, warehouse) {
+  const settings = normalizeSettings(payload?.settings);
+
+  await storageRemove([STORAGE_FINISHED]);
+
+  state.running = true;
+  state.finalized = false;
+  state.paused = false;
+  state.stopping = false;
+  state.jobId = payload?.jobId || `job-${Date.now()}`;
+  state.warehouse = warehouse;
+  state.postings = postings;
+  state.results = new Array(postings.length).fill(null);
+  state.cursor = 0;
+  state.requeue = [];
+  state.processed = 0;
+  state.mode = settings.mode;
+  state.threads = settings.threads;
+  state.focusMode = settings.focusMode;
+  state.workerWindow = settings.workerWindow;
+  state.useApi = settings.useApi;
+  state.uncheckCurrentOnly = settings.uncheckCurrentOnly;
+  state.apiState = "unknown";
+  state.apiNote = "";
+  state.apiFailStreak = 0;
+  state.apiSinceCheck = 0;
+  state.apiIndexes = new Set();
+  state.apiDigests = [];
+  state.domInFlight = 0;
+  state.startedAt = Date.now();
+  state.pausedAt = 0;
+  state.pausedMs = 0;
+  pauseWaiters.clear();
+  resetStopSignal();
+  pendingByTab.clear();
+
+  const savedSettings = await new Promise((resolve) => chrome.storage.local.get([STORAGE_SETTINGS], resolve));
+  await storageSet({
+    [STORAGE_SETTINGS]: {
+      ...(savedSettings[STORAGE_SETTINGS] || {}),
+      ...settings,
+      warehouse,
+      lastPostings: payload?.lastPostings || savedSettings[STORAGE_SETTINGS]?.lastPostings || ""
+    }
+  });
+  await persistRuntime();
+
+  emit({
+    action: "scanProgress",
+    jobId: state.jobId,
+    index: -1,
+    item: null,
+    processed: 0,
+    total: postings.length
+  });
+  emitState(true);
+
+  try {
+    await ensureWorkerWindow();
+    ensureWorkers();
+    if (!state.liveWorkers) {
+      notice("error", "Не удалось открыть вкладки для проверки.");
+      await finalize();
+    }
+    syncBoost();
+  } catch (error) {
+    notice("error", String(error?.message || error));
+    await finalize();
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* смена настроек на лету                                              */
+/* ------------------------------------------------------------------ */
+
+async function applyLiveSettings(raw) {
+  const before = {
+    threads: state.threads,
+    workerWindow: state.workerWindow
+  };
+
+  if (raw?.mode && MODES[raw.mode] && raw.mode !== state.mode) {
+    state.mode = raw.mode;
+    if (raw.threads == null) state.threads = MODES[raw.mode].threads;
+    if (!MODES[raw.mode].api) {
+      state.apiSinceCheck = 0;
+    }
+  }
+  if (raw?.threads != null) {
+    state.threads = Math.max(1, Math.min(MAX_THREADS, Number(raw.threads) || state.threads));
+  }
+  if (raw?.focusMode != null) state.focusMode = Boolean(raw.focusMode);
+  if (raw?.uncheckCurrentOnly != null) state.uncheckCurrentOnly = Boolean(raw.uncheckCurrentOnly);
+  if (raw?.useApi != null) {
+    const next = Boolean(raw.useApi);
+    if (next && !state.useApi && state.apiState === "blocked") state.apiState = "unknown";
+    state.useApi = next;
+  }
+  if (raw?.workerWindow != null) state.workerWindow = Boolean(raw.workerWindow);
+
+  if (state.running) {
+    /* Сжатие пула: лишние воркеры уходят после текущего номера. */
+    for (const worker of state.workers.values()) worker.retire = worker.id > state.threads;
+
+    if (state.workerWindow !== before.workerWindow) {
+      if (state.workerWindow) {
+        const windowId = await ensureWorkerWindow();
+        if (windowId != null) await moveWorkerTabsTo(windowId);
+      } else {
+        const windowId = state.workerWindowId;
+        state.workerWindowId = null;
+        state.ownsWorkerWindow = false;
+        const app = await new Promise((resolve) => {
+          chrome.tabs.query({ url: chrome.runtime.getURL(APP_PATH) }, (tabs) => {
+            ignoreLastError();
+            resolve(tabs && tabs[0] ? tabs[0].windowId : null);
+          });
+        });
+        if (app != null) await moveWorkerTabsTo(app);
+        if (windowId != null) {
+          chrome.windows.remove(windowId, ignoreLastError);
+        }
+      }
+    }
+
+    if (state.threads > before.threads && !state.paused) ensureWorkers();
+    syncBoost();
+  }
+
+  const settings = {
+    mode: state.mode,
+    threads: state.threads,
+    focusMode: state.focusMode,
+    workerWindow: state.workerWindow,
+    useApi: state.useApi,
+    uncheckCurrentOnly: state.uncheckCurrentOnly
+  };
+  const saved = await new Promise((resolve) => chrome.storage.local.get([STORAGE_SETTINGS], resolve));
+  await storageSet({ [STORAGE_SETTINGS]: { ...(saved[STORAGE_SETTINGS] || {}), ...settings } });
+
+  emitState(true);
+  return settings;
+}
+
+/* ------------------------------------------------------------------ */
+/* приложение                                                          */
+/* ------------------------------------------------------------------ */
 
 async function openAppWindow() {
   const url = chrome.runtime.getURL(APP_PATH);
@@ -364,372 +1184,152 @@ async function openAppWindow() {
     await chrome.tabs.update(existing[0].id, { active: true });
     return;
   }
-  await chrome.windows.create({
-    url,
-    type: "normal",
-    state: "maximized",
-    focused: true
-  });
+  await chrome.windows.create({ url, type: "normal", state: "maximized", focused: true });
 }
 
-function shouldRetry(item) {
-  if (state.stopRequested) return false;
-  if (!item) return true;
-  if (item.status === "stopped") return false;
-  if (item.found) return false;
-  if (item.ok && item.status === "complete") return false;
-  return true;
-}
-
-async function runScanner(tabId, settings) {
-  await chrome.scripting.executeScript({
-    target: { tabId },
-    files: ["scanner.js"]
-  });
-  const injected = await chrome.scripting.executeScript({
-    target: { tabId },
-    func: (options) => globalThis.__hubTraceScan(options),
-    args: [
-      {
-        warehouse: settings.warehouse,
-        timeoutMs: 180000,
-        uncheckCurrentOnly: false
-      }
-    ]
-  });
-  return injected?.[0]?.result || null;
-}
-
-async function scanOne(posting, settings, tabId, forceReload = false) {
-  if (state.stopRequested) return stoppedItem(posting);
-  if (!tabId) {
-    return { posting, status: "tab_error", found: false, expected: 0, loaded: 0, ok: false };
-  }
-
-  const url = buildHistoryUrl(posting);
-  const existing = await getTab(tabId);
-  if (!existing) {
-    return { posting, status: "tab_error", found: false, expected: 0, loaded: 0, ok: false };
-  }
-
-  const samePage = String(existing.url || "").split("#")[0] === url.split("#")[0];
-  const navWait = waitTabNavigate(tabId, 25000);
-  if (forceReload || samePage) {
-    if (!samePage) {
-      const moved = await updateTab(tabId, { url, autoDiscardable: false });
-      if (!moved) {
-        navWait.cancel("missing");
-        return { posting, status: "tab_error", found: false, expected: 0, loaded: 0, ok: false };
-      }
-    }
-    await reloadTab(tabId);
-  } else {
-    const updated = await updateTab(tabId, { url, autoDiscardable: false });
-    if (!updated) {
-      navWait.cancel("missing");
-      return { posting, status: "tab_error", found: false, expected: 0, loaded: 0, ok: false };
-    }
-  }
-  if (state.aggressive) activatePoolTab(tabId);
-  if (state.stopRequested) {
-    navWait.cancel("stopped");
-    return stoppedItem(posting);
-  }
-
-  try {
-    const ready = await Promise.race([navWait, waitForStop().then(() => "stopped")]);
-    if (state.stopRequested || ready === "stopped" || ready === "removed" || ready === "missing") {
-      navWait.cancel("stopped");
-      return stoppedItem(posting);
-    }
-
-    const zoomChanged = await setTabZoom(tabId, 0.25);
-    if (zoomChanged) await Promise.race([sleep(80), waitForStop()]);
-    if (state.stopRequested) return stoppedItem(posting);
-
-    const result = await Promise.race([
-      runScanner(tabId, settings).catch((error) => ({
-        posting,
-        status: "exception",
-        found: false,
-        expected: 0,
-        loaded: 0,
-        ok: false,
-        error: String(error?.message || error)
-      })),
-      waitForStop().then(() => null)
-    ]);
-    if (state.stopRequested || result == null) return stoppedItem(posting);
-    if (!result.status && result.found == null) {
-      return { posting, status: "script_error", found: false, expected: 0, loaded: 0, ok: false };
-    }
-    return { posting, ...result };
-  } catch (error) {
-    if (state.stopRequested) return stoppedItem(posting);
-    return {
-      posting,
-      status: "exception",
-      found: false,
-      expected: 0,
-      loaded: 0,
-      ok: false,
-      error: String(error?.message || error)
-    };
-  }
-}
-
-function pickBetterScan(a, b) {
-  if (!b) return a;
-  if (!a) return b;
-  if (b.found && !a.found) return b;
-  if (a.found && !b.found) return a;
-  const aLoad = Number(a.loaded) || 0;
-  const bLoad = Number(b.loaded) || 0;
-  if (bLoad !== aLoad) return bLoad > aLoad ? b : a;
-  if (b.ok && !a.ok) return b;
-  if (b.status === "complete" && a.status !== "complete") return b;
-  return a;
-}
-
-function extraAttempts(item) {
-  if (!item) return 1;
-  if (item.status === "partial" && !item.found) return 3;
-  if (shouldRetry(item)) return 1;
-  return 0;
-}
-
-async function scanOneWithRetry(posting, settings, tabId) {
-  let best = await scanOne(posting, settings, tabId, false);
-  let used = 0;
-  while (!state.stopRequested) {
-    const extra = extraAttempts(best);
-    if (used >= extra) break;
-    if (best?.found || (best?.ok && best?.status === "complete")) break;
-    used += 1;
-    await Promise.race([sleep(200), waitForStop()]);
-    if (state.stopRequested) return best;
-    const next = await scanOne(posting, settings, tabId, true);
-    best = pickBetterScan(best, next);
-  }
-  return best;
-}
-
-function validateScan(payload) {
-  const postings = Array.isArray(payload?.postings) ? payload.postings.filter(Boolean) : [];
-  const warehouse = String(payload?.warehouse || "").trim();
-  if (state.inProgress) return { ok: false, error: "Уже идёт сканирование" };
-  if (!postings.length) return { ok: false, error: "Нет номеров отправлений" };
-  if (!warehouse) return { ok: false, error: "Не указан склад" };
-  return { ok: true, postings, warehouse };
-}
-
-function notifyFinished(finished) {
-  const results = Array.isArray(finished?.results) ? finished.results : [];
-  const hits = results.filter((item) => item?.found).length;
-  const checked = results.filter((item) => item?.status !== "stopped").length;
-  const total = Number(finished?.inputCount) || results.length;
-  const title = finished?.stopped ? "Hub Trace · остановлено" : "Hub Trace · готово";
-  const message = finished?.error
-    ? String(finished.error)
-    : finished?.stopped
-      ? `Проверено ${checked} из ${total}. Нашлось ${hits}.`
-      : `Было ${total}, нашлось ${hits}.`;
-  chrome.notifications.create(
-    `hub-trace-done-${Date.now()}`,
-    {
-      type: "basic",
-      iconUrl: "icons/icon-128.png",
-      title,
-      message,
-      priority: 2
-    },
-    ignoreLastError
-  );
-}
-
-async function runScan(payload, postings, warehouse) {
-  const settings = {
-    ...DEFAULT_SETTINGS,
-    ...(payload.settings || {}),
-    warehouse,
-    zoom: 0.25,
-    timeoutSec: 180,
-    uncheckCurrentOnly: false
-  };
-
-  await storageRemove([STORAGE_FINISHED]);
-  state.inProgress = true;
-  state.stopRequested = false;
-  stopWaiters.clear();
-  state.jobId = payload.jobId || `job-${Date.now()}`;
-  state.processed = 0;
-  state.total = postings.length;
-  state.threads = Math.max(1, Math.min(12, Number(settings.threads) || 4));
-  state.activeTabIds.clear();
-
-  try {
-    state.workerWindowId = await ensureWorkerWindow(settings.workerWindow !== false, settings.focusMode);
-    state.aggressive = settings.focusMode !== false;
-    const pool = await createTabPool(state.threads, state.workerWindowId);
-    if (pool.length) state.threads = Math.min(state.threads, pool.length);
-    if (!state.workerWindowId && pool[0]) {
-      const tab = await new Promise((resolve) => {
-        chrome.tabs.get(pool[0], (item) => {
-          ignoreLastError();
-          resolve(item || null);
-        });
-      });
-      if (tab?.windowId) state.workerWindowId = tab.windowId;
-    }
-    if (state.aggressive) startWorkerBoost();
-    await persistRuntime();
-    await storageSet({ [STORAGE_SETTINGS]: settings });
-
-    emit({
-      action: "scanProgress",
-      jobId: state.jobId,
-      processed: 0,
-      total: state.total,
-      item: null
-    });
-
-    const results = [];
-    let cursor = 0;
-
-    async function worker(workerId) {
-      const tabId = pool[workerId - 1];
-      while (!state.stopRequested) {
-        const index = cursor++;
-        if (index >= postings.length) break;
-        const posting = postings[index];
-        const item = await scanOneWithRetry(posting, settings, tabId);
-        if (item?.status === "stopped") {
-          results[index] = item;
-          continue;
-        }
-        results[index] = item;
-        state.processed += 1;
-        await persistRuntime();
-        emit({
-          action: "scanProgress",
-          jobId: state.jobId,
-          processed: state.processed,
-          total: state.total,
-          workerId,
-          item
-        });
-      }
-    }
-
-    if (!state.stopRequested) {
-      await Promise.all(Array.from({ length: state.threads }, (_, i) => worker(i + 1)));
-    }
-
-    if (state.stopRequested) {
-      for (let i = 0; i < postings.length; i += 1) {
-        if (!results[i]) results[i] = stoppedItem(postings[i]);
-      }
-    }
-
-    const finished = {
-      jobId: state.jobId,
-      stopped: state.stopRequested,
-      warehouse: settings.warehouse,
-      inputCount: postings.length,
-      results: results.filter(Boolean),
-      finishedAt: Date.now()
-    };
-    await storageSet({ [STORAGE_FINISHED]: finished });
-    notifyFinished(finished);
-    emit({ action: "scanFinished", jobId: state.jobId, stopped: state.stopRequested });
-  } catch (error) {
-    await storageSet({
-      [STORAGE_FINISHED]: {
-        jobId: state.jobId,
-        stopped: true,
-        warehouse: settings.warehouse,
-        inputCount: postings.length,
-        results: [],
-        error: String(error?.message || error),
-        finishedAt: Date.now()
-      }
-    });
-    notifyFinished({
-      stopped: true,
-      warehouse: settings.warehouse,
-      inputCount: postings.length,
-      results: [],
-      error: String(error?.message || error)
-    });
-    emit({
-      action: "scanFinished",
-      jobId: state.jobId,
-      stopped: true,
-      error: String(error?.message || error)
-    });
-  } finally {
-    state.inProgress = false;
-    state.stopRequested = false;
-    state.aggressive = false;
-    stopWaiters.clear();
-    stopWorkerBoost();
-    state.activeTabIds.clear();
-    closeWorkerWindow();
-    await persistRuntime();
-  }
-}
-
-chrome.notifications.onClicked.addListener(() => {
-  void openAppWindow();
-});
+chrome.action.onClicked.addListener(() => void openAppWindow());
+chrome.notifications.onClicked.addListener(() => void openAppWindow());
 
 chrome.windows.onRemoved.addListener((windowId) => {
   if (windowId !== state.workerWindowId) return;
   state.workerWindowId = null;
-  state.blankTabId = null;
-  if (state.inProgress) stopScan();
+  state.ownsWorkerWindow = false;
+  if (state.running) stopScan();
+});
+
+chrome.tabs.onRemoved.addListener((tabId) => {
+  const pending = pendingByTab.get(tabId);
+  if (pending) {
+    pendingByTab.delete(tabId);
+    pending.resolve({ status: "tab_error", found: false, expected: 0, loaded: 0, ok: false });
+  }
+  for (const worker of state.workers.values()) {
+    if (worker.tabId !== tabId) continue;
+    worker.retire = true;
+    worker.tabId = null;
+  }
 });
 
 chrome.runtime.onConnect.addListener((port) => {
   if (port.name !== "hub-trace-keepalive") return;
-  port.onDisconnect.addListener(() => {});
+  port.onMessage.addListener(() => {
+    try {
+      port.postMessage({ pong: Date.now() });
+    } catch (_err) {
+      /* ignore */
+    }
+  });
+  port.onDisconnect.addListener(ignoreLastError);
 });
 
-chrome.action.onClicked.addListener(() => {
-  void openAppWindow();
-});
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  const action = message?.action;
 
-chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-  if (message?.action === "openApp") {
+  /* --- из content script --- */
+
+  if (action === "ht:hello") {
+    const tabId = sender?.tab?.id;
+    const pending = tabId != null ? pendingByTab.get(tabId) : null;
+    for (const worker of state.workers.values()) {
+      if (worker.tabId === tabId) {
+        worker.hubReady = true;
+        if (state.recipe) void sendTab(tabId, { action: "ht:setRecipe", recipe: state.recipe });
+      }
+    }
+    if (!pending || pending.posting !== message.posting) {
+      sendResponse({ run: false });
+      return false;
+    }
+    pending.claimed = true;
+    sendResponse({ run: true, job: pending.job });
+    return false;
+  }
+
+  if (action === "ht:result") {
+    const tabId = sender?.tab?.id;
+    const pending = tabId != null ? pendingByTab.get(tabId) : null;
+    if (pending && pending.taskId === message.taskId) {
+      pendingByTab.delete(tabId);
+      pending.resolve(message.result || { status: "script_error", found: false, expected: 0, loaded: 0, ok: false });
+    }
+    sendResponse({ ok: true });
+    return false;
+  }
+
+  if (action === "ht:phase") {
+    const tabId = sender?.tab?.id;
+    for (const worker of state.workers.values()) {
+      if (worker.tabId !== tabId) continue;
+      worker.phase = message.phase || "idle";
+      if (message.posting) worker.posting = message.posting;
+      emitState();
+    }
+    sendResponse({ ok: true });
+    return false;
+  }
+
+  if (action === "ht:recipe") {
+    const next = message.recipe;
+    if (next?.itemId && (!state.recipe || (Number(next.score) || 0) > (Number(state.recipe.score) || 0))) {
+      state.recipe = next;
+      for (const worker of state.workers.values()) {
+        if (worker.tabId != null) void sendTab(worker.tabId, { action: "ht:setRecipe", recipe: next });
+      }
+      emitState();
+    }
+    sendResponse({ ok: true });
+    return false;
+  }
+
+  /* --- из приложения --- */
+
+  if (action === "openApp") {
     void openAppWindow().then(() => sendResponse({ ok: true }));
     return true;
   }
-  if (message?.action === "startScan") {
+
+  if (action === "startScan") {
     const check = validateScan(message);
-    if (check.ok) state.inProgress = true;
-    sendResponse(check);
-    if (check.ok) void runScan(message, check.postings, check.warehouse);
+    if (!check.ok) {
+      sendResponse(check);
+      return false;
+    }
+    state.running = true;
+    state.finalized = false;
+    sendResponse({ ok: true });
+    void runScan(message, check.postings, check.warehouse);
     return false;
   }
-  if (message?.action === "stopScan") {
+
+  if (action === "pauseScan") {
+    setPaused(message.paused !== false);
+    sendResponse({ ok: true, paused: state.paused });
+    return false;
+  }
+
+  if (action === "stopScan") {
     stopScan();
     sendResponse({ ok: true });
     return false;
   }
-  if (message?.action === "workerBoostTick") {
-    workerBoostTick();
-    sendResponse({ ok: true });
-    return false;
+
+  if (action === "updateSettings") {
+    void applyLiveSettings(message.settings).then((settings) => sendResponse({ ok: true, settings }));
+    return true;
   }
-  if (message?.action === "getScanState") {
+
+  if (action === "getScanState") {
     sendResponse({
-      inProgress: state.inProgress,
-      processed: state.processed,
-      total: state.total,
-      threads: state.threads,
-      jobId: state.jobId
+      ...snapshot(),
+      results: state.running ? state.results.map((item, index) => (item ? { index, item } : null)).filter(Boolean) : []
     });
     return false;
   }
+
+  if (action === "keepAlive") {
+    sendResponse({ ok: true, at: Date.now() });
+    return false;
+  }
+
   return false;
 });
