@@ -47,6 +47,7 @@ const ui = {
   hasResults: false,
   currentStep: "input",
   apiState: "unknown",
+  apiNote: "",
   elapsedMs: 0,
   elapsedAt: 0,
   rate: 0,
@@ -547,10 +548,33 @@ function scanMode() {
 
 function renderApiBadge() {
   const badge = $("api-badge");
-  if (!badge) return;
-  const on = settings.useApi && ui.apiState === "trusted";
-  badge.hidden = !on;
-  badge.textContent = "быстрый путь";
+  if (badge) {
+    const on = settings.useApi && ui.apiState === "trusted";
+    badge.hidden = !on;
+    badge.textContent = "быстрый путь";
+  }
+
+  /* Всплывашка живёт пять секунд, а знать состояние надо всё время. */
+  let text = "";
+  let tone = "";
+  if (!settings.useApi) {
+    text = "выключен вручную";
+  } else if (ui.apiState === "trusted") {
+    text = "включён — история читается запросом";
+    tone = "is-on";
+  } else if (ui.apiState === "blocked") {
+    text = ui.apiNote || "отключён, работаю через DOM";
+    tone = "is-off";
+  } else if (ui.running) {
+    text = "проверяю на первых номерах";
+  }
+
+  for (const el of $$("[data-api-state]")) {
+    el.hidden = !text;
+    el.textContent = text;
+    el.classList.toggle("is-on", tone === "is-on");
+    el.classList.toggle("is-off", tone === "is-off");
+  }
 }
 
 function renderRunState() {
@@ -919,6 +943,7 @@ async function startScan() {
   ui.hasResults = false;
   ui.finished = null;
   ui.apiState = "unknown";
+  ui.apiNote = "";
 
   const saved = await storageGet([STORAGE_SETTINGS]);
   await storageSet({
@@ -1126,6 +1151,7 @@ function absorbState(next) {
   ui.paused = Boolean(next.paused);
   ui.stopping = Boolean(next.stopping);
   ui.apiState = next.apiState || "unknown";
+  ui.apiNote = next.apiNote || "";
   ui.workers = Array.isArray(next.workers) ? next.workers : [];
   ui.elapsedMs = Number(next.elapsedMs) || 0;
   ui.elapsedAt = Date.now();
@@ -1175,6 +1201,10 @@ chrome.runtime.onMessage.addListener((message) => {
 
   if (message?.action === "scanNotice") {
     toast(message.level === "error" ? "error" : message.level === "api" ? "api" : "ok", message.text);
+    if (message.level === "api") {
+      ui.apiNote = message.text;
+      renderApiBadge();
+    }
     return;
   }
 

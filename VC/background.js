@@ -89,6 +89,10 @@ const state = {
   apiSinceCheck: 0,
   apiIndexes: new Set(),
   apiDigests: [],
+  apiBlockKind: "",
+  apiLastReason: "",
+  apiRetryAt: 0,
+  apiRetries: 0,
 
   workers: new Map(),
   liveWorkers: 0,
@@ -247,6 +251,8 @@ function snapshot() {
     useApi: state.useApi,
     apiState: state.apiState,
     apiNote: state.apiNote,
+    apiBlockKind: state.apiBlockKind,
+    apiRetryAt: state.apiRetryAt,
     elapsedMs: elapsedMs(),
     rate: ratePerMin(),
     etaMs: etaMs(),
@@ -764,7 +770,10 @@ async function apiScan(worker, posting) {
     sleep(conf.apiTimeoutMs + 4000).then(() => null)
   ]);
   setPhase(worker, "idle", "", "");
-  if (!reply?.ok || !reply.result) return null;
+  if (!reply?.ok || !reply.result) {
+    state.apiLastReason = reply?.reason || "нет ответа от вкладки";
+    return null;
+  }
   return { posting, ...reply.result };
 }
 
@@ -807,13 +816,9 @@ async function domScanWithRetry(worker, posting) {
 }
 
 function apiAllowed(worker) {
-  return (
-    state.useApi &&
-    cfg().api &&
-    Boolean(state.recipe) &&
-    worker.hubReady &&
-    state.apiState !== "blocked"
-  );
+  if (!state.useApi || !cfg().api || !state.recipe || !worker.hubReady) return false;
+  if (state.apiState === "blocked") return apiRetryDue();
+  return true;
 }
 
 const SAME_DIGEST_LIMIT = 4;
@@ -836,7 +841,8 @@ function watchDigest(item) {
   blockApi(
     back
       ? `Быстрый путь отдаёт одинаковый ответ на разные номера. Отключил его и переснимаю ${back} номер(ов).`
-      : "Быстрый путь отдаёт одинаковый ответ на разные номера. Отключил его."
+      : "Быстрый путь отдаёт одинаковый ответ на разные номера. Отключил его.",
+    "mismatch"
   );
 }
 
@@ -846,12 +852,49 @@ function spotCheckDue() {
   return state.apiSinceCheck >= every;
 }
 
-function blockApi(reason) {
+const API_RETRY_BASE_MS = 45000;
+const API_MAX_RETRIES = 3;
+
+/*
+ * Отказ отказу рознь. Расхождение с обходом DOM или одинаковые ответы на
+ * разные номера — это про неверные данные, тут возврата быть не может.
+ * А недоступность (таймаут, 401 на обновлении токена, разовый сбой сети) —
+ * временная, и раньше она навсегда роняла быстрый путь на весь прогон.
+ */
+function blockApi(reason, kind) {
   if (state.apiState === "blocked") return;
   state.apiState = "blocked";
+  state.apiBlockKind = kind || "mismatch";
   state.apiDigests = [];
-  notice("api", reason);
+
+  let text = reason;
+  if (state.apiBlockKind === "unavailable" && state.apiRetries < API_MAX_RETRIES) {
+    const wait = API_RETRY_BASE_MS * Math.pow(2, state.apiRetries);
+    state.apiRetryAt = Date.now() + wait;
+    text = `${reason} Попробую снова через ${Math.round(wait / 1000)} с.`;
+  } else {
+    state.apiRetryAt = 0;
+  }
+
+  notice("api", text);
   emitState(true);
+}
+
+/* Кулдаун вышел — даём быстрому пути ещё один шанс через калибровку. */
+function apiRetryDue() {
+  if (state.apiState !== "blocked") return false;
+  if (state.apiBlockKind !== "unavailable") return false;
+  if (!state.apiRetryAt || Date.now() < state.apiRetryAt) return false;
+
+  state.apiRetries += 1;
+  state.apiRetryAt = 0;
+  state.apiBlockKind = "";
+  state.apiState = "unknown";
+  state.apiFailStreak = 0;
+  state.apiSinceCheck = 0;
+  notice("api", `Пробую быстрый путь заново (попытка ${state.apiRetries} из ${API_MAX_RETRIES}).`);
+  emitState(true);
+  return true;
 }
 
 function requeueApiResults() {
@@ -872,7 +915,9 @@ function requeueApiResults() {
 function calibrate(api, dom, index) {
   if (!api) {
     state.apiFailStreak += 1;
-    if (state.apiFailStreak >= 3) blockApi("Быстрый режим недоступен на этой странице — работаю через DOM.");
+    if (state.apiFailStreak >= 3) {
+      blockApi(`Быстрый путь недоступен: ${state.apiLastReason || "нет ответа"}. Работаю через DOM.`, "unavailable");
+    }
     return;
   }
   if (isHardStop(dom) || dom?.status === "timeout" || dom?.status === "tab_error") {
@@ -885,9 +930,15 @@ function calibrate(api, dom, index) {
   state.apiSinceCheck = 0;
   if (Boolean(api.found) === Boolean(dom?.found)) {
     state.apiFailStreak = 0;
+    /* Сверка могла быть запущена соседним воркером ещё до блокировки.
+       Снимать её результатом такой сверки нельзя — иначе путь, признанный
+       ненадёжным, тихо включался бы обратно. */
+    if (state.apiState === "blocked") return;
     if (state.apiState !== "trusted") {
       state.apiState = "trusted";
-      notice("api", "Быстрый режим включён: история читается напрямую.");
+      state.apiRetries = 0;
+      state.apiBlockKind = "";
+      notice("api", "Быстрый путь включён: история читается напрямую.");
       emitState(true);
     }
     return;
@@ -896,8 +947,9 @@ function calibrate(api, dom, index) {
   const back = requeueApiResults();
   blockApi(
     back
-      ? `Быстрый режим разошёлся с обходом DOM на ${dom?.posting || index}. Отключил его и переснимаю ${back} номер(ов).`
-      : `Быстрый режим разошёлся с обходом DOM на ${dom?.posting || index}. Отключил его.`
+      ? `Быстрый путь разошёлся с обходом DOM на ${dom?.posting || index}. Отключил его и переснимаю ${back} номер(ов).`
+      : `Быстрый путь разошёлся с обходом DOM на ${dom?.posting || index}. Отключил его.`,
+    "mismatch"
   );
 }
 
@@ -913,7 +965,9 @@ async function processOne(worker, posting, index) {
         return api;
       }
       state.apiFailStreak += 1;
-      if (state.apiFailStreak >= 3) blockApi("Быстрый режим перестал отвечать — вернулся к обходу DOM.");
+      if (state.apiFailStreak >= 3) {
+        blockApi(`Быстрый путь перестал отвечать: ${state.apiLastReason || "нет ответа"}.`, "unavailable");
+      }
     } else {
       /* Калибровка и периодические сверки: считаем оба пути и сравниваем. */
       const api = await apiScan(worker, posting);
@@ -1120,6 +1174,10 @@ async function runScan(payload, postings, warehouse) {
   state.apiSinceCheck = 0;
   state.apiIndexes = new Set();
   state.apiDigests = [];
+  state.apiBlockKind = "";
+  state.apiLastReason = "";
+  state.apiRetryAt = 0;
+  state.apiRetries = 0;
   state.domInFlight = 0;
   state.anchorTabId = null;
   state.workerTabIds = new Set();
@@ -1185,7 +1243,12 @@ async function applyLiveSettings(raw) {
   if (raw?.uncheckCurrentOnly != null) state.uncheckCurrentOnly = Boolean(raw.uncheckCurrentOnly);
   if (raw?.useApi != null) {
     const next = Boolean(raw.useApi);
-    if (next && !state.useApi && state.apiState === "blocked") state.apiState = "unknown";
+    if (next && !state.useApi && state.apiState === "blocked") {
+      state.apiState = "unknown";
+      state.apiBlockKind = "";
+      state.apiRetryAt = 0;
+      state.apiFailStreak = 0;
+    }
     state.useApi = next;
   }
 

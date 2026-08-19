@@ -91,6 +91,18 @@
   --warn: #efb03c;
   --err: #f05a4a;
 
+  /*
+   * Найденный склад — то, на что надо посмотреть, поэтому он жёлтый.
+   * «Склада нет» — спокойный результат, он зелёный. Всё остальное
+   * ссылается на эти токены, так что смысл цвета задан в одном месте.
+   */
+  --hit: var(--warn);
+  --hit-soft: #f7d295;
+  --hit-ink: #33230a;
+  --miss: var(--ok);
+  --miss-soft: #8bedb7;
+  --miss-ink: #06301c;
+
   --glass: rgba(255, 255, 255, 0.05);
   --glass-2: rgba(255, 255, 255, 0.028);
   --glass-3: rgba(255, 255, 255, 0.075);
@@ -619,13 +631,13 @@ main {
   font-variant-numeric: tabular-nums;
 }
 
-.badge--ok {
-  color: #97f0c1;
+.badge--hit {
+  color: var(--hit-soft);
 }
-.badge--warn {
-  color: #f8d79a;
+.badge--miss {
+  color: var(--miss-soft);
 }
-.badge--err {
+.badge--issue {
   color: #ffb3a9;
 }
 
@@ -1061,6 +1073,21 @@ input[type="number"] {
   letter-spacing: -0.02em;
 }
 
+.deck__state {
+  margin: -4px 0 0 44px;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--faint);
+}
+
+.deck__state.is-on {
+  color: var(--miss-soft);
+}
+
+.deck__state.is-off {
+  color: var(--hit-soft);
+}
+
 .deck__hint {
   margin: 0;
   color: var(--faint);
@@ -1378,10 +1405,10 @@ input[type="number"] {
 }
 
 .radar__blip--hit {
-  color: var(--ok);
+  color: var(--hit);
 }
 .radar__blip--miss {
-  color: var(--warn);
+  color: var(--miss);
 }
 .radar__blip--issue {
   color: var(--err);
@@ -1465,10 +1492,10 @@ input[type="number"] {
 }
 
 .progress__hit {
-  background: linear-gradient(180deg, #4ade8f, var(--ok));
+  background: linear-gradient(180deg, color-mix(in srgb, var(--hit) 78%, #fff), var(--hit));
 }
 .progress__miss {
-  background: linear-gradient(180deg, #f5c05a, var(--warn));
+  background: linear-gradient(180deg, color-mix(in srgb, var(--miss) 78%, #fff), var(--miss));
 }
 .progress__issue {
   background: linear-gradient(180deg, #ff7d6e, var(--err));
@@ -1539,20 +1566,20 @@ input[type="number"] {
 }
 
 .stat--hit::after {
-  background: var(--ok);
+  background: var(--hit);
 }
 .stat--miss::after {
-  background: var(--warn);
+  background: var(--miss);
 }
 .stat--issue::after {
   background: var(--err);
 }
 
 .stat--hit strong {
-  color: #8bedb7;
+  color: var(--hit-soft);
 }
 .stat--miss strong {
-  color: #f7d295;
+  color: var(--miss-soft);
 }
 .stat--issue strong {
   color: #ffada2;
@@ -1775,12 +1802,12 @@ input[type="number"] {
 }
 
 .tag--hit {
-  color: #06301c;
-  background: var(--ok);
+  color: var(--hit-ink);
+  background: var(--hit);
 }
 .tag--miss {
-  color: #33230a;
-  background: var(--warn);
+  color: var(--miss-ink);
+  background: var(--miss);
 }
 .tag--issue {
   color: #fff;
@@ -2309,7 +2336,22 @@ input[type="number"] {
   .deck {
     gap: 11px;
   }
-  .deck__hint {
+  .deck__state {
+  margin: -4px 0 0 44px;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--faint);
+}
+
+.deck__state.is-on {
+  color: var(--miss-soft);
+}
+
+.deck__state.is-off {
+  color: var(--hit-soft);
+}
+
+.deck__hint {
     min-height: 0;
   }
   .switch__text em {

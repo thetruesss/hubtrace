@@ -234,7 +234,7 @@
               <div class="panel__head">
                 <div class="panel__title">
                   <h2>Есть склад</h2>
-                  <span id="hit-count" class="badge glass glass--inset badge--ok">0</span>
+                  <span id="hit-count" class="badge glass glass--inset badge--hit">0</span>
                 </div>
                 <button class="btn btn--ghost btn--sm btn--copy" type="button" data-copy="hits" disabled>
                   <span class="btn__swap">
@@ -251,7 +251,7 @@
               <div class="panel__head">
                 <div class="panel__title">
                   <h2>Нет склада</h2>
-                  <span id="miss-count" class="badge glass glass--inset badge--warn">0</span>
+                  <span id="miss-count" class="badge glass glass--inset badge--miss">0</span>
                 </div>
                 <button class="btn btn--ghost btn--sm btn--copy" type="button" data-copy="misses" disabled>
                   <span class="btn__swap">
@@ -268,7 +268,7 @@
               <div class="panel__head">
                 <div class="panel__title">
                   <h2>Не проверились</h2>
-                  <span id="issue-count" class="badge glass glass--inset badge--err">0</span>
+                  <span id="issue-count" class="badge glass glass--inset badge--issue">0</span>
                 </div>
                 <button class="btn btn--ghost btn--sm btn--copy" type="button" data-copy="issues" disabled>
                   <span class="btn__swap">
@@ -315,6 +315,7 @@
           <span class="switch__track"></span>
           <span class="switch__text">Быстрый путь<em>читать историю запросом, без перерисовки страницы</em></span>
         </label>
+        <p class="deck__state" data-api-state hidden></p>
         <label class="switch">
           <input type="checkbox" data-ctl="focus" />
           <span class="switch__track"></span>
