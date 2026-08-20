@@ -98,10 +98,25 @@
     }
   });
 
+  /*
+   * Раньше здесь стояло score <= recipeScore -> выходим. Повторный захват
+   * того же эндпоинта даёт ровно такой же score, поэтому свежий рецепт
+   * всегда отвергался, а вместе с ним отвергался и свежий токен. Через
+   * какое-то время сервер начинал отвечать 401, и починить это мог только
+   * перезапуск расширения — там рецепта ещё нет и первый захват проходит.
+   *
+   * Теперь при равном качестве побеждает более свежий рецепт.
+   */
   function adoptRecipe(next, share) {
     if (!next || !next.url || !next.itemId) return;
     const score = Number(next.score) || 0;
-    if (score <= recipeScore) return;
+    const captured = Number(next.capturedAt) || 0;
+    const currentCaptured = Number(recipe?.capturedAt) || 0;
+
+    const better = score > recipeScore;
+    const fresher = score >= recipeScore && captured > currentCaptured;
+    if (!better && !fresher) return;
+
     recipe = next;
     recipeScore = score;
     if (share) void toBackground({ action: "ht:recipe", recipe: next });
@@ -203,6 +218,44 @@
       }
     }
     return touched;
+  }
+
+  /* Заголовки, в которых обычно и лежит протухающий токен. */
+  const AUTH_HEADER_RE = /^(authorization|x-[\w-]*(token|auth)[\w-]*|[\w-]*-jwt)$/i;
+
+  function withoutAuthHeaders(headers) {
+    const out = {};
+    let stripped = false;
+    for (const key of Object.keys(headers || {})) {
+      if (AUTH_HEADER_RE.test(key)) {
+        stripped = true;
+        continue;
+      }
+      out[key] = headers[key];
+    }
+    return stripped ? out : null;
+  }
+
+  /*
+   * Один раз на 401 пробуем тот же запрос без токена: если сессия Hub
+   * держится на cookie, токен вообще не нужен — и тогда протухать нечему.
+   * Не сработало — возвращаем исходный 401, дальше фон обновит рецепт.
+   */
+  async function replayPage(request, timeoutMs) {
+    const response = await replay(request, timeoutMs);
+    if (!response || (response.status !== 401 && response.status !== 403)) return response;
+    if (recipe?.stripAuth) return response;
+
+    const bare = withoutAuthHeaders(request.headers);
+    if (!bare) return response;
+
+    const retry = await replay({ ...request, headers: bare }, timeoutMs);
+    if (!retry?.ok || !retry.text) return response;
+
+    recipe = { ...recipe, headers: bare, stripAuth: true, capturedAt: Date.now() };
+    recipeScore = Number(recipe.score) || recipeScore;
+    void toBackground({ action: "ht:recipe", recipe });
+    return retry;
   }
 
   function buildRequest(posting, pageIndex, pageSize, timeoutMs) {
@@ -310,12 +363,15 @@
 
         const built = buildRequest(posting, page, pageSize, Math.max(2000, deadline - Date.now()));
         pageable = built.pageable;
-        const response = await replay(built.request, built.timeoutMs);
+        const response = await replayPage(built.request, built.timeoutMs);
 
         if (!response || !response.ok || !response.text) {
           if (!response) failure = "нет ответа";
           else if (response.error) failure = `сеть: ${response.error}`;
-          else if (!response.ok) failure = `ответ ${response.status || "?"}`;
+          else if (response.status === 401 || response.status === 403) {
+            /* Токен в рецепте протух — нужен свежий захват, а не повтор. */
+            return { ok: false, auth: true, status: response.status, reason: `ответ ${response.status}` };
+          } else if (!response.ok) failure = `ответ ${response.status || "?"}`;
           else failure = "пустой ответ";
           failed = true;
           break;
@@ -980,7 +1036,7 @@
       apiScan(message)
         .then((raw) => {
           if (!raw?.ok) {
-            sendResponse({ ok: false, reason: raw?.reason || "api_failed" });
+            sendResponse({ ok: false, reason: raw?.reason || "api_failed", auth: Boolean(raw?.auth) });
             return;
           }
           sendResponse({ ok: true, result: normalizeResult(raw) });

@@ -93,6 +93,10 @@ const state = {
   apiLastReason: "",
   apiRetryAt: 0,
   apiRetries: 0,
+  apiAuthStreak: 0,
+  apiInconclusive: 0,
+  recipeStale: false,
+  recipeStaleAt: 0,
 
   workers: new Map(),
   liveWorkers: 0,
@@ -253,6 +257,7 @@ function snapshot() {
     apiNote: state.apiNote,
     apiBlockKind: state.apiBlockKind,
     apiRetryAt: state.apiRetryAt,
+    recipeStale: state.recipeStale,
     elapsedMs: elapsedMs(),
     rate: ratePerMin(),
     etaMs: etaMs(),
@@ -772,8 +777,13 @@ async function apiScan(worker, posting) {
   setPhase(worker, "idle", "", "");
   if (!reply?.ok || !reply.result) {
     state.apiLastReason = reply?.reason || "нет ответа от вкладки";
+    if (reply?.auth) {
+      state.apiAuthStreak += 1;
+      markRecipeStale(reply.reason);
+    }
     return null;
   }
+  state.apiAuthStreak = 0;
   return { posting, ...reply.result };
 }
 
@@ -817,6 +827,15 @@ async function domScanWithRetry(worker, posting) {
 
 function apiAllowed(worker) {
   if (!state.useApi || !cfg().api || !state.recipe || !worker.hubReady) return false;
+
+  if (state.recipeStale) {
+    /* Ждём свежий захват. Если он так и не приехал — пробуем как есть,
+       лучше получить 401 и ещё одну попытку, чем встать на DOM насовсем. */
+    if (Date.now() - state.recipeStaleAt < RECIPE_REFRESH_TIMEOUT_MS) return false;
+    state.recipeStale = false;
+    state.recipeStaleAt = 0;
+  }
+
   if (state.apiState === "blocked") return apiRetryDue();
   return true;
 }
@@ -854,6 +873,36 @@ function spotCheckDue() {
 
 const API_RETRY_BASE_MS = 45000;
 const API_MAX_RETRIES = 3;
+/* Если свежий рецепт не приехал за это время — снимаем стоп-кран сами,
+   иначе прогон навсегда останется на медленном обходе DOM. */
+const RECIPE_REFRESH_TIMEOUT_MS = 60000;
+const API_AUTH_STREAK_LIMIT = 6;
+
+/*
+ * Свежесть рецепта важнее его «качества»: повторный захват того же
+ * эндпоинта даёт такой же score, а вместе с ним приезжает новый токен.
+ * Со строгим «больше» свежий рецепт отвергался, токен протухал, и сервер
+ * начинал отвечать 401 до самого перезапуска расширения.
+ */
+function acceptRecipe(next) {
+  if (!state.recipe) return true;
+  if (state.recipeStale) return true;
+  const score = Number(next.score) || 0;
+  const current = Number(state.recipe.score) || 0;
+  if (score > current) return true;
+  return score >= current && (Number(next.capturedAt) || 0) > (Number(state.recipe.capturedAt) || 0);
+}
+
+/* 401/403 — не повод хоронить быстрый путь: нужен свежий захват. Пока он
+   не приехал, воркеры идут через DOM, а загрузка страницы как раз и даёт
+   пробнику поймать новый токен. */
+function markRecipeStale(status) {
+  if (state.recipeStale) return;
+  state.recipeStale = true;
+  state.recipeStaleAt = Date.now();
+  notice("api", `Токен устарел (ответ ${status || 401}). Обновляю его загрузкой страницы.`);
+  emitState(true);
+}
 
 /*
  * Отказ отказу рознь. Расхождение с обходом DOM или одинаковые ответы на
@@ -912,21 +961,51 @@ function requeueApiResults() {
   return indexes.length;
 }
 
+const API_INCONCLUSIVE_LIMIT = 3;
+
 function calibrate(api, dom, index) {
   if (!api) {
+    if (state.recipeStale) {
+      if (state.apiAuthStreak >= API_AUTH_STREAK_LIMIT) {
+        blockApi(`Токен не обновляется: ${state.apiLastReason || "ответ 401"}.`, "unavailable");
+      }
+      return;
+    }
     state.apiFailStreak += 1;
     if (state.apiFailStreak >= 3) {
       blockApi(`Быстрый путь недоступен: ${state.apiLastReason || "нет ответа"}. Работаю через DOM.`, "unavailable");
     }
     return;
   }
-  if (isHardStop(dom) || dom?.status === "timeout" || dom?.status === "tab_error") {
-    /* Сверить не с чем, но и застревать в двойном проходе на каждом номере
-       тоже не надо — отложим следующую сверку. */
+
+  /*
+   * Сверять можно только с полным обходом DOM. Если он сам не дочитал
+   * список, его «не нашёл» ничего не доказывает — и раньше такое
+   * расхождение навсегда выключало быстрый путь, хотя неправ был как раз
+   * обход страницы.
+   */
+  const domTrusted = Boolean(dom?.ok) && dom?.status === "complete";
+  if (!domTrusted) {
     state.apiSinceCheck = 0;
+    state.apiInconclusive += 1;
+    if (
+      state.apiInconclusive >= API_INCONCLUSIVE_LIMIT &&
+      state.apiState !== "trusted" &&
+      api.status === "complete"
+    ) {
+      state.apiState = "trusted";
+      state.apiRetries = 0;
+      state.apiBlockKind = "";
+      notice(
+        "api",
+        "Обход DOM не дочитывает список, сверять не с чем. Доверяю быстрому пути: он берёт итог из ответа сервера."
+      );
+      emitState(true);
+    }
     return;
   }
 
+  state.apiInconclusive = 0;
   state.apiSinceCheck = 0;
   if (Boolean(api.found) === Boolean(dom?.found)) {
     state.apiFailStreak = 0;
@@ -964,9 +1043,17 @@ async function processOne(worker, posting, index) {
         watchDigest(api);
         return api;
       }
-      state.apiFailStreak += 1;
-      if (state.apiFailStreak >= 3) {
-        blockApi(`Быстрый путь перестал отвечать: ${state.apiLastReason || "нет ответа"}.`, "unavailable");
+      if (state.recipeStale) {
+        /* Это протухший токен, а не поломка. Номер берём через DOM — заодно
+           загрузка страницы обновит рецепт. */
+        if (state.apiAuthStreak >= API_AUTH_STREAK_LIMIT) {
+          blockApi(`Токен не обновляется: ${state.apiLastReason || "ответ 401"}.`, "unavailable");
+        }
+      } else {
+        state.apiFailStreak += 1;
+        if (state.apiFailStreak >= 3) {
+          blockApi(`Быстрый путь перестал отвечать: ${state.apiLastReason || "нет ответа"}.`, "unavailable");
+        }
       }
     } else {
       /* Калибровка и периодические сверки: считаем оба пути и сравниваем. */
@@ -1178,6 +1265,10 @@ async function runScan(payload, postings, warehouse) {
   state.apiLastReason = "";
   state.apiRetryAt = 0;
   state.apiRetries = 0;
+  state.apiAuthStreak = 0;
+  state.apiInconclusive = 0;
+  state.recipeStale = false;
+  state.recipeStaleAt = 0;
   state.domInFlight = 0;
   state.anchorTabId = null;
   state.workerTabIds = new Set();
@@ -1373,8 +1464,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   if (action === "ht:recipe") {
     const next = message.recipe;
-    if (next?.itemId && (!state.recipe || (Number(next.score) || 0) > (Number(state.recipe.score) || 0))) {
+    if (next?.itemId && acceptRecipe(next)) {
       state.recipe = next;
+      if (state.recipeStale) {
+        state.recipeStale = false;
+        state.recipeStaleAt = 0;
+        notice("api", "Токен обновлён, возвращаюсь на быстрый путь.");
+      }
       for (const worker of state.workers.values()) {
         if (worker.tabId != null) void sendTab(worker.tabId, { action: "ht:setRecipe", recipe: next });
       }
