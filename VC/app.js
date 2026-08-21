@@ -1504,43 +1504,69 @@ async function boot() {
 /* вкладке подпись не появляется, чтобы не лезть под руку.             */
 /* ------------------------------------------------------------------ */
 
-const SIGNATURE = {
-  greetAfterMs: 9000,
-  idleEveryMs: 12 * 60 * 1000,
-  durationMs: 3600,
-  minGapMs: 60 * 1000
+/*
+ * Подпись автора.
+ *
+ * Раньше она разворачивалась на весь экран через несколько секунд после
+ * запуска — ровно тогда, когда человек вставляет номера. Теперь это
+ * плашка в левом нижнем углу: раз в десять минут появляется, сама гаснет
+ * через несколько секунд, а пока на ней курсор — ждёт, чтобы по ссылке
+ * можно было спокойно кликнуть.
+ */
+const CREDIT = {
+  everyMs: 10 * 60 * 1000,
+  showMs: 7000,
+  /* После ухода курсора даём короткую отсрочку, а не гасим мгновенно. */
+  afterHoverMs: 1500
 };
 
-let signatureShownAt = 0;
-let signatureTimer = null;
+let creditTimer = null;
+let creditPending = false;
 
-function playSignature(reason) {
-  const el = $("signature");
-  if (!el) return false;
-  if (document.hidden) return false;
-  /* Проверка важнее пасхалки. */
-  if (ui.running) return false;
-  if (reason !== "manual" && Date.now() - signatureShownAt < SIGNATURE.minGapMs) return false;
-
-  signatureShownAt = Date.now();
-  el.classList.remove("is-on");
-  void el.offsetWidth;
-  el.classList.add("is-on");
-
-  window.clearTimeout(signatureTimer);
-  signatureTimer = window.setTimeout(() => el.classList.remove("is-on"), SIGNATURE.durationMs);
-  return true;
+function hideCredit() {
+  window.clearTimeout(creditTimer);
+  creditTimer = null;
+  $("credit")?.classList.remove("is-on");
 }
 
-window.setTimeout(() => playSignature("greet"), SIGNATURE.greetAfterMs);
-window.setInterval(() => playSignature("idle"), SIGNATURE.idleEveryMs);
+function showCredit() {
+  const el = $("credit");
+  if (!el) return;
+  /* Во вкладке, которую не видно, показывать нечего — покажем, когда
+     на неё вернутся. */
+  if (document.hidden) {
+    creditPending = true;
+    return;
+  }
+  creditPending = false;
+  el.classList.add("is-on");
+  window.clearTimeout(creditTimer);
+  creditTimer = window.setTimeout(hideCredit, CREDIT.showMs);
+}
 
-/* Пропущенное из-за занятости приложение показываем, когда оно освободилось. */
-document.addEventListener("visibilitychange", () => {
-  if (document.hidden || ui.running) return;
-  if (Date.now() - signatureShownAt < SIGNATURE.idleEveryMs) return;
-  window.setTimeout(() => playSignature("idle"), 1500);
-});
+function mountCredit() {
+  const el = $("credit");
+  if (!el) return;
 
+  el.addEventListener("mouseenter", () => {
+    if (!el.classList.contains("is-on")) return;
+    window.clearTimeout(creditTimer);
+    creditTimer = null;
+  });
+  el.addEventListener("mouseleave", () => {
+    if (!el.classList.contains("is-on")) return;
+    window.clearTimeout(creditTimer);
+    creditTimer = window.setTimeout(hideCredit, CREDIT.afterHoverMs);
+  });
+  /* Ссылка открывается в новой вкладке — плашку сразу убираем. */
+  el.querySelector(".credit__link")?.addEventListener("click", hideCredit);
+
+  window.setInterval(showCredit, CREDIT.everyMs);
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden && creditPending) window.setTimeout(showCredit, 1200);
+  });
+}
+
+mountCredit();
 
 void boot();
