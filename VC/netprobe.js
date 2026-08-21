@@ -210,9 +210,25 @@
    * подсмотренного запроса, поэтому забираем из любого обращения, а не
    * только из тех, что годятся в рецепт.
    */
+  /* Значения заголовков x-o3-app-* Hub держит в глобальной переменной
+     страницы — из MAIN-мира она видна напрямую. */
+  function readBuildVars() {
+    if (probe.appVersion) return false;
+    try {
+      const config = window.__FE_VARS__?.envs?.config;
+      if (config?.GIT_BRANCH) {
+        probe.appVersion = String(config.GIT_BRANCH);
+        return true;
+      }
+    } catch (_err) {
+      /* ignore */
+    }
+    return false;
+  }
+
   function noteHints(request) {
     if (!request || !sameOrigin(request.url)) return;
-    let changed = false;
+    let changed = readBuildVars();
 
     const headers = request.headers || {};
     for (const key of Object.keys(headers)) {
@@ -430,6 +446,7 @@
     if (event.data?.channel !== CHANNEL || event.data?.type !== "askRecipe") return;
     if (probe.recipe) post({ type: "recipe", recipe: probe.recipe });
     if (probe.card) post({ type: "cardRecipe", recipe: probe.card });
+    readBuildVars();
     if (probe.appVersion || probe.placeId) {
       post({ type: "hint", appVersion: probe.appVersion, placeId: probe.placeId });
     }

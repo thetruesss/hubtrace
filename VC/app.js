@@ -47,6 +47,11 @@ const ui = {
   hasResults: false,
   currentStep: "input",
   apiState: "unknown",
+  /* Ответы сервера на каждый вариант запроса — показываем, когда быстрый
+     путь не завёлся: иначе непонятно, что чинить. */
+  apiProbe: [],
+  apiTune: null,
+  apiLastReason: "",
   apiNote: "",
   elapsedMs: 0,
   elapsedAt: 0,
@@ -576,10 +581,10 @@ function renderApiBadge() {
     text = "включён — история читается запросом";
     tone = "is-on";
   } else if (ui.apiState === "blocked") {
-    text = ui.apiNote || "отключён, работаю через DOM";
+    text = ui.apiNote || ui.apiLastReason || "отключён, работаю через DOM";
     tone = "is-off";
   } else if (ui.running) {
-    text = "проверяю на первых номерах";
+    text = "пробую первый запрос";
   }
 
   for (const el of $$("[data-api-state]")) {
@@ -588,6 +593,42 @@ function renderApiBadge() {
     el.classList.toggle("is-on", tone === "is-on");
     el.classList.toggle("is-off", tone === "is-off");
   }
+
+  renderApiProbe();
+}
+
+/*
+ * Что именно ответил Hub на каждый вариант запроса. Пока быстрый путь
+ * работает, это лишний шум — показываем только когда он не завёлся или
+ * когда пользователь сам раскрыл подробности.
+ */
+function renderApiProbe() {
+  const box = $("api-probe");
+  if (!box) return;
+
+  const lines = ui.apiProbe || [];
+  const failed = ui.apiState === "blocked" || (settings.useApi && !ui.apiTune && lines.length > 0);
+  const show = lines.length > 0 && failed;
+
+  box.hidden = !show;
+  if (!show) return;
+
+  box.innerHTML = "";
+  const title = document.createElement("b");
+  title.textContent = "Ответы Hub на быстрый путь";
+  box.appendChild(title);
+
+  const list = document.createElement("ul");
+  for (const line of lines.slice(0, 12)) {
+    const item = document.createElement("li");
+    item.textContent = line;
+    list.appendChild(item);
+  }
+  box.appendChild(list);
+
+  const hint = document.createElement("em");
+  hint.textContent = "Пришлите это разработчику — по строкам видно, что именно не принял сервер.";
+  box.appendChild(hint);
 }
 
 function renderRunState() {
@@ -1311,6 +1352,9 @@ function absorbState(next) {
   ui.stopping = Boolean(next.stopping);
   ui.apiState = next.apiState || "unknown";
   ui.apiNote = next.apiNote || "";
+  ui.apiProbe = Array.isArray(next.apiProbe) ? next.apiProbe : [];
+  ui.apiTune = next.apiTune || null;
+  ui.apiLastReason = next.apiLastReason || "";
   ui.workers = Array.isArray(next.workers) ? next.workers : [];
   ui.elapsedMs = Number(next.elapsedMs) || 0;
   ui.elapsedAt = Date.now();

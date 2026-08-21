@@ -43,7 +43,13 @@ const MODES = {
   deep: {
     label: "Глубокий",
     threads: 3,
-    api: false,
+    /*
+     * Раньше «глубокий» означал «только обход страницы». Но обход дочитывает
+     * не всю историю, и на нём же нельзя строить отчёт. Теперь и здесь
+     * сначала API, а страница остаётся запасным путём — с самыми щедрыми
+     * повторами. Совсем без API — это выключатель «Быстрый путь».
+     */
+    api: true,
     retryPartial: 3,
     retryFail: 2,
     navTimeoutMs: 40000,
@@ -104,6 +110,11 @@ const state = {
   /* Известные ручки Hub отвечают. Сбрасывается, если Hub их переименует —
      тогда быстрый путь снова держится только на подсмотренном запросе. */
   nativeApi: true,
+  /* Вариант запроса, который принял сервер: подбирается один раз за прогон
+     и раздаётся всем вкладкам. */
+  apiTune: null,
+  /* Что ответил сервер на каждый вариант — показываем в интерфейсе. */
+  apiProbe: [],
   /* Последняя попытка сорвалась не из-за поломки, а потому что повторять
      было нечем: ручек нет, запрос ещё не подсмотрен. */
   apiNotReady: false,
@@ -266,6 +277,11 @@ function snapshot() {
     useApi: state.useApi,
     apiState: state.apiState,
     apiNote: state.apiNote,
+    /* Что ответил сервер на каждый вариант запроса — без этого «быстрый
+       путь недоступен» ничего не объясняет. */
+    apiProbe: state.apiProbe,
+    apiTune: state.apiTune,
+    apiLastReason: state.apiLastReason,
     apiBlockKind: state.apiBlockKind,
     apiRetryAt: state.apiRetryAt,
     recipeStale: state.recipeStale,
@@ -793,20 +809,34 @@ async function apiScan(worker, posting) {
   setPhase(worker, "idle", "", "");
   if (!reply?.ok || !reply.result) {
     state.apiLastReason = reply?.reason || "нет ответа от вкладки";
-    if (reply?.nativeMissing) {
-      /* Hub переехал на другие пути: дальше только подсмотренный запрос. */
+    if (Array.isArray(reply?.probe) && reply.probe.length) {
+      state.apiProbe = reply.probe;
+      emitState(true);
+    }
+    if (reply?.nativeMissing && state.nativeApi) {
+      /*
+       * Hub переехал на другие пути: дальше только подсмотренный запрос.
+       * Вкладкам это тоже надо знать — после каждой загрузки страницы
+       * content script поднимается заново и иначе снова ходил бы за
+       * несуществующей ручкой.
+       */
       state.nativeApi = false;
-      /* Рецепта ещё нет — это не поломка, а «пока нечем повторять». */
-      state.apiNotReady = !state.recipe;
-      /* Вкладкам это тоже надо знать: после каждой загрузки страницы
-         content script поднимается заново и иначе снова сходил бы за
-         несуществующей ручкой. */
       broadcastHints();
+    }
+    if (reply?.notReady) {
+      /* Ни ручки, ни подсмотренного запроса: это не поломка. */
+      state.apiNotReady = true;
       return null;
     }
     if (reply?.auth) {
       state.apiAuthStreak += 1;
-      markRecipeStale(reply.reason);
+      /*
+       * Протухший токен бывает только у подсмотренного запроса. У известных
+       * ручек токена нет — там 401 означает, что в этой вкладке сессия Hub
+       * не поднялась. Ждать «свежего рецепта» минуту в этом случае незачем:
+       * номер уйдёт на страницу, её загрузка сессию и починит.
+       */
+      if (state.recipe) markRecipeStale(reply.reason);
     }
     return null;
   }
@@ -888,7 +918,8 @@ function hintsMessage() {
     action: "ht:setHints",
     appVersion: state.appVersion,
     placeId: state.placeId,
-    nativeApi: state.nativeApi
+    nativeApi: state.nativeApi,
+    apiTune: state.apiTune
   };
 }
 
@@ -952,8 +983,12 @@ function spotCheckDue() {
   return state.apiSinceCheck >= every;
 }
 
-const API_RETRY_BASE_MS = 45000;
-const API_MAX_RETRIES = 3;
+/* Быстрый путь — основной, поэтому возвращаемся к нему настойчивее:
+   раньше пауза была 45 с и три попытки. */
+const API_RETRY_BASE_MS = 20000;
+const API_MAX_RETRIES = 6;
+/* Сколько неудач подряд терпим, прежде чем уйти на страницу. */
+const API_FAIL_LIMIT = 5;
 /* Если свежий рецепт не приехал за это время — снимаем стоп-кран сами,
    иначе прогон навсегда останется на медленном обходе DOM. */
 const RECIPE_REFRESH_TIMEOUT_MS = 60000;
@@ -1053,7 +1088,7 @@ function calibrate(api, dom, index) {
       return;
     }
     state.apiFailStreak += 1;
-    if (state.apiFailStreak >= 3) {
+    if (state.apiFailStreak >= API_FAIL_LIMIT) {
       blockApi(`Быстрый путь недоступен: ${state.apiLastReason || "нет ответа"}. Работаю через DOM.`, "unavailable");
     }
     return;
@@ -1113,7 +1148,41 @@ function calibrate(api, dom, index) {
   );
 }
 
+/*
+ * Открыть вкладке страницу Hub и дождаться, пока в ней поднимется
+ * content script.
+ *
+ * Повторить запрос можно только из страницы Hub: нужны её cookie и origin.
+ * Раньше вкладку открывал первый же номер — и он всегда шёл обходом DOM,
+ * просто чтобы вкладка появилась. Теперь страница открывается отдельно и
+ * молча, а номер сразу идёт через API.
+ */
+async function primeTab(worker, posting) {
+  if (worker.hubReady || worker.tabId == null) return worker.hubReady;
+
+  setPhase(worker, "open", posting, "api");
+  const moved = await updateTab(worker.tabId, {
+    url: buildHistoryUrl(posting),
+    autoDiscardable: false
+  });
+  if (!moved) {
+    worker.retire = true;
+    return false;
+  }
+
+  const deadline = Date.now() + cfg().navTimeoutMs;
+  while (!worker.hubReady && Date.now() < deadline) {
+    if (state.stopping || worker.retire) break;
+    await sleep(120);
+  }
+  setPhase(worker, "idle", "", "");
+  return worker.hubReady;
+}
+
 async function processOne(worker, posting, index) {
+  /* Вкладка нужна и быстрому пути — но только как площадка для запроса. */
+  if (!worker.hubReady && state.useApi && cfg().api) await primeTab(worker, posting);
+
   if (apiAllowed(worker)) {
     if (state.apiState === "trusted" && !spotCheckDue()) {
       const api = await apiScan(worker, posting);
@@ -1135,7 +1204,7 @@ async function processOne(worker, posting, index) {
         }
       } else {
         state.apiFailStreak += 1;
-        if (state.apiFailStreak >= 3) {
+        if (state.apiFailStreak >= API_FAIL_LIMIT) {
           blockApi(`Быстрый путь перестал отвечать: ${state.apiLastReason || "нет ответа"}.`, "unavailable");
         }
       }
@@ -1340,10 +1409,22 @@ async function runScan(payload, postings, warehouse) {
   state.focusMode = settings.focusMode;
   state.useApi = settings.useApi;
   state.uncheckCurrentOnly = settings.uncheckCurrentOnly;
-  state.apiState = "unknown";
+  /*
+   * Прогон начинается с доверия к быстрому пути.
+   *
+   * Раньше здесь стояло "unknown", и до первой удачной сверки каждый номер
+   * шёл обоими путями, а в ленту попадал результат обхода страницы. То
+   * есть начало прогона всегда было медленным DOM-ом, даже когда API
+   * отвечал. Теперь наоборот: идём через API, а страница подключается
+   * только там, где API не смог. Надёжность держат сверки по расписанию
+   * (spotCheckEvery) и защита от одинаковых ответов.
+   */
+  state.apiState = "trusted";
   state.apiNote = "";
   /* Новый прогон — снова пробуем известные ручки: Hub мог и вернуться. */
   state.nativeApi = true;
+  state.apiTune = null;
+  state.apiProbe = [];
   state.apiNotReady = false;
   state.apiFailStreak = 0;
   state.apiSinceCheck = 0;
@@ -1583,6 +1664,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (message.placeId && !state.placeId) {
       state.placeId = String(message.placeId);
       changed = true;
+    }
+    if (message.apiTune && !state.apiTune) {
+      state.apiTune = message.apiTune;
+      changed = true;
+    }
+    if (Array.isArray(message.probe) && message.probe.length) {
+      state.apiProbe = message.probe;
+      emitState(true);
     }
     if (changed) broadcastHints();
     sendResponse({ ok: true });
