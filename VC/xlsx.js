@@ -131,12 +131,18 @@
   const NS_R = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
   const NS_PKG = "http://schemas.openxmlformats.org/package/2006/relationships";
 
-  /* Стили: 0 обычный, 1 шапка, 2 ссылка, 3 подзаголовок блока, 4 приглушённый. */
+  /*
+   * Стили: 0 обычный, 1 шапка, 2 ссылка, 3 подзаголовок блока,
+   * 4 приглушённый, 5 переход «смотреть» (крупно, по центру ячейки),
+   * 6 переход «к отчёту» (крупно, по левому краю).
+   */
   const STYLE_PLAIN = 0;
   const STYLE_HEAD = 1;
   const STYLE_LINK = 2;
   const STYLE_TITLE = 3;
   const STYLE_MUTED = 4;
+  const STYLE_JUMP = 5;
+  const STYLE_BACK = 6;
 
   function buildSheetXml(sheet) {
     const links = [];
@@ -256,12 +262,14 @@
 
     const styles =
       `${XML_HEAD}<styleSheet xmlns="${NS}">` +
-      `<fonts count="5">` +
+      `<fonts count="6">` +
       `<font><sz val="11"/><color theme="1"/><name val="Calibri"/><family val="2"/><scheme val="minor"/></font>` +
       `<font><b/><sz val="11"/><color theme="1"/><name val="Calibri"/><family val="2"/><scheme val="minor"/></font>` +
       `<font><u/><sz val="11"/><color rgb="FF0563C1"/><name val="Calibri"/><family val="2"/><scheme val="minor"/></font>` +
       `<font><b/><sz val="12"/><color rgb="FF1F3864"/><name val="Calibri"/><family val="2"/><scheme val="minor"/></font>` +
       `<font><sz val="10"/><color rgb="FF808080"/><name val="Calibri"/><family val="2"/><scheme val="minor"/></font>` +
+      /* Переходы между листами: их надо видеть сразу, поэтому крупно и жирно. */
+      `<font><b/><u/><sz val="14"/><color rgb="FF0563C1"/><name val="Calibri"/><family val="2"/><scheme val="minor"/></font>` +
       `</fonts>` +
       `<fills count="3">` +
       `<fill><patternFill patternType="none"/></fill>` +
@@ -270,12 +278,16 @@
       `</fills>` +
       `<borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>` +
       `<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>` +
-      `<cellXfs count="5">` +
+      `<cellXfs count="7">` +
       `<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0" applyAlignment="1"><alignment vertical="top" wrapText="1"/></xf>` +
       `<xf numFmtId="0" fontId="1" fillId="2" borderId="0" xfId="0" applyFont="1" applyFill="1"/>` +
       `<xf numFmtId="0" fontId="2" fillId="0" borderId="0" xfId="0" applyFont="1"/>` +
       `<xf numFmtId="0" fontId="3" fillId="0" borderId="0" xfId="0" applyFont="1"/>` +
       `<xf numFmtId="0" fontId="4" fillId="0" borderId="0" xfId="0" applyFont="1"/>` +
+      `<xf numFmtId="0" fontId="5" fillId="0" borderId="0" xfId="0" applyFont="1" applyAlignment="1">` +
+      `<alignment horizontal="center" vertical="center"/></xf>` +
+      `<xf numFmtId="0" fontId="5" fillId="0" borderId="0" xfId="0" applyFont="1" applyAlignment="1">` +
+      `<alignment horizontal="left" vertical="center"/></xf>` +
       `</cellXfs>` +
       `<cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>` +
       `</styleSheet>`;
@@ -326,6 +338,14 @@
   }
 
   globalThis.buildXlsxBlob = buildXlsxBlob;
-  globalThis.xlsxStyles = { STYLE_PLAIN, STYLE_HEAD, STYLE_LINK, STYLE_TITLE, STYLE_MUTED };
+  globalThis.xlsxStyles = {
+    STYLE_PLAIN,
+    STYLE_HEAD,
+    STYLE_LINK,
+    STYLE_TITLE,
+    STYLE_MUTED,
+    STYLE_JUMP,
+    STYLE_BACK
+  };
   globalThis.xlsxSheetTitle = sheetTitle;
 })();

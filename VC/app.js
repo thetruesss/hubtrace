@@ -988,10 +988,13 @@ function buildXlsx() {
     const reportRow = index + 2;
     anchors.set(index, `'${DETAIL_SHEET}'!A${detailRows.length + 1}`);
 
-    const title = report.number ? `${report.number} · ID ${item.posting}` : `ID ${item.posting}`;
+    /* Номер отправления и ID — в разные ячейки, как в самом отчёте:
+       склеенные в одну строку, они не ищутся и не сортируются. */
     detailRows.push([
-      { text: title, style: xlsxStyles.STYLE_TITLE },
-      { text: "← к отчёту", anchor: `'${REPORT_SHEET}'!A${reportRow}` }
+      { text: report.number || "", style: xlsxStyles.STYLE_TITLE },
+      /* Стиль не задаём: ячейка со ссылкой сама получает вид ссылки. */
+      { text: item.posting, link: hubUrl(item.posting) },
+      { text: "← к отчёту", anchor: `'${REPORT_SHEET}'!A${reportRow}`, style: xlsxStyles.STYLE_BACK }
     ]);
 
     const columns = report.columns?.length
@@ -1015,7 +1018,7 @@ function buildXlsx() {
       { text: CHECK_STATUS[item.status] || item.status || "" },
       { text: bucketOf(report.warehouseAt, now) },
       { text: report.warehouseCell || "" },
-      anchor ? { text: "смотреть →", anchor } : { text: "" }
+      anchor ? { text: "смотреть →", anchor, style: xlsxStyles.STYLE_JUMP } : { text: "" }
     ]);
   });
 
