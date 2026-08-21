@@ -113,10 +113,22 @@ const state = {
   /* Вариант запроса, который принял сервер: подбирается один раз за прогон
      и раздаётся всем вкладкам. */
   apiTune: null,
+  /*
+   * Подписи типов изменения, подсмотренные на самой странице.
+   *
+   * В ответе тип приходит кодом (Flow, DestinationPlace), а на странице
+   * он написан словами. Угадывать все коды бессмысленно — их список нам
+   * неизвестен. Поэтому там, где номер прошёл обоими путями, строки
+   * совпадают по порядку: код из ответа встаёт в пару с подписью со
+   * страницы, и дальше она подставляется всем.
+   */
+  changeLabels: {},
+  /* Один номер за прогон считается обоими путями — «урок». */
+  lessonDone: false,
   /* Что ответил сервер на каждый вариант — показываем в интерфейсе. */
   apiProbe: [],
-  /* Круг добора: номера, которые в первый заход не вышли. */
-  retryDone: false,
+  /* Круги добора: номера, которые не вышли или дочитались не полностью. */
+  retryRound: 0,
   retryIndexes: new Set(),
   /* Последняя попытка сорвалась не из-за поломки, а потому что повторять
      было нечем: ручек нет, запрос ещё не подсмотрен. */
@@ -875,7 +887,9 @@ function mergeReports(a, b) {
     warehouseAt: strong.warehouseAt || weak.warehouseAt || "",
     warehouseCell: strong.warehouseCell || weak.warehouseCell || "",
     columns: strong.columns?.length ? strong.columns : weak.columns || [],
-    lastRows: strong.lastRows?.length ? strong.lastRows : weak.lastRows || []
+    lastRows: strong.lastRows?.length ? strong.lastRows : weak.lastRows || [],
+    /* Коды идут в паре со строками: берём те, что от того же пути. */
+    codes: strong.lastRows?.length ? strong.codes || [] : weak.codes || []
   };
 }
 
@@ -922,8 +936,34 @@ function hintsMessage() {
     appVersion: state.appVersion,
     placeId: state.placeId,
     nativeApi: state.nativeApi,
-    apiTune: state.apiTune
+    apiTune: state.apiTune,
+    labels: state.changeLabels
   };
+}
+
+const CYRILLIC = /[А-Яа-яЁё]/;
+
+/*
+ * Строки обоих путей идут в одном порядке и описывают одни и те же
+ * события, поэтому код из ответа и подпись со страницы стоят в паре.
+ * Берём только кириллические подписи: английское слово со страницы
+ * означало бы, что и она не знает перевода.
+ */
+function learnChangeLabels(api, dom) {
+  const codes = api?.report?.codes;
+  const rows = dom?.report?.lastRows;
+  if (!Array.isArray(codes) || !Array.isArray(rows)) return;
+  if (!codes.length || codes.length !== rows.length) return;
+
+  let learned = 0;
+  codes.forEach((code, index) => {
+    const label = String(rows[index]?.[0] || "").trim();
+    if (!code || !label || state.changeLabels[code]) return;
+    if (!CYRILLIC.test(label) || label.length > 40) return;
+    state.changeLabels[code] = label;
+    learned += 1;
+  });
+  if (learned) broadcastHints();
 }
 
 function broadcastHints() {
@@ -978,6 +1018,18 @@ function watchDigest(item) {
       : "Быстрый путь отдаёт одинаковый ответ на разные номера. Отключил его.",
     "mismatch"
   );
+}
+
+/*
+ * Урок: один номер за прогон проходим обоими путями.
+ *
+ * Тип изменения приходит кодом, а как Hub называет его по-русски, знает
+ * только страница. Список кодов нам неизвестен, угадать все нельзя —
+ * поэтому один раз смотрим на строки обоих путей рядом и запоминаем
+ * подписи. Заодно это сверка: сходятся ли пути в ответе про склад.
+ */
+function lessonDue() {
+  return !state.lessonDone;
 }
 
 function spotCheckDue() {
@@ -1198,6 +1250,7 @@ async function retryBoth(worker, posting, index) {
   if (state.stopping) return failItem(posting, "stopped");
 
   const dom = await domScanWithRetry(worker, posting);
+  learnChangeLabels(api, dom);
   const best = betterOf(api, dom);
   const merged = mergeReports(api, dom);
   return merged ? { ...best, report: merged } : best;
@@ -1210,7 +1263,7 @@ async function processOne(worker, posting, index) {
   if (state.retryIndexes.has(index)) return retryBoth(worker, posting, index);
 
   if (apiAllowed(worker)) {
-    if (state.apiState === "trusted" && !spotCheckDue()) {
+    if (state.apiState === "trusted" && !spotCheckDue() && !lessonDue()) {
       const api = await apiScan(worker, posting);
       /* Попытка не считается: известной ручки не оказалось, а рецепта ещё
          не было. Ждём захвата, а не выключаем быстрый путь. */
@@ -1235,10 +1288,12 @@ async function processOne(worker, posting, index) {
         }
       }
     } else {
-      /* Калибровка и периодические сверки: считаем оба пути и сравниваем. */
+      /* Урок и периодические сверки: считаем оба пути и сравниваем. */
+      state.lessonDone = true;
       const api = await apiScan(worker, posting);
       if (state.stopping) return failItem(posting, "stopped");
       const dom = await domScanWithRetry(worker, posting);
+      learnChangeLabels(api, dom);
       calibrate(api, dom, index);
       const merged = mergeReports(dom, api);
       return merged ? { ...dom, report: merged } : dom;
@@ -1254,7 +1309,13 @@ async function processOne(worker, posting, index) {
 
 function commit(index, item) {
   /* На круге добора номер приходит второй раз — счётчик не должен расти. */
-  if (state.results[index] == null) state.processed += 1;
+  const prev = state.results[index];
+  if (prev == null) state.processed += 1;
+  /* И не должен ухудшаться: если прошлый заход прочитал больше, оставляем
+     его, а отчёт собираем из обоих. */
+  const best = betterOf(prev, item) || item;
+  const merged = mergeReports(prev, item);
+  item = merged ? { ...best, report: merged } : best;
   state.results[index] = item;
   emit({
     action: "scanProgress",
@@ -1322,24 +1383,52 @@ function isIssue(item) {
 }
 
 /*
- * Круг добора. Первый заход мог не выйти по случайной причине: вкладка не
- * успела, сервер ответил не тем, страница не дочиталась. Такие номера
- * прогоняем ещё раз — и сразу обоими путями, чтобы взять тот, который
- * ответил лучше.
+ * Доля прочитанной истории.
+ *
+ * Склад нашёлся — дальше читать незачем, история просмотрена ровно до
+ * нужного места. А вот «нет» стоит чего-то только если список прочитан
+ * почти весь: 20 строк из 83 не доказывают ничего.
+ */
+const COVERAGE_TARGET = 0.8;
+const MAX_RETRY_ROUNDS = 3;
+
+function coverageOf(item) {
+  if (!item) return 0;
+  if (item.found) return 1;
+  const expected = Number(item.expected) || 0;
+  const loaded = Number(item.loaded) || 0;
+  if (!expected) return loaded > 0 ? 1 : 0;
+  return Math.min(1, loaded / expected);
+}
+
+function needsMore(item) {
+  return isIssue(item) || coverageOf(item) < COVERAGE_TARGET;
+}
+
+/*
+ * Круги добора. Заход мог не выйти по случайной причине: вкладка не
+ * успела, сервер ответил не тем, страница не дочиталась до конца. Такие
+ * номера прогоняем ещё раз — сразу обоими путями, и берём тот результат,
+ * который прочитал больше. Кругов до трёх: если и после них список не
+ * дочитан, честнее показать это в «не вышло», чем крутиться бесконечно.
  */
 function queueRetries() {
-  if (state.retryDone || state.stopping) return false;
-  state.retryDone = true;
+  if (state.stopping || state.retryRound >= MAX_RETRY_ROUNDS) return false;
 
   const again = [];
   state.results.forEach((item, index) => {
-    if (isIssue(item)) again.push(index);
+    if (needsMore(item)) again.push(index);
   });
   if (!again.length) return false;
 
+  state.retryRound += 1;
   state.retryIndexes = new Set(again);
   state.requeue.push(...again);
-  notice("api", `Не вышло ${again.length} — иду по ним ещё раз, запросом и страницей.`);
+  notice(
+    "api",
+    `Дочитываю ${again.length} номер(ов) — круг ${state.retryRound} из ${MAX_RETRY_ROUNDS}, ` +
+      "запросом и страницей."
+  );
   return true;
 }
 
@@ -1385,6 +1474,9 @@ async function finalize() {
     inputCount: state.postings.length,
     durationMs: elapsedMs(),
     results,
+    /* Подписи, подсмотренные на странице: приложение подставит их и в те
+       строки, что собрались до того, как подпись стала известна. */
+    changeLabels: { ...state.changeLabels },
     finishedAt: Date.now()
   };
 
@@ -1490,9 +1582,10 @@ async function runScan(payload, postings, warehouse) {
   state.nativeApi = true;
   state.apiTune = null;
   state.apiProbe = [];
+  state.changeLabels = {};
+  state.lessonDone = false;
   state.apiNotReady = false;
-  /* Круг добора по ошибкам делается один раз за прогон. */
-  state.retryDone = false;
+  state.retryRound = 0;
   state.retryIndexes = new Set();
   state.apiFailStreak = 0;
   state.apiSinceCheck = 0;

@@ -487,6 +487,14 @@
   /* ------------------------------------------------------------------ */
 
   /* Подписи Hub рисует на фронте, в ответе приходит только код. */
+  /*
+   * Подписи типов изменения. Первые семь сверены со страницей построчно.
+   * Дальше идут те, что называются так же, как поле в stateChanges, —
+   * его подпись видна на самой странице. Незнакомый код пишется как есть,
+   * но и он не остаётся навсегда: рядом работает обучение по странице
+   * (см. ht:labels), и как только тот же номер пройдёт обходом, подпись
+   * подставится настоящая.
+   */
   const CHANGE_TYPES = {
     InnerWarehouse: "Внутрискладское",
     OnWarehouse: "На склад",
@@ -494,8 +502,30 @@
     InContainer: "В контейнер",
     InTripContainer: "В рейс",
     TimeSlot: "Тайм-слот",
-    Status: "Статус предмета"
+    Status: "Статус предмета",
+
+    Location: "Местоположение",
+    Container: "Лог. контейнер",
+    Cell: "Ячейка",
+    DestinationPlace: "Место назначения",
+    SortingCenter: "Сортировочный центр",
+    DeliveryVariant: "Способ доставки",
+    Characteristic: "Характеристика",
+    Flow: "Поток",
+    Usk: "УСК",
+    Ovh: "ОВГ",
+    SuspiciousFlag: "Метка подозрительности",
+    SuspiciousState: "Состояние подозрительности",
+    CustomState: "Особое состояние"
   };
+
+  /* Подписи, подсмотренные на странице: они всегда вернее наших. */
+  let learnedTypes = {};
+
+  function changeTypeLabel(code) {
+    const key = String(code || "");
+    return learnedTypes[key] || CHANGE_TYPES[key] || key || "—";
+  }
 
   const AUDIT_COLUMNS = ["Тип изменения", "Дата", "Пользователь", "Изменения", "Описание"];
 
@@ -568,6 +598,34 @@
    */
   const NAME_KEYS = ["stringRepresentation", "name", "markup", "title", "value", "containerId", "id"];
 
+  /*
+   * Поля, у которых нет ни имени, ни подписи — только признак. Голое
+   * «isReturn: false → isReturn: true» в отчёте не читается, поэтому
+   * известные признаки разворачиваем словами.
+   */
+  const FLAG_WORDS = {
+    isReturn: ["Прямой", "Возврат"],
+    suspicious: ["нет", "да"],
+    isDeleted: ["нет", "да"],
+    isMvd: ["нет", "да"]
+  };
+
+  const FIELD_NAMES = {
+    isReturn: "направление",
+    deliverySchema: "схема доставки",
+    typeName: "тип",
+    sysName: "система",
+    code: "код",
+    comment: "примечание"
+  };
+
+  function scalarText(key, value) {
+    const words = FLAG_WORDS[key];
+    if (words && typeof value === "boolean") return words[value ? 1 : 0];
+    if (typeof value === "boolean") return value ? "да" : "нет";
+    return String(value);
+  }
+
   function anyText(value, depth) {
     const level = depth || 0;
     if (value == null) return "—";
@@ -591,12 +649,19 @@
       if (String(own).trim()) return String(own);
     }
 
-    /* 2. Простые значения как есть: {code:"X7", comment:"…"}. */
+    /*
+     * 2. Простые значения. Единственный признак разворачиваем словом без
+     * подписи: «Прямой → Возврат» вместо «isReturn: false → isReturn: true».
+     */
+    const scalars = Object.keys(value).filter((key) => value[key] != null && typeof value[key] !== "object");
+    if (scalars.length === 1 && FLAG_WORDS[scalars[0]]) {
+      return scalarText(scalars[0], value[scalars[0]]);
+    }
+
     const parts = [];
-    for (const key of Object.keys(value)) {
-      const own = value[key];
-      if (own == null || typeof own === "object") continue;
-      if (String(own).trim()) parts.push(`${key}: ${own}`);
+    for (const key of scalars) {
+      const own = scalarText(key, value[key]);
+      if (own.trim()) parts.push(`${FIELD_NAMES[key] || key}: ${own}`);
       if (parts.length >= 4) break;
     }
     if (parts.length) return parts.join(", ");
@@ -727,7 +792,7 @@
 
   function auditRow(record) {
     return [
-      CHANGE_TYPES[record?.changeType] || String(record?.changeType || "—"),
+      changeTypeLabel(record?.changeType),
       formatEventTime(record?.eventTime),
       userText(record),
       changesText(record) || "—",
@@ -759,9 +824,13 @@
   }
 
   function reportFromAudit(head, hit) {
+    const rows = head.slice(0, 3);
     return {
       columns: AUDIT_COLUMNS.slice(),
-      lastRows: head.slice(0, 3).map(auditRow),
+      lastRows: rows.map(auditRow),
+      /* Коды типов — чтобы подставить настоящую подпись, когда она станет
+         известна: строки уже собраны, а подпись может приехать позже. */
+      codes: rows.map((record) => String(record?.changeType || "")),
       warehouseAt: hit ? formatEventTime(hit.eventTime) : "",
       warehouseCell: hit ? auditCell(hit) : ""
     };
@@ -2239,6 +2308,7 @@
     if (!report || typeof report !== "object") return null;
     const rows = Array.isArray(report.lastRows) ? report.lastRows.slice(0, 3) : [];
     return {
+      codes: (Array.isArray(report.codes) ? report.codes : []).slice(0, 3).map((value) => String(value || "")),
       number: String(report.number || ""),
       status: String(report.status || ""),
       warehouseAt: String(report.warehouseAt || ""),
@@ -2324,6 +2394,12 @@
       return false;
     }
 
+    if (message.action === "ht:setLabels") {
+      if (message.labels) learnedTypes = { ...learnedTypes, ...message.labels };
+      sendResponse({ ok: true });
+      return false;
+    }
+
     if (message.action === "ht:setHints") {
       if (message.appVersion && !appVersion) appVersion = String(message.appVersion);
       if (message.placeId && !placeId) placeId = String(message.placeId);
@@ -2333,6 +2409,7 @@
       if (message.nativeApi === false) nativeOff = true;
       /* Вариант запроса уже подобран другой вкладкой — не подбираем снова. */
       if (message.apiTune && !apiTune) apiTune = message.apiTune;
+      if (message.labels) learnedTypes = { ...learnedTypes, ...message.labels };
       sendResponse({ ok: true });
       return false;
     }

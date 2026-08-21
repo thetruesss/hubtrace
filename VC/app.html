@@ -34,7 +34,7 @@
           <img class="brand__icon" src="icons/radar.svg" width="34" height="34" alt="" />
           <div class="brand__text">
             <h1>Hub Trace</h1>
-            <p>Склад в истории Hub<span class="brand__version" id="app-version"></span></p>
+            <p>Корректировщик расстановки ответственности OnTime<span class="brand__version" id="app-version"></span></p>
           </div>
         </div>
 
@@ -298,9 +298,41 @@
                   id="detail-search"
                   type="search"
                   spellcheck="false"
-                  placeholder="ID или номер отправления — можно несколько через пробел, запятую или с новой строки"
+                  placeholder="ID, номер, склад, ячейка, пользователь, тип операции — можно несколько значений"
                 />
               </label>
+              <div class="detail__filters">
+                <label class="pick">
+                  <span>Результат</span>
+                  <select id="filter-verdict">
+                    <option value="">любой</option>
+                    <option value="hit">склад есть</option>
+                    <option value="miss">склада нет</option>
+                    <option value="issue">не вышло</option>
+                  </select>
+                </label>
+                <label class="pick">
+                  <span>Корзинка</span>
+                  <select id="filter-bucket">
+                    <option value="">любая</option>
+                  </select>
+                </label>
+                <label class="pick">
+                  <span>Статус</span>
+                  <select id="filter-status">
+                    <option value="">любой</option>
+                  </select>
+                </label>
+                <label class="pick">
+                  <span>Путь</span>
+                  <select id="filter-via">
+                    <option value="">любой</option>
+                    <option value="api">запрос</option>
+                    <option value="dom">страница</option>
+                  </select>
+                </label>
+                <button id="filter-reset" class="btn btn--ghost btn--sm" type="button" hidden>Сбросить</button>
+              </div>
               <div class="detail__chips" id="detail-chips"></div>
               <span class="detail__count" id="detail-count"></span>
             </div>
