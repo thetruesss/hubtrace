@@ -504,19 +504,34 @@
     TimeSlot: "Тайм-слот",
     Status: "Статус предмета",
 
-    Location: "Местоположение",
-    Container: "Лог. контейнер",
-    Cell: "Ячейка",
+    /*
+     * Ниже — коды из самого Hub: его сборка делит их на два списка,
+     * «Перемещения» и «Свойства», и оба перечислены в бандле страницы.
+     * Часть моих прежних догадок по написанию оказалась неверной: у Hub
+     * USK, а не Usk; IsSuspiciousC2CPosting, а не SuspiciousFlag;
+     * CustomsState — про таможню, а не про «особое состояние».
+     */
+    InCourier: "У курьера",
+    InLoss: "В утере",
+    InGut: "В ГУТ",
+    FromGut: "Из ГУТ",
+    LeftLogistics: "Вне логистики",
+    SupervisorConfirmationRequest: "Запрос подтверждения",
+    ArticlePickup: "Изъятие предмета",
+    RemoveFromContainer: "Из контейнера",
+    PutIntoContainer: "В контейнер",
+    IdConvertedTo: "Смена ID",
+
     DestinationPlace: "Место назначения",
     SortingCenter: "Сортировочный центр",
     DeliveryVariant: "Способ доставки",
     Characteristic: "Характеристика",
     Flow: "Поток",
-    Usk: "УСК",
+    USK: "УСК",
     Ovh: "ОВГ",
-    SuspiciousFlag: "Метка подозрительности",
-    SuspiciousState: "Состояние подозрительности",
-    CustomState: "Особое состояние"
+    IsSuspiciousC2CPosting: "Подозрительное C2C",
+    SuspiciousC2CCheckingState: "Проверка C2C",
+    CustomsState: "Состояние таможни"
   };
 
   /* Подписи, подсмотренные на странице: они всегда вернее наших. */
@@ -708,9 +723,9 @@
     flow: "Поток",
     usk: "УСК",
     ovh: "ОВГ",
-    suspiciousFlag: "Метка подозрительности",
-    suspiciousState: "Состояние подозрительности",
-    customState: "Особое состояние"
+    suspiciousFlag: "Подозрительное C2C",
+    suspiciousState: "Проверка C2C",
+    customState: "Состояние таможни"
   };
 
   /*
@@ -1549,7 +1564,7 @@
     changeLabel: '[class*="_left_"]',
     changeValue: '[class*="_right_"]',
     tab: '[class*="ozi__tab__tab__"], button, a, [role="tab"]',
-    tabActive: '[class*="active"], [class*="Active"], [class*="selected"], [class*="Selected"]'
+    tabActive: '[class*="active"], [class*="Active"], [class*="selected"], [class*="Selected"], [class*="filled"]'
   };
 
   function historyContainer() {
@@ -2054,23 +2069,46 @@
     return false;
   }
 
+  /*
+   * Ярлыки, по которым узнаём нужный вид истории. Внутри вкладки «История»
+   * Hub держит фишки фильтра «Все», «Перемещения» и «Свойства»; адрес
+   * открывает «Перемещения». Сюда попадаем, только если история почему-то
+   * не отрисовалась сама.
+   */
+  const HISTORY_LABELS = ["перемещения", "история перемещений", "история", "все"];
+
+  /*
+   * Перебираем ярлыки по порядку, но «уже открыта» и «не нашлось» — разные
+   * ответы. Если их путать, то на открытой вкладке «Перемещения» мы бы не
+   * остановились, пошли дальше по списку и кликнули «Все», уведя страницу
+   * не туда.
+   */
   function clickHistoryTab() {
-    for (const el of document.querySelectorAll(HUB.tab)) {
-      const label = textOf(el).toLowerCase();
-      if (label !== "история" && !label.startsWith("история")) continue;
-      /*
-       * Активную вкладку Hub помечает не на самой кнопке, а на вложенном
-       * узле (ozi__tab-content__active__…). Раньше проверялся только
-       * className кнопки — и мы кликали по уже открытой истории, сбрасывая
-       * догруженный список.
-       */
-      if (el.getAttribute("aria-selected") === "true") return false;
-      if (String(el.className).includes("active")) return false;
-      if (el.querySelector(HUB.tabActive)) return false;
-      el.click();
-      return true;
+    for (const wanted of HISTORY_LABELS) {
+      const state = clickTabLabelled(wanted);
+      if (state === "active") return false;
+      if (state === "clicked") return true;
     }
     return false;
+  }
+
+  function clickTabLabelled(wanted) {
+    for (const el of document.querySelectorAll(HUB.tab)) {
+      const label = textOf(el).toLowerCase();
+      if (label !== wanted && !label.startsWith(wanted)) continue;
+      /*
+       * Активную вкладку Hub помечает не на самой кнопке, а на вложенном
+       * узле (ozi__tab-content__active__…), а активную фишку фильтра — её
+       * же классом filled и атрибутом disabled.
+       */
+      if (el.getAttribute("aria-selected") === "true") return "active";
+      if (el.disabled) return "active";
+      if (/active|filled/i.test(String(el.className))) return "active";
+      if (el.querySelector(HUB.tabActive)) return "active";
+      el.click();
+      return "clicked";
+    }
+    return null;
   }
 
   async function domScan(job) {
