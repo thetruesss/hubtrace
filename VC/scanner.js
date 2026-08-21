@@ -394,7 +394,8 @@
     }
     const person = side.personCell;
     if (person) return String(person.name || person.id || "—");
-    return "—";
+    /* Ячейка какого-то другого вида — не теряем её, показываем чем есть. */
+    return anyText(side);
   }
 
   /* Под названием места Hub подписывает его тип. */
@@ -413,33 +414,146 @@
     return `${from} → ${to}`;
   }
 
+  /*
+   * Значение неизвестного вида. Hub описывает изменения объектами разной
+   * формы, и заранее известны не все: в разборе HAR из пятнадцати полей
+   * stateChanges непустыми были только пять. Чтобы остальные не пропадали
+   * из отчёта, любое значение приводим к тексту по общим правилам.
+   */
+  const NAME_KEYS = ["stringRepresentation", "name", "markup", "title", "value", "containerId", "id"];
+
+  function anyText(value, depth) {
+    const level = depth || 0;
+    if (value == null) return "—";
+    if (typeof value !== "object") return String(value);
+    if (level > 3) return "—";
+
+    if (Array.isArray(value)) {
+      const parts = value.map((entry) => anyText(entry, level + 1)).filter((part) => part && part !== "—");
+      return parts.length ? parts.join(" / ") : "—";
+    }
+
+    /* 1. Знакомое поле с подписью. */
+    for (const key of NAME_KEYS) {
+      const own = value[key];
+      if (own == null) continue;
+      if (typeof own === "object") {
+        const nested = anyText(own, level + 1);
+        if (nested !== "—") return nested;
+        continue;
+      }
+      if (String(own).trim()) return String(own);
+    }
+
+    /* 2. Простые значения как есть: {code:"X7", comment:"…"}. */
+    const parts = [];
+    for (const key of Object.keys(value)) {
+      const own = value[key];
+      if (own == null || typeof own === "object") continue;
+      if (String(own).trim()) parts.push(`${key}: ${own}`);
+      if (parts.length >= 4) break;
+    }
+    if (parts.length) return parts.join(", ");
+
+    /* 3. Подпись лежит на уровень глубже: {type:{value:"Forward", name:"Прямой"}}. */
+    for (const key of Object.keys(value)) {
+      const own = value[key];
+      if (!own || typeof own !== "object") continue;
+      const nested = anyText(own, level + 1);
+      if (nested !== "—") return nested;
+    }
+    return "—";
+  }
+
+  /* Переход «откуда → куда» для значения любого вида. */
+  function pairText(node, side) {
+    if (node && typeof node === "object" && ("from" in node || "to" in node)) {
+      const render = side || anyText;
+      return transition(render(node.from), render(node.to));
+    }
+    return anyText(node);
+  }
+
+  /*
+   * Подписи изменений.
+   *
+   * Первые пять взяты со страницы Hub — они там и написаны словами.
+   * Остальные выведены из имени поля: в разобранном HAR эти изменения ни
+   * разу не встретились, проверить их подпись было не на чем. Если Hub
+   * называет что-то иначе — правится одной строкой, а значение и сейчас
+   * не теряется. Совсем незнакомое поле подписывается своим именем.
+   */
+  const CHANGE_LABELS = {
+    container: "Лог. контейнер",
+    cell: "Ячейка",
+    location: "Местоположение",
+    status: "Статус предмета",
+    timeSlot: "Тайм-слот",
+
+    destinationPlace: "Место назначения",
+    sortingCenter: "Сортировочный центр",
+    deliveryVariant: "Способ доставки",
+    characteristic: "Характеристика",
+    flow: "Поток",
+    usk: "УСК",
+    ovh: "ОВГ",
+    suspiciousFlag: "Метка подозрительности",
+    suspiciousState: "Состояние подозрительности",
+    customState: "Особое состояние"
+  };
+
+  /*
+   * Коды состояния предмета. Сверены со страницей построчно: в разобранной
+   * истории было два изменения статуса — Forming → Banded показано как
+   * «Формируется → Сформирован», Banded → Taken как «Сформирован → Прибыл
+   * в место назначения». Остальные коды не встречались; незнакомый код
+   * пишется как есть, а не теряется.
+   */
+  const ITEM_STATES = {
+    Forming: "Формируется",
+    Banded: "Сформирован",
+    Taken: "Прибыл в место назначения"
+  };
+
+  function itemState(value) {
+    if (value == null) return "—";
+    const code = String(value);
+    return ITEM_STATES[code] || code;
+  }
+
+  /* Порядок, в котором изменения идут на странице. */
+  const CHANGE_ORDER = ["container", "cell", "timeSlot", "status", "destinationPlace", "location"];
+
+  /* Поля со своей формой значения: остальные разбирает anyText. */
+  const CHANGE_SIDES = {
+    cell: cellPath,
+    location: placeName,
+    destinationPlace: placeName,
+    sortingCenter: placeName,
+    status: itemState
+  };
+
+  function changeLabel(key) {
+    return CHANGE_LABELS[key] || key;
+  }
+
   /* Ячейка «Изменения» страницы: подписанные значения через «; ». */
   function changesText(record) {
     const state = record?.stateChanges || {};
     const parts = [];
+    const done = new Set();
 
-    if (state.container) {
-      const name = (side) => (side ? String(side.name || side.containerId || "—") : "—");
-      parts.push(`Лог. контейнер: ${transition(name(state.container.from), name(state.container.to))}`);
-    }
-    if (state.cell) {
-      parts.push(`Ячейка: ${transition(cellPath(state.cell.from), cellPath(state.cell.to))}`);
-    }
-    if (state.timeSlot) {
-      const slot = (side) => (side ? String(side.stringRepresentation || "—") : "—");
-      parts.push(`Тайм-слот: ${transition(slot(state.timeSlot.from), slot(state.timeSlot.to))}`);
-    }
-    if (state.status) {
-      parts.push(`Статус предмета: ${transition(String(state.status.from ?? "—"), String(state.status.to ?? "—"))}`);
-    }
-    if (state.destinationPlace) {
-      parts.push(
-        `Место назначения: ${transition(placeName(state.destinationPlace.from), placeName(state.destinationPlace.to))}`
-      );
-    }
-    if (state.location) {
-      parts.push(`Местоположение: ${transition(placeName(state.location.from), placeName(state.location.to))}`);
-    } else if (record?.placeInfo?.name) {
+    const push = (key) => {
+      if (done.has(key) || state[key] == null) return;
+      done.add(key);
+      parts.push(`${changeLabel(key)}: ${pairText(state[key], CHANGE_SIDES[key])}`);
+    };
+
+    for (const key of CHANGE_ORDER) push(key);
+    /* Всё, что Hub прислал сверх известного порядка. */
+    for (const key of Object.keys(state)) push(key);
+
+    if (!done.has("location") && record?.placeInfo?.name) {
       /* Переезда не было — страница показывает место самой операции. */
       parts.push(`Местоположение: ${placeName(record.placeInfo)}`);
     }
@@ -454,13 +568,24 @@
     return parts.length ? [...new Set(parts.map(String))].join(" · ") : "—";
   }
 
+  function descriptionText(record) {
+    for (const value of [record?.formattedDescription, record?.description]) {
+      if (typeof value === "string" && value.trim()) return value;
+      if (value && typeof value === "object") {
+        const text = anyText(value);
+        if (text !== "—") return text;
+      }
+    }
+    return "—";
+  }
+
   function auditRow(record) {
     return [
       CHANGE_TYPES[record?.changeType] || String(record?.changeType || "—"),
       formatEventTime(record?.eventTime),
       userText(record),
       changesText(record) || "—",
-      String(record?.formattedDescription || record?.description || "—")
+      descriptionText(record)
     ];
   }
 
