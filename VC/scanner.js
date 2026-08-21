@@ -106,7 +106,7 @@
         placeId = String(data.placeId);
         changed = true;
       }
-      if (changed) void toBackground({ action: "ht:hints", appVersion, placeId, apiTune });
+      if (changed) void toBackground(hintPayload());
       return;
     }
     if (data.type === "replayResult") {
@@ -270,6 +270,43 @@
    * другой путь, рецепт всё ещё сработает.
    */
   const AUDIT_PATH = "/p-api/scms-article-gateway/v1/articles/{id}/auditV3";
+
+  /*
+   * Фильтр «Перемещений».
+   *
+   * Вкладка «История» и её фишка «Перемещения» ходят в одну и ту же ручку —
+   * различаются только списком типов в теле запроса. С пустым списком
+   * приходит вся история: смены статуса, тайм-слоты, свойства. Именно
+   * поэтому в отчёт и детализацию уезжали строки, которых на «Перемещениях»
+   * не видно.
+   *
+   * Список снят с запроса самой страницы. Если Hub его поменяет, мы это
+   * увидим: подсмотренный запрос несёт актуальный список, и он побеждает.
+   */
+  const TRANSITION_TYPES = ["InnerWarehouse", "OnWarehouse", "InTripContainer", "InContainer", "OnCell"];
+  let auditTypes = TRANSITION_TYPES.slice();
+
+  function adoptAuditTypes(next) {
+    if (!Array.isArray(next) || !next.length) return false;
+    const clean = next.map((value) => String(value || "")).filter(Boolean);
+    if (!clean.length) return false;
+    if (clean.join("|") === auditTypes.join("|")) return false;
+    auditTypes = clean;
+    return true;
+  }
+
+  /* Список типов из тела подсмотренного запроса — он и есть текущий фильтр
+     той вкладки, которую мы открываем. */
+  function typesFromBody(body) {
+    if (typeof body !== "string" || !body.includes("changeType")) return null;
+    try {
+      const parsed = JSON.parse(body);
+      const list = parsed?.filters?.changeType;
+      return Array.isArray(list) && list.length ? list : null;
+    } catch (_err) {
+      return null;
+    }
+  }
   const BOXES_PATH = "/p-api/scms-article-gateway/v3/boxes/getBoxesFromTopologyAndContent";
 
   /*
@@ -306,6 +343,7 @@
   let placeId = "";
 
   function rememberHints(source) {
+    adoptAuditTypes(typesFromBody(source?.body));
     const headers = source?.headers || {};
     for (const key of Object.keys(headers)) {
       if (key.toLowerCase() === "x-o3-app-version" && headers[key]) appVersion = String(headers[key]);
@@ -318,6 +356,10 @@
       const match = String(source.url).match(/[?&](?:warehouse|placeId|place_id)=(\d{6,})/i);
       if (match) placeId = match[1];
     }
+  }
+
+  function hintPayload() {
+    return { action: "ht:hints", appVersion, placeId, apiTune, auditTypes };
   }
 
   function readPlaceFromLocation() {
@@ -387,7 +429,12 @@
       method: "POST",
       headers: apiHeaders(use),
       body: JSON.stringify({
-        filters: { changeType: [], users: [], encryptedUsers: [], timeRange: { startTime: null, endTime: null } },
+        filters: {
+          changeType: auditTypes,
+          users: [],
+          encryptedUsers: [],
+          timeRange: { startTime: null, endTime: null }
+        },
         pagination: { pageNumber: pageIndex + use.base, pageSize: use.pageSize }
       })
     };
@@ -456,13 +503,7 @@
 
       apiTune = { ...tune, version: appVersion || "", appName };
       apiProbeLog.push(`${describe(tune)} → подошёл`);
-      void toBackground({
-        action: "ht:hints",
-        appVersion,
-        placeId,
-        apiTune,
-        probe: apiProbeLog.slice()
-      });
+      void toBackground({ ...hintPayload(), probe: apiProbeLog.slice() });
       /* Ответ пригодится как первая страница выборки — второй раз за тем же
          ходить незачем. */
       return { tune: apiTune, json, text: response.text, posting };
@@ -877,7 +918,7 @@
       /* Hub дописывает склад оператора в адрес уже после загрузки, поэтому
          перечитываем перед самым запросом, а не один раз на старте. */
       readPlaceFromLocation();
-      if (placeId) void toBackground({ action: "ht:hints", appVersion, placeId, apiTune });
+      if (placeId) void toBackground(hintPayload());
     }
 
     if (placeId) {
@@ -2448,6 +2489,7 @@
       /* Вариант запроса уже подобран другой вкладкой — не подбираем снова. */
       if (message.apiTune && !apiTune) apiTune = message.apiTune;
       if (message.labels) learnedTypes = { ...learnedTypes, ...message.labels };
+      adoptAuditTypes(message.auditTypes);
       sendResponse({ ok: true });
       return false;
     }
@@ -2494,7 +2536,7 @@
     readBuildVars();
     readPlaceFromLocation();
     if (!appVersion && !placeId) return;
-    void toBackground({ action: "ht:hints", appVersion, placeId, apiTune });
+    void toBackground(hintPayload());
   }
 
   async function announce() {

@@ -125,6 +125,9 @@ const state = {
   changeLabels: {},
   /* Один номер за прогон считается обоими путями — «урок». */
   lessonDone: false,
+  /* Типы изменений, которые показывает открываемая вкладка. Список берётся
+     с запроса самой страницы, если он подсмотрен. */
+  auditTypes: null,
   /* Что ответил сервер на каждый вариант — показываем в интерфейсе. */
   apiProbe: [],
   /* Круги добора: номера, которые не вышли или дочитались не полностью. */
@@ -947,7 +950,8 @@ function hintsMessage() {
     placeId: state.placeId,
     nativeApi: state.nativeApi,
     apiTune: state.apiTune,
-    labels: state.changeLabels
+    labels: state.changeLabels,
+    auditTypes: state.auditTypes
   };
 }
 
@@ -1205,27 +1209,15 @@ function calibrate(api, dom, index) {
   }
 
   /*
-   * Расхождения бывают двух разных сортов.
-   *
-   * Страница открыта на «Перемещениях» — это фильтр, там нет смен статуса,
-   * тайм-слота и прочего. Запрос же берёт историю целиком. Поэтому «запрос
-   * нашёл, а страница нет» — обычное дело: строка просто не того вида,
-   * который показывает фильтр. Выключать за это быстрый путь нельзя, иначе
-   * весь прогон свалится на страницу на ровном месте.
-   *
-   * А вот обратное — страница видит склад, запрос его пропустил — значит
-   * запрос читает не то. Это и есть поломка.
+   * Оба пути смотрят на один и тот же срез истории: запрос шлёт тот же
+   * список типов, что и открытая вкладка. Поэтому расхождение в любую
+   * сторону — настоящее, и быстрый путь за него выключается.
    */
-  if (api.found && !dom?.found) {
-    state.apiFailStreak = 0;
-    return;
-  }
-
   const back = requeueApiResults();
   blockApi(
     back
-      ? `Обход DOM нашёл склад там, где запрос его не увидел (${dom?.posting || index}). Отключил быстрый путь и переснимаю ${back} номер(ов).`
-      : `Обход DOM нашёл склад там, где запрос его не увидел (${dom?.posting || index}). Отключил быстрый путь.`,
+      ? `Быстрый путь разошёлся с обходом DOM на ${dom?.posting || index}. Отключил его и переснимаю ${back} номер(ов).`
+      : `Быстрый путь разошёлся с обходом DOM на ${dom?.posting || index}. Отключил его.`,
     "mismatch"
   );
 }
@@ -1611,6 +1603,7 @@ async function runScan(payload, postings, warehouse) {
   state.apiProbe = [];
   state.changeLabels = {};
   state.lessonDone = false;
+  state.auditTypes = null;
   state.apiNotReady = false;
   state.retryRound = 0;
   state.retryIndexes = new Set();
@@ -1856,6 +1849,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (message.apiTune && !state.apiTune) {
       state.apiTune = message.apiTune;
       changed = true;
+    }
+    if (Array.isArray(message.auditTypes) && message.auditTypes.length) {
+      const next = message.auditTypes.join("|");
+      if (next !== (state.auditTypes || []).join("|")) {
+        state.auditTypes = message.auditTypes;
+        changed = true;
+      }
     }
     if (Array.isArray(message.probe) && message.probe.length) {
       state.apiProbe = message.probe;
