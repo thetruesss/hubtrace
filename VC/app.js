@@ -853,10 +853,11 @@ const REPORT_COLUMNS = [
   { title: "Номер отправления", width: 22 },
   { title: "ID отправления", width: 22 },
   { title: "Результат", width: 12 },
-  { title: "Статус", width: 18 },
+  { title: "Статус", width: 26 },
   { title: "Полнота проверки", width: 18 },
   { title: "Корзинка", width: 12 },
-  { title: "Последняя ячейка", width: 34 },
+  /* Путь ячейки Hub пишет через «/», а переезд — через «→»: строка длинная. */
+  { title: "Последняя ячейка", width: 52 },
   { title: "Подробнее", width: 14 }
 ];
 
@@ -966,8 +967,10 @@ function buildXlsx() {
     ]);
   });
 
+  /* Колонки листа деталей идут в порядке таблицы Hub: тип изменения, дата,
+     пользователь, изменения (самая длинная), описание. */
   const detailWidths = [
-    { width: 26 }, { width: 22 }, { width: 30 }, { width: 30 },
+    { width: 24 }, { width: 22 }, { width: 30 }, { width: 72 },
     { width: 40 }, { width: 40 }, { width: 40 }, { width: 40 }
   ];
 

@@ -145,8 +145,20 @@
 
   const POSTING_NUMBER_RE = /\d{6,}-\d{2,}-\d{1,3}/;
   const ROW_DATE_RE = /\d{2}\.\d{2}\.\d{4}[,\s]+\d{2}:\d{2}(?::\d{2})?/;
-  /* Метки, которыми Hub подписывает значения внутри одной ячейки таблицы. */
-  const ROW_LABELS = ["Лог. контейнер", "Ячейка", "Местоположение", "Свойство", "Значение"];
+  /*
+   * Метки, которыми Hub подписывает значения внутри одной ячейки таблицы.
+   * Список нужен только для текстового отката: в разметке метка лежит в
+   * отдельном span (см. HUB.changeLabel) и читается точно.
+   */
+  const ROW_LABELS = [
+    "Лог. контейнер",
+    "Ячейка",
+    "Местоположение",
+    "Статус предмета",
+    "Тайм-слот",
+    "Свойство",
+    "Значение"
+  ];
 
   function splitLabelled(text) {
     const found = [];
@@ -633,12 +645,67 @@
     '[class*="tabs"]'
   ].join(",");
 
+  /* ------------------------------------------------------------------ */
+  /* разметка страницы предмета                                          */
+  /* ------------------------------------------------------------------ */
+
+  /*
+   * Настоящие классы Hub. Страница собрана на CSS-модулях, у каждого класса
+   * свой хвост-хеш (ozi__data-grid__row__vhPt-, _headingText_1kfgo_11), и
+   * хеш меняется от сборки к сборке — держимся за стабильную часть имени.
+   *
+   * Что где лежит:
+   *   ._headingGroup_ › ._articleInfoRow_ › ._articleName_
+   *        ._headingText_                → «85610628-0256-2»  (номер)
+   *        ._badge_ .ozi__badge__label__ → «Прибыл в место назначения» (статус)
+   *   ._history_
+   *        .table-tools__counter         → «Всего: 27»
+   *        .ozi__data-grid__dataGrid__
+   *            .ozi__data-grid__scroller__ › [data-overlayscrollbars-viewport]
+   *                table.ozi__data-grid__table__
+   *                    thead › th › .ozi__data-grid__truncate__ → заголовок
+   *                    tbody › tr.ozi__data-grid__row__ › td.ozi__data-grid__cell__
+   *
+   * Внутри ячейки «Изменения» значения подписаны:
+   *   ul._stateChanges_ › li › span._left_ (метка) + div._right_ (значение)
+   */
+  const HUB = {
+    history: '[class*="_history_"]',
+    grid: '[class*="ozi__data-grid__dataGrid__"]',
+    scroller: '[class*="ozi__data-grid__scroller__"], [class*="ozi__scroller__scroller__"]',
+    viewport: "[data-overlayscrollbars-viewport]",
+    table: 'table[class*="ozi__data-grid__table__"], table[class*="ozi__table__table__"]',
+    row: 'tr[class*="ozi__data-grid__row__"]',
+    cell: 'td[class*="ozi__data-grid__cell__"]',
+    headTitle: '[class*="ozi__data-grid__truncate__"]',
+    counter: '[class*="table-tools__counter"]',
+    heading: '[class*="_headingGroup_"]',
+    headingName: '[class*="_articleName_"]',
+    headingText: '[class*="_headingText_"]',
+    badgeLabel: '[class*="ozi__badge__label__"]',
+    changes: '[class*="_stateChanges_"]',
+    changeLabel: '[class*="_left_"]',
+    changeValue: '[class*="_right_"]',
+    tab: '[class*="ozi__tab__tab__"], button, a, [role="tab"]',
+    tabActive: '[class*="active"], [class*="Active"], [class*="selected"], [class*="Selected"]'
+  };
+
   function historyContainer() {
-    return (
-      document.querySelector('[class*="_history_"]') ||
-      document.querySelector('[class*="data-grid"]') ||
-      null
-    );
+    const own = document.querySelector(HUB.history);
+    if (own) return own;
+
+    /* Блока истории нет — берём обёртку вокруг таблицы: ту, в которой
+       вместе с таблицей лежит счётчик «Всего: N». */
+    const grid = document.querySelector(HUB.grid);
+    if (grid) {
+      let node = grid.parentElement;
+      for (let hop = 0; node && hop < 4; hop += 1) {
+        if (node.querySelector(HUB.counter)) return node;
+        node = node.parentElement;
+      }
+      return grid;
+    }
+    return document.querySelector('[class*="data-grid"]') || null;
   }
 
   function fallbackHistoryText() {
@@ -663,22 +730,26 @@
   function rowsTable() {
     if (cachedTable && cachedTable.isConnected) return cachedTable;
     cachedTable =
-      document.querySelector("table.ozi__table__table__HAe8A") ||
-      [...document.querySelectorAll("table")].find((item) =>
-        item.querySelector("tbody tr, tr[class*='data-grid__row']")
-      ) ||
+      document.querySelector(HUB.table) ||
+      [...document.querySelectorAll("table")].find((item) => item.querySelector(`tbody tr, ${HUB.row}`)) ||
       document.querySelector("table") ||
       null;
     return cachedTable;
   }
 
+  function bodyRows(table) {
+    const own = table.querySelectorAll(HUB.row);
+    if (own.length) return own;
+    return table.querySelectorAll("tbody tr");
+  }
+
   function rowNodes() {
     const table = rowsTable();
     if (table) {
-      const rows = table.querySelectorAll("tbody tr, tr[class*='data-grid__row']");
+      const rows = bodyRows(table);
       if (rows.length) return rows;
     }
-    return document.querySelectorAll('[class*="data-grid__row"]');
+    return document.querySelectorAll(HUB.row);
   }
 
   /* «Всего: 1 234» — число может идти с разрядами через пробел или nbsp,
@@ -694,10 +765,13 @@
   }
 
   function parseCounter() {
-    const scoped = document.querySelectorAll(
-      '[class*="table-tools__counter"], [class*="counter"], [class*="Counter"], [class*="total"], [class*="Total"]'
-    );
-    for (const node of scoped) {
+    /* Счётчик истории — единственный на странице и подписан своим классом. */
+    const own = readTotal(document.querySelector(HUB.counter));
+    if (own != null) return own;
+
+    for (const node of document.querySelectorAll(
+      '[class*="counter"], [class*="Counter"], [class*="total"], [class*="Total"]'
+    )) {
       const value = readTotal(node);
       if (value != null) return value;
     }
@@ -708,18 +782,128 @@
 
   function historyReady() {
     return Boolean(
-      document.querySelector('[class*="_history_"]') ||
-        document.querySelector('[class*="table-tools__counter"]') ||
-        document.querySelector("table.ozi__table__table__HAe8A") ||
+      document.querySelector(HUB.history) ||
+        document.querySelector(HUB.grid) ||
+        document.querySelector(HUB.counter) ||
+        document.querySelector(HUB.table) ||
         rowNodes().length
     );
   }
 
   /*
-   * Шапка карточки: номер отправления (0109673395-0032-1) и статус
-   * («Сформирован») — их в истории нет, они только в шапке страницы.
+   * Текст ячейки для отчёта.
+   *
+   * textContent склеивает всё подряд: «ЯчейкаСОРТ 1 Степ / — / 05H / 02 /
+   * 24» — не разобрать, где кончилось одно значение и началось другое.
+   * Поэтому обходим узлы сами и расставляем разделители по разметке:
+   *   span._left_        → «Метка: »
+   *   svg внутри ._right_ → « → » (стрелка «откуда/куда» между ячейками)
+   *   соседние li         → «; »
+   *   соседние блоки      → « · »
    */
-  function readItemCard() {
+  const RICH_SKIP = new Set(["script", "style", "button", "input", "textarea", "select", "svg"]);
+  const RICH_BLOCK = new Set([
+    "div",
+    "p",
+    "ul",
+    "ol",
+    "li",
+    "dl",
+    "dt",
+    "dd",
+    "section",
+    "article",
+    "table",
+    "tr",
+    "td",
+    "th",
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6"
+  ]);
+  /* Разделители по силе: слабый не затирает уже выставленный сильный.
+     Иначе вложенный div внутри li подменял «; » на « · ». */
+  const RICH_RANK = { "": 0, " ": 1, " · ": 2, "; ": 3, ": ": 4, " → ": 4 };
+  const RICH_NODE_LIMIT = 4000;
+
+  function richText(root) {
+    if (!root) return "";
+    const out = [];
+    let sep = "";
+    let budget = RICH_NODE_LIMIT;
+
+    const emit = (raw) => {
+      const value = norm(raw);
+      if (!value) return;
+      if (out.length) out.push(sep || " ");
+      out.push(value);
+      sep = "";
+    };
+    const mark = (value) => {
+      if (!out.length) return;
+      if ((RICH_RANK[value] || 0) > (RICH_RANK[sep] || 0)) sep = value;
+    };
+
+    const walk = (node) => {
+      for (const child of node.childNodes) {
+        if (budget-- <= 0) return;
+        if (child.nodeType === 3) {
+          emit(child.nodeValue);
+          continue;
+        }
+        if (child.nodeType !== 1) continue;
+
+        const tag = (child.tagName || "").toLowerCase();
+        if (RICH_SKIP.has(tag)) {
+          /* Стрелка перехода рисуется иконкой — сохраняем её смысл. */
+          if (tag === "svg" && out.length && child.closest?.(HUB.changeValue)) sep = " → ";
+          continue;
+        }
+        if (child.matches?.(HUB.changeLabel)) {
+          emit(child.textContent);
+          sep = ": ";
+          continue;
+        }
+        if (tag === "li") mark("; ");
+        else if (RICH_BLOCK.has(tag)) mark(" · ");
+        walk(child);
+      }
+    };
+
+    try {
+      walk(root);
+    } catch (_err) {
+      return norm(root.textContent || "");
+    }
+    const text = norm(out.join(""));
+    return text || norm(root.textContent || "");
+  }
+
+  /*
+   * Шапка карточки: номер отправления (85610628-0256-2) и статус
+   * («Прибыл в место назначения») — их в истории нет, они только в шапке.
+   */
+  function readItemCardExact() {
+    const out = { number: "", status: "" };
+    const head = document.querySelector(HUB.headingName) || document.querySelector(HUB.heading);
+    if (!head) return out;
+
+    const number = norm(head.querySelector(HUB.headingText)?.textContent || "");
+    if (number) out.number = (number.match(POSTING_NUMBER_RE) || [number])[0];
+
+    /* Такой же класс носят бейджи внутри строк истории («Внутрискладское»),
+       поэтому ищем строго в заголовке — там бейдж ровно один. */
+    const status = norm(head.querySelector(HUB.badgeLabel)?.textContent || "");
+    if (status && status.length <= 60) out.status = status;
+    return out;
+  }
+
+  /* Откат для нестандартной вёрстки: ищем номер среди листьев страницы, а
+     статус — среди ближайших к нему коротких кириллических подписей. */
+  function readItemCardByGuess() {
     const out = { number: "", status: "" };
     const leaves = [];
     const nodes = document.querySelectorAll("h1,h2,h3,h4,span,div,a,b,strong,p");
@@ -735,10 +919,9 @@
     if (numberAt < 0) return out;
     out.number = (leaves[numberAt].text.match(POSTING_NUMBER_RE) || [""])[0];
 
-    /* Статус ищем среди соседей номера: короткое кириллическое слово без
-       цифр, желательно на цветной плашке. Вкладки «О предмете / Состав /
-       История» тоже подходят под описание, поэтому берём ближайшее к
-       номеру и предпочитаем то, у которого есть фон. */
+    /* Вкладки «О предмете / Состав / История» тоже подходят под описание
+       статуса, поэтому берём ближайшее к номеру и предпочитаем то, у чего
+       есть фон. */
     let best = null;
     for (let i = numberAt + 1; i < leaves.length && i <= numberAt + 12; i += 1) {
       const text = leaves[i].text;
@@ -759,17 +942,62 @@
     return out;
   }
 
+  function readItemCard() {
+    const exact = readItemCardExact();
+    if (exact.number && exact.status) return exact;
+    const guess = readItemCardByGuess();
+    return { number: exact.number || guess.number, status: exact.status || guess.status };
+  }
+
   function tableColumns() {
     const table = rowsTable();
     const head = table?.querySelector("thead");
     if (!head) return [];
-    return [...head.querySelectorAll("th, td")].map((cell) => norm(cell.textContent)).filter(Boolean);
+    return [...head.querySelectorAll("th, td")]
+      .map((cell) => norm((cell.querySelector(HUB.headTitle) || cell).textContent))
+      .filter(Boolean);
+  }
+
+  function rowCellNodes(row) {
+    const own = row.querySelectorAll?.(HUB.cell);
+    if (own?.length) return own;
+    return row.querySelectorAll?.("td, th") || [];
   }
 
   function rowCells(row) {
-    const cells = row.querySelectorAll("td, th");
-    if (cells.length) return [...cells].map((cell) => norm(cell.textContent));
-    return [norm(row.textContent)];
+    const cells = rowCellNodes(row);
+    if (cells.length) return [...cells].map((cell) => richText(cell));
+    return [richText(row)];
+  }
+
+  /* Подписанные значения строки: {«Ячейка»: «…», «Местоположение»: «…»}. */
+  function rowFields(row) {
+    const out = {};
+    const items = row.querySelectorAll?.(`${HUB.changes} li`);
+    if (!items?.length) return out;
+    for (const item of items) {
+      const label = norm(item.querySelector(HUB.changeLabel)?.textContent || "");
+      if (!label || out[label]) continue;
+      const value = item.querySelector(HUB.changeValue);
+      const text = value ? richText(value) : "";
+      if (text) out[label] = text;
+    }
+    return out;
+  }
+
+  /* Дата строки — из колонки «Дата», а не поиском по всей строке: в
+     «Описании» тоже встречаются даты. */
+  function rowDate(row, columns) {
+    const titles = columns || tableColumns();
+    const at = titles.findIndex((title) => /^дата/i.test(title));
+    if (at >= 0) {
+      const cells = rowCellNodes(row);
+      const text = norm(cells[at]?.textContent || "");
+      const match = text.match(ROW_DATE_RE);
+      if (match) return match[0];
+      if (text && text.length <= 40) return text;
+    }
+    return findDate(rowCells(row));
   }
 
   function detectAuth() {
@@ -877,9 +1105,10 @@
      * начинали крутить. Поэтому только явные контейнеры списка.
      */
     for (const selector of [
-      "[data-overlayscrollbars-viewport]",
-      '[class*="data-grid__scroller"]',
-      '[class*="ozi__scroller__scroller"]'
+      `${HUB.grid} ${HUB.viewport}`,
+      `${HUB.scroller} ${HUB.viewport}`,
+      HUB.viewport,
+      HUB.scroller
     ]) {
       const el = document.querySelector(selector);
       if (scrolls(el)) return el;
@@ -964,10 +1193,18 @@
   }
 
   function clickHistoryTab() {
-    for (const el of document.querySelectorAll('button, a, [role="tab"]')) {
+    for (const el of document.querySelectorAll(HUB.tab)) {
       const label = textOf(el).toLowerCase();
       if (label !== "история" && !label.startsWith("история")) continue;
-      if (el.getAttribute("aria-selected") === "true" || String(el.className).includes("active")) return false;
+      /*
+       * Активную вкладку Hub помечает не на самой кнопке, а на вложенном
+       * узле (ozi__tab-content__active__…). Раньше проверялся только
+       * className кнопки — и мы кликали по уже открытой истории, сбрасывая
+       * догруженный список.
+       */
+      if (el.getAttribute("aria-selected") === "true") return false;
+      if (String(el.className).includes("active")) return false;
+      if (el.querySelector(HUB.tabActive)) return false;
       el.click();
       return true;
     }
@@ -988,6 +1225,8 @@
     let sample = "";
     /* Верхняя строка с искомым складом — из неё берём дату и ячейку. */
     let warehouseCells = null;
+    let warehouseFields = null;
+    let warehouseDate = "";
 
     function harvest() {
       const rows = rowNodes();
@@ -1010,6 +1249,8 @@
           found = true;
           sample = value.slice(0, 280);
           warehouseCells = rowCells(rows[i]);
+          warehouseFields = rowFields(rows[i]);
+          warehouseDate = rowDate(rows[i]);
         }
       }
       prevLength = length;
@@ -1166,8 +1407,11 @@
       status: card.status,
       columns: tableColumns(),
       lastRows: [...tableRows].slice(0, 3).map(rowCells),
-      warehouseAt: warehouseCells ? findDate(warehouseCells) : "",
-      warehouseCell: warehouseCells ? findCell(warehouseCells) : ""
+      /* Разметка знает и дату, и ячейку точно; текстовый разбор остаётся
+         откатом на случай другой вёрстки. */
+      warehouseAt: warehouseDate || (warehouseCells ? findDate(warehouseCells) : ""),
+      warehouseCell:
+        warehouseFields?.["Ячейка"] || (warehouseCells ? findCell(warehouseCells) : "")
     };
 
     const loaded = seen.size;
