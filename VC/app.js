@@ -151,18 +151,29 @@ function parsePostings(raw) {
     .map((line) => line.trim())
     .filter(Boolean);
 
+  /* В строке из Excel колонок несколько, и ID далеко не всегда первый:
+     рядом стоят номер отправления, дата, склад. Берём ту часть, которая
+     похожа на ID; не нашлось — оставляем прежнее поведение. */
+  const firstId = (parts) => parts.find((part) => sheetReader.looksLikeId(part));
+
   const tokens = [];
   for (const line of lines) {
     if (line.includes("\t")) {
-      tokens.push(line.split("\t")[0].trim());
+      const parts = line.split("\t").map((part) => part.trim()).filter(Boolean);
+      tokens.push(firstId(parts) || parts[0] || "");
       continue;
     }
     if (/[,;]/.test(line)) {
-      tokens.push(...line.split(/[,;]+/).map((part) => part.trim()).filter(Boolean));
+      const parts = line.split(/[,;]+/).map((part) => part.trim()).filter(Boolean);
+      const id = firstId(parts);
+      if (id) tokens.push(id);
+      else tokens.push(...parts);
       continue;
     }
     const parts = line.split(/\s+/);
-    if (parts.length > 1 && parts.every((part) => /^[A-Za-z0-9:_-]+$/.test(part))) tokens.push(...parts);
+    const id = firstId(parts);
+    if (id) tokens.push(id);
+    else if (parts.length > 1 && parts.every((part) => /^[A-Za-z0-9:_-]+$/.test(part))) tokens.push(...parts);
     else tokens.push(parts[0]);
   }
 
@@ -1145,15 +1156,49 @@ $("file-input").addEventListener("change", (event) => {
   event.target.value = "";
 });
 
+function appendToField(text) {
+  const current = postingsEl.value.trim();
+  postingsEl.value = current ? `${current}\n${text}` : text;
+  updateCount();
+}
+
+/*
+ * Из файла берём только ID: и в .xlsx, и в выгрузке CSV нужный столбец
+ * стоит где угодно, а рядом с ним — номера отправлений, даты, склады.
+ * Раньше всё это целиком уезжало в поле вместе со знаками табуляции.
+ */
 async function readFile(file) {
+  let result;
   try {
-    const text = await file.text();
-    postingsEl.value = postingsEl.value.trim() ? `${postingsEl.value.trim()}\n${text}` : text;
-    updateCount();
-    toast("ok", `Загружено из ${file.name}`);
+    result = await sheetReader.readIdsFromFile(file);
   } catch (_err) {
     showError("Не получилось прочитать файл.");
+    return;
   }
+
+  if (result.error) {
+    showError(result.error);
+    return;
+  }
+
+  if (result.ids.length) {
+    appendToField(result.ids.join("\n"));
+    toast("ok", `${file.name}: ${result.ids.length} ${plural(result.ids.length, ["ID", "ID", "ID"])}`);
+    return;
+  }
+
+  /* ID по признаку не нашлись. Для .xlsx подсказать больше нечего, а
+     текстовый файл отдаём как есть — вдруг там список в другом виде. */
+  if (result.kind === "xlsx") {
+    showError(`В ${file.name} не нашлось ни одного ID (от 10 цифр, в конце 000).`);
+    return;
+  }
+  if (!result.text.trim()) {
+    showError(`Файл ${file.name} пустой.`);
+    return;
+  }
+  appendToField(result.text.trim());
+  toast("warn", `В ${file.name} не видно ID — вставил текст как есть`);
 }
 
 const drop = $("drop");

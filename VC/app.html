@@ -70,13 +70,13 @@
                   <button id="btn-clear" class="btn btn--ghost btn--sm" type="button" disabled>Очистить</button>
                 </div>
               </div>
-              <p class="hint">Один номер на строку. Можно вставить столбец из Excel или перетащить сюда файл.</p>
+              <p class="hint">Один ID на строку. Можно перетащить сюда файл Excel или CSV — ID найдутся в любой колонке.</p>
               <div class="drop" id="drop">
                 <textarea id="postings" spellcheck="false" placeholder="551373007622000&#10;551373007622001"></textarea>
                 <div class="drop__overlay"><span>Отпустите файл</span></div>
               </div>
               <p class="panel__foot" id="input-stats">Пока пусто</p>
-              <input id="file-input" type="file" accept=".txt,.csv,.tsv,text/plain" hidden />
+              <input id="file-input" type="file" accept=".xlsx,.csv,.tsv,.txt,text/plain" hidden />
             </section>
 
             <aside class="side">
@@ -338,6 +338,7 @@
     </template>
 
     <script src="xlsx.js"></script>
+    <script src="sheet.js"></script>
     <script src="app.js"></script>
   </body>
 </html>

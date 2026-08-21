@@ -33,7 +33,11 @@
     card: null,
     cardScore: -1,
     startedAt: Date.now(),
-    capturing: true
+    capturing: true,
+    /* Версия приложения Hub и склад оператора — для обращений к известным
+       ручкам напрямую, без подсмотренного запроса. */
+    appVersion: "",
+    placeId: ""
   };
   window.__hubTraceProbe = probe;
 
@@ -199,7 +203,43 @@
     post({ type: "cardRecipe", recipe });
   }
 
+  /*
+   * Подсказки: версия приложения Hub и склад оператора. Оба значения Hub
+   * шлёт в своих же запросах — версию заголовком, склад параметром
+   * warehouse. Знать их нужно, чтобы обращаться к известным ручкам без
+   * подсмотренного запроса, поэтому забираем из любого обращения, а не
+   * только из тех, что годятся в рецепт.
+   */
+  function noteHints(request) {
+    if (!request || !sameOrigin(request.url)) return;
+    let changed = false;
+
+    const headers = request.headers || {};
+    for (const key of Object.keys(headers)) {
+      if (key.toLowerCase() !== "x-o3-app-version" || !headers[key]) continue;
+      const value = String(headers[key]);
+      if (value !== probe.appVersion) {
+        probe.appVersion = value;
+        changed = true;
+      }
+    }
+
+    if (!probe.placeId) {
+      const source = `${request.url || ""}\n${typeof request.body === "string" ? request.body : ""}`;
+      const match =
+        source.match(/[?&](?:warehouse|placeId|place_id)=(\d{6,})/i) ||
+        source.match(/"placeId"\s*:\s*"?(\d{6,})"?/);
+      if (match) {
+        probe.placeId = match[1];
+        changed = true;
+      }
+    }
+
+    if (changed) post({ type: "hint", appVersion: probe.appVersion, placeId: probe.placeId });
+  }
+
   function consider(request, responseText) {
+    noteHints(request);
     if (!probe.capturing) return;
     if (Date.now() - probe.startedAt > CAPTURE_WINDOW_MS) {
       probe.capturing = false;
@@ -390,6 +430,9 @@
     if (event.data?.channel !== CHANNEL || event.data?.type !== "askRecipe") return;
     if (probe.recipe) post({ type: "recipe", recipe: probe.recipe });
     if (probe.card) post({ type: "cardRecipe", recipe: probe.card });
+    if (probe.appVersion || probe.placeId) {
+      post({ type: "hint", appVersion: probe.appVersion, placeId: probe.placeId });
+    }
   });
 
   post({ type: "probeReady" });

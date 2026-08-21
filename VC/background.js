@@ -98,6 +98,16 @@ const state = {
   recipeStale: false,
   recipeStaleAt: 0,
 
+  /* Версия приложения Hub и склад оператора — общие для всех вкладок. */
+  appVersion: "",
+  placeId: "",
+  /* Известные ручки Hub отвечают. Сбрасывается, если Hub их переименует —
+     тогда быстрый путь снова держится только на подсмотренном запросе. */
+  nativeApi: true,
+  /* Последняя попытка сорвалась не из-за поломки, а потому что повторять
+     было нечем: ручек нет, запрос ещё не подсмотрен. */
+  apiNotReady: false,
+
   workers: new Map(),
   liveWorkers: 0,
   domInFlight: 0,
@@ -644,7 +654,11 @@ function cleanPosting(posting) {
 }
 
 function buildHistoryUrl(posting) {
-  return `https://hub.o3t.ru/management/stock/item/Lozon:${encodeURIComponent(cleanPosting(posting))}?&tab=history`;
+  const id = encodeURIComponent(cleanPosting(posting));
+  /* Склад оператора Hub всё равно допишет сам — но уже после загрузки.
+     Подставляем сразу: карточке предмета он нужен в самом первом запросе. */
+  const place = state.placeId ? `warehouse=${encodeURIComponent(state.placeId)}&` : "";
+  return `https://hub.o3t.ru/management/stock/item/Lozon:${id}?${place}tab=history`;
 }
 
 function failItem(posting, status, extra) {
@@ -766,6 +780,7 @@ async function apiScan(worker, posting) {
     return null;
   }
   setPhase(worker, "api", posting, "api");
+  state.apiNotReady = false;
   const reply = await Promise.race([
     sendTab(worker.tabId, {
       action: "ht:apiScan",
@@ -778,6 +793,17 @@ async function apiScan(worker, posting) {
   setPhase(worker, "idle", "", "");
   if (!reply?.ok || !reply.result) {
     state.apiLastReason = reply?.reason || "нет ответа от вкладки";
+    if (reply?.nativeMissing) {
+      /* Hub переехал на другие пути: дальше только подсмотренный запрос. */
+      state.nativeApi = false;
+      /* Рецепта ещё нет — это не поломка, а «пока нечем повторять». */
+      state.apiNotReady = !state.recipe;
+      /* Вкладкам это тоже надо знать: после каждой загрузки страницы
+         content script поднимается заново и иначе снова сходил бы за
+         несуществующей ручкой. */
+      broadcastHints();
+      return null;
+    }
     if (reply?.auth) {
       state.apiAuthStreak += 1;
       markRecipeStale(reply.reason);
@@ -857,8 +883,31 @@ async function domScanWithRetry(worker, posting) {
   return best;
 }
 
+function hintsMessage() {
+  return {
+    action: "ht:setHints",
+    appVersion: state.appVersion,
+    placeId: state.placeId,
+    nativeApi: state.nativeApi
+  };
+}
+
+function broadcastHints() {
+  const message = hintsMessage();
+  for (const worker of state.workers.values()) {
+    if (worker.tabId != null) void sendTab(worker.tabId, message);
+  }
+}
+
 function apiAllowed(worker) {
-  if (!state.useApi || !cfg().api || !state.recipe || !worker.hubReady) return false;
+  /*
+   * Рецепт больше не обязателен: ручки истории и карточки известны, ID
+   * подставляется прямо в путь. Раньше без подсмотренного запроса быстрый
+   * путь вообще не включался, и первые номера всегда шли обходом DOM.
+   */
+  if (!state.useApi || !cfg().api || !worker.hubReady) return false;
+  /* Ни известных ручек, ни подсмотренного запроса — повторять нечего. */
+  if (!state.nativeApi && !state.recipe) return false;
 
   if (state.recipeStale) {
     /* Ждём свежий захват. Если он так и не приехал — пробуем как есть,
@@ -1068,6 +1117,9 @@ async function processOne(worker, posting, index) {
   if (apiAllowed(worker)) {
     if (state.apiState === "trusted" && !spotCheckDue()) {
       const api = await apiScan(worker, posting);
+      /* Попытка не считается: известной ручки не оказалось, а рецепта ещё
+         не было. Ждём захвата, а не выключаем быстрый путь. */
+      if (!api && state.apiNotReady) return domScanWithRetry(worker, posting);
       if (api) {
         state.apiFailStreak = 0;
         state.apiSinceCheck += 1;
@@ -1290,6 +1342,9 @@ async function runScan(payload, postings, warehouse) {
   state.uncheckCurrentOnly = settings.uncheckCurrentOnly;
   state.apiState = "unknown";
   state.apiNote = "";
+  /* Новый прогон — снова пробуем известные ручки: Hub мог и вернуться. */
+  state.nativeApi = true;
+  state.apiNotReady = false;
   state.apiFailStreak = 0;
   state.apiSinceCheck = 0;
   state.apiIndexes = new Set();
@@ -1462,6 +1517,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         worker.hubReady = true;
         if (state.recipe) void sendTab(tabId, { action: "ht:setRecipe", recipe: state.recipe });
         if (state.cardRecipe) void sendTab(tabId, { action: "ht:setCardRecipe", recipe: state.cardRecipe });
+        void sendTab(tabId, hintsMessage());
       }
     }
     if (!pending || pending.posting !== message.posting) {
@@ -1510,6 +1566,25 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         if (worker.tabId != null) void sendTab(worker.tabId, { action: "ht:setCardRecipe", recipe: next });
       }
     }
+    sendResponse({ ok: true });
+    return false;
+  }
+
+  /*
+   * Версия приложения Hub и склад оператора: их видит первая же вкладка,
+   * а нужны они всем — без склада не собрать карточку предмета.
+   */
+  if (action === "ht:hints") {
+    let changed = false;
+    if (message.appVersion && !state.appVersion) {
+      state.appVersion = String(message.appVersion);
+      changed = true;
+    }
+    if (message.placeId && !state.placeId) {
+      state.placeId = String(message.placeId);
+      changed = true;
+    }
+    if (changed) broadcastHints();
     sendResponse({ ok: true });
     return false;
   }

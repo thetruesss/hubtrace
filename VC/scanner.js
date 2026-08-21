@@ -96,6 +96,19 @@
       adoptCardRecipe(data.recipe, true);
       return;
     }
+    if (data.type === "hint") {
+      let changed = false;
+      if (data.appVersion && data.appVersion !== appVersion) {
+        appVersion = String(data.appVersion);
+        changed = true;
+      }
+      if (data.placeId && !placeId) {
+        placeId = String(data.placeId);
+        changed = true;
+      }
+      if (changed) void toBackground({ action: "ht:hints", appVersion, placeId });
+      return;
+    }
     if (data.type === "replayResult") {
       const waiter = replayWaiters.get(data.ticket);
       if (!waiter) return;
@@ -125,6 +138,7 @@
 
     recipe = next;
     recipeScore = score;
+    rememberHints(next);
     if (share) void toBackground({ action: "ht:recipe", recipe: next });
   }
 
@@ -136,6 +150,7 @@
     if (!(score > cardScore || (score >= cardScore && captured > currentCaptured))) return;
     cardRecipe = next;
     cardScore = score;
+    rememberHints(next);
     if (share) void toBackground({ action: "ht:cardRecipe", recipe: next });
   }
 
@@ -228,6 +243,375 @@
         resolve({ ok: false, status: 0, error: "postmessage_failed" });
       }
     });
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* известные ручки Hub                                                 */
+  /* ------------------------------------------------------------------ */
+
+  /*
+   * Раньше быстрый путь целиком строился на подсмотренном запросе: пока
+   * страница сама не сходит за историей, повторять было нечего — первые
+   * номера всегда шли обходом DOM, а после смены вёрстки или протухания
+   * заголовков всё сваливалось туда же.
+   *
+   * Обе ручки известны и стабильны, ID отправления подставляется прямо в
+   * путь, авторизация — по cookie сессии Hub:
+   *
+   *   POST /p-api/scms-article-gateway/v1/articles/{id}/auditV3
+   *        {filters:{…}, pagination:{pageNumber, pageSize}}
+   *        → {totalCount, records:[…]}
+   *
+   *   POST /p-api/scms-article-gateway/v3/boxes/getBoxesFromTopologyAndContent
+   *        {placeId, boxes:[{boxId, boxSource:"Lozon"}]}
+   *        → {items:[{postingInfo:{postingName, stateName, …}, cellInfo:{…}}]}
+   *
+   * Подсмотренный запрос остаётся запасным вариантом: если Hub переедет на
+   * другой путь, рецепт всё ещё сработает.
+   */
+  const AUDIT_PATH = "/p-api/scms-article-gateway/v1/articles/{id}/auditV3";
+  const BOXES_PATH = "/p-api/scms-article-gateway/v3/boxes/getBoxesFromTopologyAndContent";
+
+  /* Заголовок версии приложения Hub шлёт со всеми своими запросами. Он не
+     обязателен, но с ним запрос неотличим от родного — берём, если видели. */
+  let appVersion = "";
+  /* Склад оператора: нужен только карточке предмета. */
+  let placeId = "";
+
+  function rememberHints(source) {
+    const headers = source?.headers || {};
+    for (const key of Object.keys(headers)) {
+      if (key.toLowerCase() === "x-o3-app-version" && headers[key]) appVersion = String(headers[key]);
+    }
+    if (!placeId && source?.body) {
+      const match = String(source.body).match(/"placeId"\s*:\s*"?(\d{6,})"?/);
+      if (match) placeId = match[1];
+    }
+    if (!placeId && source?.url) {
+      const match = String(source.url).match(/[?&](?:warehouse|placeId|place_id)=(\d{6,})/i);
+      if (match) placeId = match[1];
+    }
+  }
+
+  function readPlaceFromLocation() {
+    try {
+      const value = new URLSearchParams(location.search).get("warehouse");
+      if (value && /^\d{6,}$/.test(value)) placeId = value;
+    } catch (_err) {
+      /* ignore */
+    }
+  }
+
+  function apiHeaders() {
+    const out = {
+      accept: "application/json, text/plain, */*",
+      "content-type": "application/json",
+      "x-o3-app-name": "scms"
+    };
+    if (appVersion) out["x-o3-app-version"] = appVersion;
+    return out;
+  }
+
+  function auditRequest(posting, pageNumber, pageSize) {
+    return {
+      url: ORIGIN + AUDIT_PATH.replace("{id}", encodeURIComponent(posting)),
+      method: "POST",
+      headers: apiHeaders(),
+      body: JSON.stringify({
+        filters: { changeType: [], users: [], encryptedUsers: [], timeRange: { startTime: null, endTime: null } },
+        pagination: { pageNumber, pageSize }
+      })
+    };
+  }
+
+  function boxesRequest(posting) {
+    return {
+      url: ORIGIN + BOXES_PATH,
+      method: "POST",
+      headers: apiHeaders(),
+      body: JSON.stringify({
+        placeId: Number(placeId) || 0,
+        boxes: [{ boxId: String(posting), boxSource: "Lozon" }]
+      })
+    };
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* разбор ответа истории                                               */
+  /* ------------------------------------------------------------------ */
+
+  /* Подписи Hub рисует на фронте, в ответе приходит только код. */
+  const CHANGE_TYPES = {
+    InnerWarehouse: "Внутрискладское",
+    OnWarehouse: "На склад",
+    OnCell: "На ячейку",
+    InContainer: "В контейнер",
+    InTripContainer: "В рейс",
+    TimeSlot: "Тайм-слот",
+    Status: "Статус предмета"
+  };
+
+  const AUDIT_COLUMNS = ["Тип изменения", "Дата", "Пользователь", "Изменения", "Описание"];
+
+  /*
+   * Формат страницы: 20.08.2026, 23:47:54. Время в ответе — UTC
+   * (2026-08-20T20:47:54+00:00), а Hub показывает московское: свои же
+   * тайм-слоты он так и подписывает — «… MSK». Приводим к тому же поясу,
+   * иначе дата в отчёте разъезжается с датой на странице, а вместе с ней
+   * уезжает и корзинка.
+   */
+  let hubClock = null;
+
+  function formatEventTime(raw) {
+    if (!raw) return "";
+    const at = new Date(raw);
+    if (Number.isNaN(at.getTime())) return String(raw);
+    try {
+      if (!hubClock) {
+        hubClock = new Intl.DateTimeFormat("ru-RU", {
+          timeZone: "Europe/Moscow",
+          year: "numeric",
+          month: "2-digit",
+          day: "2-digit",
+          hour: "2-digit",
+          minute: "2-digit",
+          second: "2-digit",
+          hour12: false
+        });
+      }
+      return hubClock.format(at).replace(/\s+/g, " ");
+    } catch (_err) {
+      return at.toISOString();
+    }
+  }
+
+  function cellPath(side) {
+    if (!side) return "—";
+    const cells = side.nhlCell?.cells;
+    if (Array.isArray(cells) && cells.length) {
+      /* Пустое имя уровня Hub рисует прочерком, а не пропуском. */
+      return cells.map((cell) => String(cell?.name || "—")).join(" / ");
+    }
+    const person = side.personCell;
+    if (person) return String(person.name || person.id || "—");
+    return "—";
+  }
+
+  /* Под названием места Hub подписывает его тип. */
+  const PLACE_TYPES = { Warehouse: "Склад", Trip: "Рейс", Courier: "Курьер", Person: "Сотрудник" };
+
+  function placeName(side) {
+    if (!side) return "—";
+    const name = side.name || (side.trip?.tripId ? String(side.trip.tripId) : "") || (side.id ? String(side.id) : "");
+    if (!name) return "—";
+    const type = PLACE_TYPES[side.type];
+    return type ? `${name} · ${type}` : name;
+  }
+
+  function transition(from, to) {
+    if (from === to) return from;
+    return `${from} → ${to}`;
+  }
+
+  /* Ячейка «Изменения» страницы: подписанные значения через «; ». */
+  function changesText(record) {
+    const state = record?.stateChanges || {};
+    const parts = [];
+
+    if (state.container) {
+      const name = (side) => (side ? String(side.name || side.containerId || "—") : "—");
+      parts.push(`Лог. контейнер: ${transition(name(state.container.from), name(state.container.to))}`);
+    }
+    if (state.cell) {
+      parts.push(`Ячейка: ${transition(cellPath(state.cell.from), cellPath(state.cell.to))}`);
+    }
+    if (state.timeSlot) {
+      const slot = (side) => (side ? String(side.stringRepresentation || "—") : "—");
+      parts.push(`Тайм-слот: ${transition(slot(state.timeSlot.from), slot(state.timeSlot.to))}`);
+    }
+    if (state.status) {
+      parts.push(`Статус предмета: ${transition(String(state.status.from ?? "—"), String(state.status.to ?? "—"))}`);
+    }
+    if (state.destinationPlace) {
+      parts.push(
+        `Место назначения: ${transition(placeName(state.destinationPlace.from), placeName(state.destinationPlace.to))}`
+      );
+    }
+    if (state.location) {
+      parts.push(`Местоположение: ${transition(placeName(state.location.from), placeName(state.location.to))}`);
+    } else if (record?.placeInfo?.name) {
+      /* Переезда не было — страница показывает место самой операции. */
+      parts.push(`Местоположение: ${placeName(record.placeInfo)}`);
+    }
+
+    return parts.join("; ");
+  }
+
+  function userText(record) {
+    const user = record?.userInfo;
+    if (!user) return "—";
+    const parts = [user.name, user.id, user.uiName].filter((value) => value && String(value).trim());
+    return parts.length ? [...new Set(parts.map(String))].join(" · ") : "—";
+  }
+
+  function auditRow(record) {
+    return [
+      CHANGE_TYPES[record?.changeType] || String(record?.changeType || "—"),
+      formatEventTime(record?.eventTime),
+      userText(record),
+      changesText(record) || "—",
+      String(record?.formattedDescription || record?.description || "—")
+    ];
+  }
+
+  /* Ячейка строки — тем же текстом, что показывает страница: «откуда → куда».
+     Полный переезд полезнее конечной ячейки: видно, откуда предмет уехал. */
+  function auditCell(record) {
+    const cell = record?.stateChanges?.cell;
+    if (!cell) return "";
+    return transition(cellPath(cell.from), cellPath(cell.to));
+  }
+
+  /*
+   * Совпадение ищем по всей записи целиком — ровно так же, как обход
+   * страницы ищет по тексту всей строки. Если сузить поиск до полей места,
+   * два пути начнут расходиться на пограничных номерах, сверка сочтёт это
+   * поломкой быстрого пути и выключит его.
+   */
+  function recordMatches(record, needle) {
+    if (!record) return false;
+    try {
+      return JSON.stringify(record).toLowerCase().includes(needle);
+    } catch (_err) {
+      return false;
+    }
+  }
+
+  function reportFromAudit(head, hit) {
+    return {
+      columns: AUDIT_COLUMNS.slice(),
+      lastRows: head.slice(0, 3).map(auditRow),
+      warehouseAt: hit ? formatEventTime(hit.eventTime) : "",
+      warehouseCell: hit ? auditCell(hit) : ""
+    };
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* быстрый путь по известным ручкам                                    */
+  /* ------------------------------------------------------------------ */
+
+  async function nativeCard(posting, timeoutMs) {
+    if (!placeId) {
+      /* Hub дописывает склад оператора в адрес уже после загрузки, поэтому
+         перечитываем перед самым запросом, а не один раз на старте. */
+      readPlaceFromLocation();
+      if (placeId) void toBackground({ action: "ht:hints", appVersion, placeId });
+    }
+    if (!placeId) return { number: "", status: "" };
+    const response = await replay(boxesRequest(posting), timeoutMs);
+    if (!response?.ok || !response.text) return { number: "", status: "" };
+    try {
+      const info = JSON.parse(response.text)?.items?.[0]?.postingInfo;
+      return {
+        number: String(info?.postingName || info?.name || ""),
+        status: String(info?.stateName || "")
+      };
+    } catch (_err) {
+      return { number: "", status: "" };
+    }
+  }
+
+  async function nativeScan(job) {
+    const posting = String(job.posting || "").trim();
+    const needle = String(job.warehouse || "").toLowerCase();
+    if (!posting || !needle) return { ok: false, reason: "нет данных задания" };
+
+    const deadline = Date.now() + Math.max(4000, Number(job.timeoutMs) || 20000);
+
+    let loaded = 0;
+    let total = null;
+    let found = false;
+    let sample = "";
+    let digest = "";
+    const head = [];
+    let hit = null;
+    /* Просим страницу побольше, чтобы уложиться в один запрос. Если сервер
+       режет её по-своему, узнаем это по первому же ответу и дальше будем
+       ходить его шагом — иначе вторая страница уехала бы мимо. */
+    let size = DEFAULT_PAGE_SIZE;
+
+    for (let page = 1; page <= MAX_API_PAGES; page += 1) {
+      if (abortFlag || Date.now() > deadline) return { ok: false, reason: "aborted" };
+
+      const left = Math.max(2000, deadline - Date.now());
+      const response = await replay(auditRequest(posting, page, size), left);
+
+      if (!response) return { ok: false, reason: "нет ответа" };
+      if (response.status === 401 || response.status === 403) {
+        return { ok: false, auth: true, status: response.status, reason: `ответ ${response.status}` };
+      }
+      if (response.status === 404 || response.status === 405) {
+        /* Ручка переехала — дальше пробовать нечего, пусть работает рецепт. */
+        return { ok: false, missing: true, reason: `ответ ${response.status}` };
+      }
+      if (!response.ok || !response.text) {
+        return { ok: false, reason: response.error ? `сеть: ${response.error}` : `ответ ${response.status || "?"}` };
+      }
+
+      let json;
+      try {
+        json = JSON.parse(response.text);
+      } catch (_err) {
+        return { ok: false, missing: true, reason: "ответ не JSON" };
+      }
+
+      const records = Array.isArray(json?.records) ? json.records : null;
+      if (!records) return { ok: false, missing: true, reason: "в ответе нет records" };
+
+      if (page === 1) {
+        digest = digestOf(response.text);
+        if (Number.isFinite(json?.totalCount)) total = Number(json.totalCount);
+        /* Строк меньше, чем просили, а в списке их больше — сервер обрезал
+           страницу по своему пределу. Дальше идём его шагом. */
+        if (records.length && records.length < size && total != null && total > records.length) {
+          size = records.length;
+        }
+      }
+      /* В отчёт идут первые три строки, всю историю копить незачем. */
+      for (const record of records) {
+        if (head.length < 3) head.push(record);
+        if (!hit && recordMatches(record, needle)) hit = record;
+      }
+
+      loaded += records.length;
+      if (!found && hit) {
+        found = true;
+        sample = JSON.stringify(hit).slice(0, 280);
+      }
+
+      if (found) break;
+      if (!records.length) break;
+      if (total != null && loaded >= total) break;
+      /* Итог неизвестен: неполная страница — значит список кончился. */
+      if (total == null && records.length < size) break;
+    }
+
+    const report = reportFromAudit(head, hit);
+    const card = await nativeCard(posting, Math.max(2000, Math.min(8000, deadline - Date.now())));
+    report.number = card.number;
+    report.status = card.status;
+
+    return {
+      ok: true,
+      via: "api",
+      found,
+      expected: total != null ? total : loaded,
+      loaded,
+      complete: total == null || loaded >= total || found,
+      sample,
+      digest,
+      report
+    };
   }
 
   /* ------------------------------------------------------------------ */
@@ -496,7 +880,31 @@
     return { columns, lastRows, warehouseAt, warehouseCell };
   }
 
+  /* Известная ручка отвалилась — в этой вкладке больше не пробуем. */
+  let nativeOff = false;
+
   async function apiScan(job) {
+    /*
+     * Сначала известные ручки Hub: им не нужен подсмотренный запрос, так
+     * что быстрый путь работает с самого первого номера, а не после того,
+     * как страница сама сходит за историей.
+     */
+    if (!nativeOff) {
+      const native = await nativeScan(job);
+      if (native.ok || native.auth) return native;
+      if (native.missing) nativeOff = true;
+      if (!recipe) {
+        return {
+          ok: false,
+          reason: native.reason || "no_recipe",
+          /* Ручка не отвечает, а подсмотренного запроса ещё нет: это не
+             поломка быстрого пути, а «пока нечем» — фон не должен считать
+             такую попытку провалом и выключать API. */
+          nativeMissing: Boolean(native.missing)
+        };
+      }
+    }
+
     if (!recipe) return { ok: false, reason: "no_recipe" };
     const posting = String(job.posting || "").trim();
     if (!posting) return { ok: false, reason: "no_posting" };
@@ -1531,6 +1939,17 @@
       return false;
     }
 
+    if (message.action === "ht:setHints") {
+      if (message.appVersion && !appVersion) appVersion = String(message.appVersion);
+      if (message.placeId && !placeId) placeId = String(message.placeId);
+      /* Фон уже выяснил, что известной ручки нет. После каждой загрузки
+         страницы content script поднимается заново и без этого ходил бы
+         за ней снова и снова. */
+      if (message.nativeApi === false) nativeOff = true;
+      sendResponse({ ok: true });
+      return false;
+    }
+
     if (message.action === "ht:abort") {
       abortFlag = true;
       sendResponse({ ok: true });
@@ -1542,7 +1961,12 @@
       apiScan(message)
         .then((raw) => {
           if (!raw?.ok) {
-            sendResponse({ ok: false, reason: raw?.reason || "api_failed", auth: Boolean(raw?.auth) });
+            sendResponse({
+              ok: false,
+              reason: raw?.reason || "api_failed",
+              auth: Boolean(raw?.auth),
+              nativeMissing: Boolean(raw?.nativeMissing)
+            });
             return;
           }
           sendResponse({ ok: true, result: normalizeResult(raw) });
@@ -1560,8 +1984,17 @@
   });
 
   /* Страница сама сообщает фону, что готова принять задание. */
+  /* Подсказки нужны всем вкладкам, а узнаёт их та, что открылась первой:
+     склад оператора Hub дописывает в адрес уже после загрузки страницы. */
+  function shareHints() {
+    readPlaceFromLocation();
+    if (!appVersion && !placeId) return;
+    void toBackground({ action: "ht:hints", appVersion, placeId });
+  }
+
   async function announce() {
     askProbeForRecipe();
+    shareHints();
     const posting = itemIdFromHref(location.href);
     if (!posting) return;
 
