@@ -836,8 +836,27 @@ function renderList(name) {
   updateFormState();
 }
 
+/*
+ * Подписи типов изменения, подсмотренные на странице Hub. В ответе тип
+ * приходит кодом; строка могла собраться раньше, чем подпись стала
+ * известна, поэтому подставляем её на месте — и в карточке, и в выгрузке.
+ */
+let changeLabels = {};
+
+function withLabels(report) {
+  const rows = report?.lastRows;
+  const codes = report?.codes;
+  if (!Array.isArray(rows) || !Array.isArray(codes) || !codes.length) return rows || [];
+  return rows.map((row, index) => {
+    const label = changeLabels[codes[index]];
+    if (!label || !row?.length || row[0] === label) return row;
+    return [label, ...row.slice(1)];
+  });
+}
+
 function renderResults(payload) {
   const results = (payload?.results || []).filter(Boolean);
+  changeLabels = payload?.changeLabels || {};
   ui.finished = payload || null;
   ui.reportSaved = false;
   ui.lists = splitResults(results);
@@ -1011,7 +1030,7 @@ function buildXlsx() {
       : Array.from({ length: report.lastRows[0].length }, (_, i) => `Колонка ${i + 1}`);
     detailRows.push(columns.map((title2) => ({ text: title2, style: xlsxStyles.STYLE_HEAD })));
 
-    for (const row of report.lastRows) detailRows.push(row.map((value) => ({ text: value })));
+    for (const row of withLabels(report)) detailRows.push(row.map((value) => ({ text: value })));
     detailRows.push([]);
   });
 
@@ -1545,7 +1564,7 @@ function haystackOf(item) {
     CHECK_STATUS[item.status] || item.status,
     VIA_LABELS[item.via] || item.via,
     ...(report.columns || []),
-    ...(report.lastRows || []).flat()
+    ...withLabels(report).flat()
   ]
     .filter(Boolean)
     .join(" ")
@@ -1716,7 +1735,7 @@ function detailCard(item) {
   addFact("Последняя ячейка", report.warehouseCell);
   if (facts.childElementCount) card.appendChild(facts);
 
-  const rows = report.lastRows || [];
+  const rows = withLabels(report);
   if (!rows.length) {
     card.appendChild(el("p", "card__none", "Строки истории не прочитались."));
     return card;
