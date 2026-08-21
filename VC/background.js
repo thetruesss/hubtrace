@@ -115,6 +115,9 @@ const state = {
   apiTune: null,
   /* Что ответил сервер на каждый вариант — показываем в интерфейсе. */
   apiProbe: [],
+  /* Круг добора: номера, которые в первый заход не вышли. */
+  retryDone: false,
+  retryIndexes: new Set(),
   /* Последняя попытка сорвалась не из-за поломки, а потому что повторять
      было нечем: ручек нет, запрос ещё не подсмотрен. */
   apiNotReady: false,
@@ -1179,9 +1182,32 @@ async function primeTab(worker, posting) {
   return worker.hubReady;
 }
 
+/*
+ * Добор: считаем номер обоими путями и берём тот, который вышел лучше.
+ * Отчёт при этом собираем из обоих — у запроса точнее поля, у страницы
+ * есть номер и статус даже без карточки.
+ */
+async function retryBoth(worker, posting, index) {
+  if (!worker.hubReady && state.useApi && cfg().api) await primeTab(worker, posting);
+
+  const api = apiAllowed(worker) ? await apiScan(worker, posting) : null;
+  if (api) {
+    state.apiIndexes.add(index);
+    watchDigest(api);
+  }
+  if (state.stopping) return failItem(posting, "stopped");
+
+  const dom = await domScanWithRetry(worker, posting);
+  const best = betterOf(api, dom);
+  const merged = mergeReports(api, dom);
+  return merged ? { ...best, report: merged } : best;
+}
+
 async function processOne(worker, posting, index) {
   /* Вкладка нужна и быстрому пути — но только как площадка для запроса. */
   if (!worker.hubReady && state.useApi && cfg().api) await primeTab(worker, posting);
+
+  if (state.retryIndexes.has(index)) return retryBoth(worker, posting, index);
 
   if (apiAllowed(worker)) {
     if (state.apiState === "trusted" && !spotCheckDue()) {
@@ -1227,8 +1253,9 @@ async function processOne(worker, posting, index) {
 /* ------------------------------------------------------------------ */
 
 function commit(index, item) {
+  /* На круге добора номер приходит второй раз — счётчик не должен расти. */
+  if (state.results[index] == null) state.processed += 1;
   state.results[index] = item;
-  state.processed += 1;
   emit({
     action: "scanProgress",
     jobId: state.jobId,
@@ -1282,11 +1309,49 @@ async function workerLoop(worker) {
   }
 }
 
+/*
+ * Что считать ошибкой — ровно то же, что показывает лента: «не вышло».
+ * Найденный склад и честное «нет» ошибками не считаются.
+ */
+function isIssue(item) {
+  if (!item) return true;
+  if (item.found) return false;
+  if (item.status === "partial") return true;
+  if (item.status === "complete" || item.status === "missing") return false;
+  return !item.ok;
+}
+
+/*
+ * Круг добора. Первый заход мог не выйти по случайной причине: вкладка не
+ * успела, сервер ответил не тем, страница не дочиталась. Такие номера
+ * прогоняем ещё раз — и сразу обоими путями, чтобы взять тот, который
+ * ответил лучше.
+ */
+function queueRetries() {
+  if (state.retryDone || state.stopping) return false;
+  state.retryDone = true;
+
+  const again = [];
+  state.results.forEach((item, index) => {
+    if (isIssue(item)) again.push(index);
+  });
+  if (!again.length) return false;
+
+  state.retryIndexes = new Set(again);
+  state.requeue.push(...again);
+  notice("api", `Не вышло ${again.length} — иду по ним ещё раз, запросом и страницей.`);
+  return true;
+}
+
 function maybeFinalize() {
   if (!state.running || state.finalized) return;
   if (state.liveWorkers > 0) return;
   if (!state.stopping && state.paused) return;
   if (!state.stopping && hasWork()) {
+    ensureWorkers();
+    if (state.liveWorkers > 0) return;
+  }
+  if (!state.stopping && queueRetries()) {
     ensureWorkers();
     if (state.liveWorkers > 0) return;
   }
@@ -1426,6 +1491,9 @@ async function runScan(payload, postings, warehouse) {
   state.apiTune = null;
   state.apiProbe = [];
   state.apiNotReady = false;
+  /* Круг добора по ошибкам делается один раз за прогон. */
+  state.retryDone = false;
+  state.retryIndexes = new Set();
   state.apiFailStreak = 0;
   state.apiSinceCheck = 0;
   state.apiIndexes = new Set();

@@ -219,6 +219,10 @@
               <div class="result-meta" id="result-meta"></div>
             </div>
             <div class="hero-actions">
+              <div class="seg seg--tabs" id="result-tabs" role="tablist">
+                <button class="seg__btn is-on" type="button" data-view="list" role="tab">Список</button>
+                <button class="seg__btn" type="button" data-view="detail" role="tab">Детализация</button>
+              </div>
               <button id="btn-copy" class="btn btn--primary" type="button" disabled>
                 <span class="btn__swap">
                   <span class="btn__idle">Копировать найденные</span>
@@ -280,6 +284,27 @@
               <input class="filter" type="search" placeholder="Фильтр" data-filter="issues" />
               <textarea id="issues" class="result-list" readonly spellcheck="false"></textarea>
             </section>
+          </div>
+
+          <div class="detail" id="result-detail" hidden>
+            <div class="detail__bar glass">
+              <label class="detail__search">
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2" />
+                  <path d="m16 16 4.5 4.5" fill="none" stroke="currentColor" stroke-width="2"
+                        stroke-linecap="round" />
+                </svg>
+                <input
+                  id="detail-search"
+                  type="search"
+                  spellcheck="false"
+                  placeholder="ID или номер отправления — можно несколько через пробел, запятую или с новой строки"
+                />
+              </label>
+              <div class="detail__chips" id="detail-chips"></div>
+              <span class="detail__count" id="detail-count"></span>
+            </div>
+            <div class="detail__scroll" id="detail-list"></div>
           </div>
         </section>
       </main>

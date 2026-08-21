@@ -470,13 +470,13 @@
     return null;
   }
 
-  function boxesRequest(posting) {
+  function boxesRequest(posting, place) {
     return {
       url: ORIGIN + BOXES_PATH,
       method: "POST",
       headers: apiHeaders(apiTune || "full"),
       body: JSON.stringify({
-        placeId: Number(placeId) || 0,
+        placeId: Number(place ?? placeId) || 0,
         boxes: [{ boxId: String(posting), boxSource: "Lozon" }]
       })
     };
@@ -771,25 +771,45 @@
   /* быстрый путь по известным ручкам                                    */
   /* ------------------------------------------------------------------ */
 
+  function readCard(response) {
+    if (!response?.ok || !response.text) return null;
+    try {
+      const info = JSON.parse(response.text)?.items?.[0]?.postingInfo;
+      if (!info) return null;
+      return {
+        number: String(info.postingName || info.name || ""),
+        status: String(info.stateName || "")
+      };
+    } catch (_err) {
+      return null;
+    }
+  }
+
+  /* Проверено ли, что карточка отдаётся и без склада оператора. */
+  let placelessCard = null;
+
   async function nativeCard(posting, timeoutMs) {
     if (!placeId) {
       /* Hub дописывает склад оператора в адрес уже после загрузки, поэтому
          перечитываем перед самым запросом, а не один раз на старте. */
       readPlaceFromLocation();
-      if (placeId) void toBackground({ action: "ht:hints", appVersion, placeId });
+      if (placeId) void toBackground({ action: "ht:hints", appVersion, placeId, apiTune });
     }
-    if (!placeId) return { number: "", status: "" };
-    const response = await replay(boxesRequest(posting), timeoutMs);
-    if (!response?.ok || !response.text) return { number: "", status: "" };
-    try {
-      const info = JSON.parse(response.text)?.items?.[0]?.postingInfo;
-      return {
-        number: String(info?.postingName || info?.name || ""),
-        status: String(info?.stateName || "")
-      };
-    } catch (_err) {
-      return { number: "", status: "" };
+
+    if (placeId) {
+      const card = readCard(await replay(boxesRequest(posting), timeoutMs));
+      if (card) return card;
     }
+
+    /*
+     * Склад оператора не выяснился (или с ним не вышло). Один раз проверяем,
+     * отдаёт ли Hub карточку и без него: если да — номер и статус в отчёте
+     * будут всегда, а не только когда повезло увидеть warehouse в адресе.
+     */
+    if (placelessCard === false) return { number: "", status: "" };
+    const card = readCard(await replay(boxesRequest(posting, 0), timeoutMs));
+    placelessCard = Boolean(card);
+    return card || { number: "", status: "" };
   }
 
   async function nativeScan(job) {
@@ -1158,28 +1178,53 @@
     }
   }
 
-  const DATE_KEY_RE = /(date|time|дата|created|moment|stamp)/i;
-  const CELL_KEY_RE = /(cell|ячей|slot|place)/i;
+  /*
+   * Запись истории Hub узнаётся по форме, а не по тому, каким путём её
+   * достали. Это важно: раньше подсмотренный запрос ходил в ту же ручку,
+   * но ответ разбирался «вообще любым» способом — с раскладкой JSON в
+   * плоские ключи. В отчёт уезжали колонки operationContextId,
+   * placeInfo.type, stateChanges.customState и прочее, а «последней
+   * ячейкой» становилось слово Warehouse: под шаблон ячейки подходил ключ
+   * placeInfo.type.
+   *
+   * Теперь оба пути разбирают историю одинаково и дают ровно то же, что
+   * видно на странице.
+   */
+  function looksLikeAudit(rows) {
+    const first = rows?.[0];
+    if (!first || typeof first !== "object" || Array.isArray(first)) return false;
+    return "eventTime" in first && ("changeType" in first || "stateChanges" in first);
+  }
 
+  const DATE_KEY_RE = /(date|time|дата|created|moment|stamp)/i;
+
+  /*
+   * Ответ незнакомой формы. Придумывать под него колонки нельзя — раньше
+   * из-за этого в отчёт попадала сырая раскладка JSON. Берём только дату
+   * найденной строки: она нужна для корзинки. Остальное дополнит обход
+   * страницы, а если и его не было — блока в детализации просто не будет.
+   */
   function reportFromApiRows(rows, needle) {
     const flat = rows.map((row) => flattenRow(row, "", {}, 0));
-    const columns = [];
-    for (const row of flat.slice(0, 3)) {
-      for (const key of Object.keys(row)) if (!columns.includes(key)) columns.push(key);
-    }
-    const lastRows = flat.slice(0, 3).map((row) => columns.map((key) => row[key] ?? ""));
+    const hit = flat.find((row) => Object.values(row).join(" ").toLowerCase().includes(needle));
 
     let warehouseAt = "";
-    let warehouseCell = "";
-    const hit = flat.find((row) => Object.values(row).join(" ").toLowerCase().includes(needle));
     if (hit) {
       for (const key of Object.keys(hit)) {
-        if (!warehouseAt && DATE_KEY_RE.test(key) && String(hit[key]).trim()) warehouseAt = String(hit[key]);
-        if (!warehouseCell && CELL_KEY_RE.test(key) && String(hit[key]).trim()) warehouseCell = String(hit[key]);
+        if (DATE_KEY_RE.test(key) && String(hit[key]).trim()) {
+          warehouseAt = String(hit[key]);
+          break;
+        }
       }
       if (!warehouseAt) warehouseAt = findDate(Object.values(hit));
     }
-    return { columns, lastRows, warehouseAt, warehouseCell };
+    return { columns: [], lastRows: [], warehouseAt, warehouseCell: "" };
+  }
+
+  function reportFromRows(rows, needle) {
+    if (!looksLikeAudit(rows)) return reportFromApiRows(rows, needle);
+    const hit = rows.find((record) => recordMatches(record, needle));
+    return reportFromAudit(rows.slice(0, 3), hit);
   }
 
   /* Известная ручка отвалилась — в этой вкладке больше не пробуем. */
@@ -1314,12 +1359,28 @@
       if (failed) continue;
 
       const expected = total != null ? total : loaded;
-      const report = reportFromApiRows(allRows, needle);
-      const card = extractCardFrom(firstJson);
+      const report = reportFromRows(allRows, needle);
+      const left = () => Math.max(2000, Math.min(8000, deadline - Date.now()));
+
+      /*
+       * Номер и статус — из карточки предмета. В истории их нет, и выуживать
+       * их регуляркой из ответа истории незачем: это тот же случай, что и с
+       * колонками — можно поймать что угодно похожее.
+       */
+      const card = { number: "", status: "" };
+      const known = await nativeCard(posting, left());
+      card.number = known.number;
+      card.status = known.status;
       if (!card.number || !card.status) {
-        const extra = await fetchCard(posting, Math.max(2000, Math.min(8000, deadline - Date.now())));
+        const extra = await fetchCard(posting, left());
         card.number = card.number || extra.number;
         card.status = card.status || extra.status;
+      }
+      /* Совсем ничего не вышло — последняя попытка по самому ответу. */
+      if (!card.number || !card.status) {
+        const guess = extractCardFrom(firstJson);
+        card.number = card.number || guess.number;
+        card.status = card.status || guess.status;
       }
       report.number = card.number;
       report.status = card.status;
