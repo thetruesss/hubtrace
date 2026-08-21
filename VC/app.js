@@ -900,6 +900,9 @@ function renderResults(payload) {
   buildDetailIndex(results);
   resetDetailFilters();
   fillFilterOptions();
+  buildStatsIndex(results);
+  resetStatsFilters();
+  fillStatsOptions();
   setResultView("list");
   renderDetail();
 
@@ -1630,31 +1633,43 @@ let viewSwapTimer = null;
  * Смена пространства: уходящее гаснет, приходящее проявляется. Подсветка
  * вкладок едет за выбранной — за это отвечает --seg-index.
  */
+function resultPanes() {
+  return {
+    list: document.querySelector(".result-grid"),
+    detail: $("result-detail"),
+    stats: $("result-stats")
+  };
+}
+
 function setResultView(view, animate) {
   const tabs = $("result-tabs");
-  const grid = document.querySelector(".result-grid");
-  const detail = $("result-detail");
-  if (!tabs || !grid || !detail) return;
+  const panes = resultPanes();
+  const to = panes[view];
+  if (!tabs || !to) return;
 
   const buttons = $$(".seg__btn", tabs);
   const at = buttons.findIndex((btn) => btn.dataset.view === view);
   tabs.style.setProperty("--seg-index", String(Math.max(0, at)));
+  tabs.style.setProperty("--seg-count", String(buttons.length || 1));
   for (const btn of buttons) btn.classList.toggle("is-on", btn.dataset.view === view);
 
-  const from = view === "list" ? detail : grid;
-  const to = view === "list" ? grid : detail;
+  const from = panes[resultView];
   const same = resultView === view;
   resultView = view;
 
   window.clearTimeout(viewSwapTimer);
   const show = () => {
-    from.hidden = true;
-    from.classList.remove("is-leaving");
+    for (const [key, pane] of Object.entries(panes)) {
+      if (!pane || key === view) continue;
+      pane.hidden = true;
+      pane.classList.remove("is-leaving");
+    }
     to.hidden = false;
     if (view === "detail") renderDetail();
+    if (view === "stats") renderStats();
   };
 
-  if (!animate || same || from.hidden) {
+  if (!animate || same || !from || from.hidden) {
     show();
     return;
   }
@@ -1888,6 +1903,652 @@ function resetDetailFilters() {
 }
 
 mountDetail();
+
+/* ------------------------------------------------------------------ */
+/* аналитика                                                           */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Третье пространство результата — дашборд по виновникам.
+ *
+ * Правило одно, и оно же написано в подзаголовках панелей: если искомый
+ * склад в истории есть, проблема скорее всего в последней ячейке верхней
+ * строки об этом складе; если склада нет — виноват верхний по движениям
+ * склад. По этим виновникам и построены графики, фильтры и таблица.
+ */
+let statsIndex = [];
+let statsQuery = [];
+const statsFilters = { verdict: "", cell: "", place: "", bucket: "", status: "", via: "", day: "" };
+let statsSort = { key: "at", dir: -1 };
+
+const STATS_SELECTS = {
+  verdict: "stats-verdict",
+  cell: "stats-cell",
+  place: "stats-place",
+  bucket: "stats-bucket",
+  status: "stats-status",
+  via: "stats-via"
+};
+
+/* «A → B» — предмет доехал до B; «A → —» — последним известным остаётся A. */
+function lastCellOf(raw) {
+  const text = String(raw || "").trim();
+  if (!text) return "";
+  const sides = text.split("→").map((side) => side.trim()).filter(Boolean);
+  for (let i = sides.length - 1; i >= 0; i -= 1) {
+    if (sides[i] && sides[i] !== "—") return sides[i];
+  }
+  return "";
+}
+
+/*
+ * Верхний склад по движениям: идём по строкам сверху вниз, внутри строки
+ * разбираем «Местоположение: …», стороны переезда смотрим с конца (самое
+ * свежее место). Рейсы пропускаем — виноват склад; если складов не
+ * встретилось вовсе, берём первое попавшееся место без пометки.
+ */
+function topPlaceOf(rows) {
+  let fallback = "";
+  for (const row of rows || []) {
+    for (const cell of row || []) {
+      const text = String(cell || "");
+      if (!text.includes("Местоположение:")) continue;
+      for (const part of text.split(/;\s*/)) {
+        const at = part.indexOf("Местоположение:");
+        if (at < 0) continue;
+        const value = part.slice(at + "Местоположение:".length).trim();
+        const sides = value.split("→").map((side) => side.trim()).filter(Boolean);
+        for (let i = sides.length - 1; i >= 0; i -= 1) {
+          const side = sides[i];
+          if (!side || side === "—") continue;
+          const warehouse = side.match(/^(.*?)\s*·\s*Склад$/);
+          if (warehouse) return warehouse[1].trim();
+          if (!fallback) fallback = side.replace(/\s*·\s*[^·]+$/, "").trim();
+        }
+      }
+    }
+  }
+  return fallback;
+}
+
+/* Дата верхней строки — из колонки «Дата», как её рисует Hub. */
+function topDateOf(report) {
+  const rows = report?.lastRows;
+  if (!Array.isArray(rows) || !rows.length) return "";
+  const columns = report.columns || [];
+  let at = columns.findIndex((title) => /^дата/i.test(String(title || "")));
+  if (at < 0) at = 1;
+  return String(rows[0]?.[at] || "").trim();
+}
+
+function blameOf(item) {
+  const report = item.report || {};
+  const kind = classify(item);
+  if (kind === "hit") {
+    return { kind: "cell", value: lastCellOf(report.warehouseCell), at: report.warehouseAt || topDateOf(report) };
+  }
+  if (kind === "miss") {
+    return { kind: "place", value: topPlaceOf(withLabels(report)), at: topDateOf(report) };
+  }
+  return { kind: "none", value: "", at: "" };
+}
+
+const BLAME_TAGS = { cell: "ячейка", place: "склад" };
+
+function buildStatsIndex(results) {
+  const now = Date.now();
+  statsIndex = results.map((item) => {
+    const blame = blameOf(item);
+    const stamp = parseHubDate(blame.at);
+    return {
+      item,
+      blame,
+      bucket: bucketOf(item.report?.warehouseAt, now),
+      day: stamp ? `${pad(stamp.getDate())}.${pad(stamp.getMonth() + 1)}` : "",
+      dayTs: stamp ? new Date(stamp.getFullYear(), stamp.getMonth(), stamp.getDate()).getTime() : 0,
+      hay: [haystackOf(item), blame.value, BLAME_TAGS[blame.kind] || ""].join(" ").toLowerCase()
+    };
+  });
+}
+
+const STATS_NO_SKIP = new Set();
+
+function passesStats(entry, skip) {
+  const s = skip || STATS_NO_SKIP;
+  const item = entry.item;
+  if (!s.has("verdict") && statsFilters.verdict && classify(item) !== statsFilters.verdict) return false;
+  if (!s.has("via") && statsFilters.via && item.via !== statsFilters.via) return false;
+  if (!s.has("status") && statsFilters.status && (item.report?.status || "") !== statsFilters.status) return false;
+  if (!s.has("bucket") && statsFilters.bucket && entry.bucket !== statsFilters.bucket) return false;
+  if (!s.has("cell") && statsFilters.cell) {
+    if (entry.blame.kind !== "cell" || entry.blame.value !== statsFilters.cell) return false;
+  }
+  if (!s.has("place") && statsFilters.place) {
+    if (entry.blame.kind !== "place" || entry.blame.value !== statsFilters.place) return false;
+  }
+  if (!s.has("day") && statsFilters.day && entry.day !== statsFilters.day) return false;
+  if (statsQuery.length && !statsQuery.some((needle) => entry.hay.includes(needle))) return false;
+  return true;
+}
+
+function statsFiltersActive() {
+  return Object.values(statsFilters).some(Boolean) || statsQuery.length > 0;
+}
+
+function tallyBy(entries, keyOf) {
+  const map = new Map();
+  for (const entry of entries) {
+    const key = keyOf(entry);
+    if (!key) continue;
+    map.set(key, (map.get(key) || 0) + 1);
+  }
+  return [...map.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0], "ru"));
+}
+
+function fillStatsOptions() {
+  const fill = (id, values, anyLabel) => {
+    const select = $(id);
+    if (!select) return;
+    const keep = select.value;
+    select.innerHTML = "";
+    const any = document.createElement("option");
+    any.value = "";
+    any.textContent = anyLabel;
+    select.appendChild(any);
+    for (const value of values) {
+      const option = document.createElement("option");
+      option.value = value;
+      option.textContent = value;
+      select.appendChild(option);
+    }
+    select.value = values.includes(keep) ? keep : "";
+  };
+
+  const cells = tallyBy(
+    statsIndex.filter((entry) => entry.blame.kind === "cell"),
+    (entry) => entry.blame.value
+  ).map(([value]) => value);
+  const places = tallyBy(
+    statsIndex.filter((entry) => entry.blame.kind === "place"),
+    (entry) => entry.blame.value
+  ).map(([value]) => value);
+
+  const buckets = [];
+  const statuses = [];
+  for (const entry of statsIndex) {
+    if (entry.bucket && !buckets.includes(entry.bucket)) buckets.push(entry.bucket);
+    const status = entry.item.report?.status;
+    if (status && !statuses.includes(status)) statuses.push(status);
+  }
+  buckets.sort((a, b) => BUCKET_ORDER.indexOf(a) - BUCKET_ORDER.indexOf(b));
+  statuses.sort((a, b) => a.localeCompare(b, "ru"));
+
+  fill("stats-cell", cells, "любая");
+  fill("stats-place", places, "любой");
+  fill("stats-bucket", buckets, "любая");
+  fill("stats-status", statuses, "любой");
+}
+
+function syncStatsControls() {
+  for (const [key, id] of Object.entries(STATS_SELECTS)) {
+    const select = $(id);
+    if (select && select.value !== statsFilters[key]) select.value = statsFilters[key];
+  }
+}
+
+function toggleStatsFilter(key, value) {
+  statsFilters[key] = statsFilters[key] === value ? "" : value;
+  renderStats();
+}
+
+/* ---- KPI ---- */
+
+function renderStatsKpis(shown) {
+  const host = $("stats-kpis");
+  if (!host) return;
+
+  let hits = 0;
+  let misses = 0;
+  let issues = 0;
+  const cells = new Set();
+  const places = new Set();
+  for (const entry of shown) {
+    const kind = classify(entry.item);
+    if (kind === "hit") hits += 1;
+    else if (kind === "miss") misses += 1;
+    else issues += 1;
+    if (entry.blame.kind === "cell" && entry.blame.value) cells.add(entry.blame.value);
+    if (entry.blame.kind === "place" && entry.blame.value) places.add(entry.blame.value);
+  }
+
+  const filtered = statsFiltersActive();
+  const tiles = [
+    { label: "Отправлений", value: shown.length, sub: filtered ? `из ${statsIndex.length}` : "" },
+    { label: "Склад есть", value: hits, mod: "hit" },
+    { label: "Склада нет", value: misses, mod: "miss" },
+    { label: "Не вышло", value: issues, mod: "issue" },
+    { label: "Виновных ячеек", value: cells.size, mod: "cell" },
+    { label: "Виновных складов", value: places.size, mod: "place" }
+  ];
+
+  host.innerHTML = "";
+  for (const tile of tiles) {
+    const box = el("div", `kpi${tile.mod ? ` kpi--${tile.mod}` : ""}`);
+    box.appendChild(el("span", null, tile.label));
+    box.appendChild(el("b", null, String(tile.value)));
+    if (tile.sub) box.appendChild(el("em", null, tile.sub));
+    host.appendChild(box);
+  }
+}
+
+/* ---- графики ---- */
+
+function chartEmpty(host, text) {
+  host.appendChild(el("p", "bars__none", text));
+}
+
+/*
+ * Полосы — фасетные: каждая панель считается по срезу без собственного
+ * фильтра, выбранное значение подсвечено, остальные пригашены. Так после
+ * клика по полосе распределение остаётся на месте, и с него можно
+ * переключиться на соседнее значение одним кликом.
+ */
+function renderBarChart(hostId, rows, options) {
+  const host = $(hostId);
+  if (!host) return;
+  host.innerHTML = "";
+
+  if (!rows.length) {
+    chartEmpty(host, options.empty || "Под фильтры ничего не попало.");
+    return;
+  }
+
+  const top = rows.slice(0, 10);
+  const max = top[0][1] || 1;
+  for (const [value, count] of top) {
+    const active = options.active;
+    const row = document.createElement("button");
+    row.type = "button";
+    row.className = `hbar${active === value ? " is-on" : active ? " is-dim" : ""}`;
+    row.title = active === value ? "Снять фильтр" : "Показать все ID с этим виновником";
+    row.addEventListener("click", () => options.pick(value));
+
+    const label = el("span", "hbar__label", value);
+    label.title = value;
+    const track = el("span", "hbar__track");
+    const fill = el("i", "hbar__fill");
+    fill.style.width = `${Math.max(3, (count / max) * 100)}%`;
+    if (options.color) fill.style.background = options.color;
+    track.appendChild(fill);
+    const num = el("span", "hbar__value", String(count));
+
+    row.append(label, track, num);
+    host.appendChild(row);
+  }
+
+  const feet = [];
+  if (rows.length > top.length) {
+    const rest = rows.slice(top.length).reduce((sum, [, count]) => sum + count, 0);
+    feet.push(`за десяткой ещё ${rows.length - top.length} — на них ${rest} ID`);
+  }
+  if (options.foot) feet.push(options.foot);
+  if (feet.length) host.appendChild(el("p", "bars__foot", feet.join(" · ")));
+}
+
+function renderStatsCharts() {
+  const cellSlice = statsIndex.filter(
+    (entry) => passesStats(entry, new Set(["cell"])) && entry.blame.kind === "cell"
+  );
+  const cellRows = tallyBy(cellSlice, (entry) => entry.blame.value);
+  const cellMissing = cellSlice.filter((entry) => !entry.blame.value).length;
+  renderBarChart("chart-cells", cellRows, {
+    color: "var(--viz-hit)",
+    active: statsFilters.cell,
+    pick: (value) => toggleStatsFilter("cell", value),
+    foot: cellMissing ? `ячейка не прочиталась: ${cellMissing}` : "",
+    empty: "Ни одного ID с найденным складом под фильтрами."
+  });
+
+  const placeSlice = statsIndex.filter(
+    (entry) => passesStats(entry, new Set(["place"])) && entry.blame.kind === "place"
+  );
+  const placeRows = tallyBy(placeSlice, (entry) => entry.blame.value);
+  const placeMissing = placeSlice.filter((entry) => !entry.blame.value).length;
+  renderBarChart("chart-places", placeRows, {
+    color: "var(--viz-miss)",
+    active: statsFilters.place,
+    pick: (value) => toggleStatsFilter("place", value),
+    foot: placeMissing ? `склад не прочитался: ${placeMissing}` : "",
+    empty: "Ни одного ID без склада под фильтрами."
+  });
+
+  const statusSlice = statsIndex.filter((entry) => passesStats(entry, new Set(["status"])));
+  renderBarChart("chart-status", tallyBy(statusSlice, (entry) => entry.item.report?.status || ""), {
+    color: "var(--viz-blue)",
+    active: statsFilters.status,
+    pick: (value) => toggleStatsFilter("status", value),
+    empty: "Статусы не прочитались."
+  });
+
+  renderDaysChart();
+}
+
+/* Колонки по дням: снизу «склад есть», сверху «склада нет», зазор 2px. */
+function renderDaysChart() {
+  const host = $("chart-days");
+  const legend = $("stats-legend");
+  if (!host) return;
+  host.innerHTML = "";
+
+  const slice = statsIndex.filter((entry) => passesStats(entry, new Set(["day"])) && entry.day);
+  const byDay = new Map();
+  for (const entry of slice) {
+    const bucket = byDay.get(entry.day) || { day: entry.day, ts: entry.dayTs, hit: 0, miss: 0 };
+    bucket.ts = Math.min(bucket.ts, entry.dayTs);
+    const kind = classify(entry.item);
+    if (kind === "hit") bucket.hit += 1;
+    else if (kind === "miss") bucket.miss += 1;
+    byDay.set(entry.day, bucket);
+  }
+
+  let days = [...byDay.values()].sort((a, b) => a.ts - b.ts);
+  if (days.length > 16) days = days.slice(-16);
+
+  let hits = 0;
+  let misses = 0;
+  for (const day of days) {
+    hits += day.hit;
+    misses += day.miss;
+  }
+  if (legend) {
+    legend.innerHTML = "";
+    const key = (color, text) => {
+      const item = el("span", "legend__item", text);
+      const mark = el("i");
+      mark.style.background = color;
+      item.prepend(mark);
+      legend.appendChild(item);
+    };
+    key("var(--viz-hit)", `склад есть · ${hits}`);
+    key("var(--viz-miss)", `склада нет · ${misses}`);
+  }
+
+  if (!days.length) {
+    chartEmpty(host, "Дат верхних операций не нашлось.");
+    return;
+  }
+
+  const PLOT = 108;
+  const max = Math.max(...days.map((day) => day.hit + day.miss)) || 1;
+  for (const day of days) {
+    const active = statsFilters.day;
+    const col = document.createElement("button");
+    col.type = "button";
+    col.className = `col${active === day.day ? " is-on" : active ? " is-dim" : ""}`;
+    col.title = active === day.day ? "Снять фильтр" : `Показать все ID за ${day.day}`;
+    col.addEventListener("click", () => toggleStatsFilter("day", day.day));
+
+    col.appendChild(el("span", "col__cap", String(day.hit + day.miss)));
+    const stack = el("span", "col__stack");
+    /* Сверху вниз: «склада нет», потом «склад есть» — жёлтое у основания. */
+    const parts = [
+      ["col__seg col__seg--miss", day.miss],
+      ["col__seg col__seg--hit", day.hit]
+    ];
+    for (const [className, count] of parts) {
+      if (!count) continue;
+      const seg = el("i", className);
+      seg.style.height = `${Math.max(3, Math.round((count / max) * PLOT))}px`;
+      stack.appendChild(seg);
+    }
+    col.appendChild(stack);
+    col.appendChild(el("span", "col__day", day.day));
+    host.appendChild(col);
+  }
+}
+
+/* ---- таблица ---- */
+
+const STATS_SORT_VALUES = {
+  id: (entry) => entry.item.posting,
+  number: (entry) => entry.item.report?.number || "",
+  verdict: (entry) => {
+    const kind = classify(entry.item);
+    return kind === "hit" ? 0 : kind === "miss" ? 1 : 2;
+  },
+  blame: (entry) => entry.blame.value || "",
+  at: (entry) => {
+    const date = parseHubDate(entry.blame.at);
+    return date ? date.getTime() : 0;
+  },
+  bucket: (entry) => {
+    const at = BUCKET_ORDER.indexOf(entry.bucket);
+    return at < 0 ? BUCKET_ORDER.length : at;
+  },
+  status: (entry) => entry.item.report?.status || "",
+  via: (entry) => entry.item.via || ""
+};
+
+function sortStats(entries) {
+  const value = STATS_SORT_VALUES[statsSort.key] || STATS_SORT_VALUES.at;
+  const dir = statsSort.dir;
+  return [...entries].sort((a, b) => {
+    const left = value(a);
+    const right = value(b);
+    const cmp =
+      typeof left === "number" && typeof right === "number"
+        ? left - right
+        : String(left).localeCompare(String(right), "ru");
+    return cmp ? cmp * dir : String(a.item.posting).localeCompare(String(b.item.posting), "ru");
+  });
+}
+
+const STATS_ROW_LIMIT = 500;
+
+function renderStatsTable(shown) {
+  const body = $("stats-rows");
+  if (!body) return;
+  body.innerHTML = "";
+
+  for (const th of $$("#stats-table th[data-sort]")) {
+    th.classList.toggle("is-sorted", th.dataset.sort === statsSort.key);
+    th.classList.toggle("is-desc", th.dataset.sort === statsSort.key && statsSort.dir < 0);
+  }
+
+  const rows = sortStats(shown);
+  const count = $("stats-table-count");
+  if (count) {
+    count.textContent =
+      rows.length > STATS_ROW_LIMIT ? `показаны первые ${STATS_ROW_LIMIT} из ${rows.length}` : `${rows.length} строк`;
+  }
+
+  if (!rows.length) {
+    const tr = document.createElement("tr");
+    const td = el("td", "t-none", "Под фильтры ничего не попало — смягчите их или очистите поиск.");
+    td.colSpan = 9;
+    tr.appendChild(td);
+    body.appendChild(tr);
+    return;
+  }
+
+  for (const entry of rows.slice(0, STATS_ROW_LIMIT)) {
+    const item = entry.item;
+    const report = item.report || {};
+    const tr = document.createElement("tr");
+
+    /* Кнопка перехода в детализацию живёт прямо около ID. */
+    const idCell = el("td", "t-id");
+    idCell.appendChild(el("span", "t-id__code", item.posting));
+    const open = el("button", "t-open", "детализация");
+    open.type = "button";
+    open.title = "Открыть этот ID в детализации";
+    open.dataset.posting = item.posting;
+    idCell.appendChild(open);
+    tr.appendChild(idCell);
+
+    tr.appendChild(el("td", "t-number", report.number || "—"));
+
+    const verdictCell = document.createElement("td");
+    const verdict = verdictOf(item);
+    verdictCell.appendChild(el("span", `card__verdict ${verdict.className}`, verdict.text));
+    tr.appendChild(verdictCell);
+
+    const blameCell = document.createElement("td");
+    if (entry.blame.kind === "none") {
+      blameCell.appendChild(el("span", "t-none", "—"));
+    } else if (!entry.blame.value) {
+      blameCell.appendChild(el("span", "t-none", `${BLAME_TAGS[entry.blame.kind]} не прочиталась`));
+    } else {
+      const chip = el("button", `t-blame t-blame--${entry.blame.kind}`);
+      chip.type = "button";
+      chip.title = "Показать все ID с этим виновником";
+      chip.dataset.kind = entry.blame.kind;
+      chip.dataset.value = entry.blame.value;
+      chip.appendChild(el("i", null, BLAME_TAGS[entry.blame.kind]));
+      chip.appendChild(el("span", null, entry.blame.value));
+      blameCell.appendChild(chip);
+    }
+    tr.appendChild(blameCell);
+
+    tr.appendChild(el("td", "t-when", entry.blame.at || "—"));
+    tr.appendChild(el("td", null, entry.bucket || "—"));
+    tr.appendChild(el("td", null, report.status || "—"));
+    tr.appendChild(el("td", "t-via", VIA_LABELS[item.via] || item.via || "—"));
+
+    const hubCell = el("td", "t-hub");
+    const link = el("a", null, "Hub ↗");
+    link.href = hubUrl(item.posting);
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
+    hubCell.appendChild(link);
+    tr.appendChild(hubCell);
+
+    body.appendChild(tr);
+  }
+}
+
+/* ---- фишки активных фильтров ---- */
+
+function renderStatsChips() {
+  const box = $("stats-chips");
+  if (!box) return;
+  box.innerHTML = "";
+  const chips = [
+    ["cell", "ячейка"],
+    ["place", "склад"],
+    ["day", "день"]
+  ];
+  for (const [key, label] of chips) {
+    const value = statsFilters[key];
+    if (!value) continue;
+    const chip = el("span", "detail__chip", `${label}: ${value}`);
+    const drop = el("button", null, "×");
+    drop.type = "button";
+    drop.title = "Снять фильтр";
+    drop.addEventListener("click", () => {
+      statsFilters[key] = "";
+      renderStats();
+    });
+    chip.appendChild(drop);
+    box.appendChild(chip);
+  }
+}
+
+function renderStats() {
+  const host = $("result-stats");
+  if (!host) return;
+
+  syncStatsControls();
+  const shown = statsIndex.filter((entry) => passesStats(entry));
+
+  const count = $("stats-count");
+  if (count) {
+    count.textContent = statsFiltersActive()
+      ? `${shown.length} из ${statsIndex.length}`
+      : `${statsIndex.length} ${plural(statsIndex.length, ["отправление", "отправления", "отправлений"])}`;
+  }
+  const reset = $("stats-reset");
+  if (reset) reset.hidden = !statsFiltersActive();
+
+  renderStatsKpis(shown);
+  renderStatsCharts();
+  renderStatsTable(shown);
+  renderStatsChips();
+}
+
+function resetStatsFilters() {
+  statsQuery = [];
+  for (const key of Object.keys(statsFilters)) statsFilters[key] = "";
+  statsSort = { key: "at", dir: -1 };
+  const search = $("stats-search");
+  if (search) search.value = "";
+  for (const id of Object.values(STATS_SELECTS)) {
+    const select = $(id);
+    if (select) select.value = "";
+  }
+}
+
+/* Переход «углубиться»: сбрасываем фильтры детализации и ищем ровно этот ID. */
+function jumpToDetail(posting) {
+  resetDetailFilters();
+  detailQuery = [String(posting).toLowerCase()];
+  const search = $("detail-search");
+  if (search) search.value = String(posting);
+  setResultView("detail", true);
+}
+
+function mountStats() {
+  const search = $("stats-search");
+  if (search) {
+    let timer = null;
+    search.addEventListener("input", () => {
+      window.clearTimeout(timer);
+      timer = window.setTimeout(() => {
+        statsQuery = parseDetailQuery(search.value);
+        renderStats();
+      }, 160);
+    });
+  }
+
+  for (const [key, id] of Object.entries(STATS_SELECTS)) {
+    const select = $(id);
+    if (!select) continue;
+    select.addEventListener("change", () => {
+      statsFilters[key] = select.value;
+      renderStats();
+    });
+  }
+
+  $("stats-reset")?.addEventListener("click", () => {
+    resetStatsFilters();
+    renderStats();
+  });
+
+  const table = $("stats-table");
+  if (table) {
+    table.addEventListener("click", (event) => {
+      const open = event.target.closest(".t-open");
+      if (open) {
+        jumpToDetail(open.dataset.posting);
+        return;
+      }
+      const blame = event.target.closest(".t-blame");
+      if (blame) {
+        toggleStatsFilter(blame.dataset.kind === "cell" ? "cell" : "place", blame.dataset.value);
+        return;
+      }
+      const th = event.target.closest("th[data-sort]");
+      if (th) {
+        const key = th.dataset.sort;
+        if (statsSort.key === key) statsSort.dir = -statsSort.dir;
+        else statsSort = { key, dir: key === "at" ? -1 : 1 };
+        renderStats();
+      }
+    });
+  }
+}
+
+mountStats();
 
 /*
  * Подпись автора.

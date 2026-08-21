@@ -2072,7 +2072,7 @@ input[type="number"] {
 /* ================================================================== */
 
 .seg--tabs {
-  --seg-count: 2;
+  --seg-count: 3;
   --seg-index: 0;
   flex: 0 0 auto;
   padding: 3px;
@@ -2118,12 +2118,14 @@ input[type="number"] {
 /* Пространства сменяют друг друга, а не мигают: уходящее гаснет и слегка
    уезжает, приходящее проявляется. */
 .result-grid,
-.detail {
+.detail,
+.stats {
   animation: view-in 0.28s var(--ease) both;
 }
 
 .result-grid.is-leaving,
-.detail.is-leaving {
+.detail.is-leaving,
+.stats.is-leaving {
   animation: view-out 0.16s var(--ease) both;
   pointer-events: none;
 }
@@ -2952,5 +2954,512 @@ input[type="number"] {
   .credit.is-on .credit__dot,
   .credit.is-on .credit__link {
     animation: none !important;
+  }
+}
+
+/* ================================================================== */
+/*  аналитика                                                          */
+/*                                                                     */
+/*  Третье пространство результата — дашборд по виновникам. Цвета      */
+/*  графиков — те же смыслы, что и всюду (жёлтый — склад есть,         */
+/*  зелёный — склада нет), но ступенью темнее: пара #c98500/#199e70    */
+/*  проверена валидатором палитры на тёмной поверхности, включая       */
+/*  цветослабость (ΔE 8.4). Подписи и числа остаются текстовыми        */
+/*  цветами — краску носит только сама полоса.                         */
+/* ================================================================== */
+
+.stats {
+  --viz-hit: #c98500;
+  --viz-miss: #199e70;
+  --viz-blue: #3987e5;
+  min-height: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap);
+}
+
+/* Панель фильтров закреплена сверху, остальное листается под ней. */
+.stats__scroll {
+  min-height: 0;
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap);
+  padding-right: 4px;
+  /* Плавающая кнопка выгрузки не должна накрывать последние строки. */
+  padding-bottom: 84px;
+}
+
+.stats__scroll > * {
+  flex: 0 0 auto;
+}
+
+/* ---- KPI ---- */
+
+.kpis {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.kpi {
+  position: relative;
+  padding: 12px 14px 13px;
+  border-radius: var(--r);
+  border: 1px solid var(--stroke-2);
+  background: var(--glass-2);
+  overflow: hidden;
+}
+
+.kpi::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  border-radius: 999px;
+  background: var(--blue-soft);
+}
+
+.kpi span {
+  display: block;
+  font-size: 10.5px;
+  color: var(--muted);
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.kpi b {
+  display: block;
+  margin-top: 3px;
+  font-size: 24px;
+  font-weight: 700;
+  letter-spacing: -0.03em;
+  color: var(--text);
+}
+
+.kpi em {
+  display: block;
+  margin-top: 1px;
+  font-style: normal;
+  font-size: 10px;
+  color: var(--faint);
+}
+
+.kpi--hit::after { background: var(--hit); }
+.kpi--miss::after { background: var(--miss); }
+.kpi--issue::after { background: var(--err); }
+.kpi--cell::after { background: var(--viz-hit); }
+.kpi--place::after { background: var(--viz-miss); }
+
+.kpi--hit b { color: var(--hit-soft); }
+.kpi--miss b { color: var(--miss-soft); }
+.kpi--issue b { color: #ffada2; }
+
+/* ---- сетка панелей ---- */
+
+.stats__grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--gap);
+}
+
+.spanel {
+  padding: 14px 16px 16px;
+}
+
+.spanel__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+  min-height: 18px;
+}
+
+.spanel__sub {
+  font-size: 10.5px;
+  color: var(--faint);
+  text-align: right;
+}
+
+/* ---- горизонтальные полосы ---- */
+
+.bars {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+
+.hbar {
+  display: grid;
+  grid-template-columns: minmax(80px, 46%) minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  border: 0;
+  background: none;
+  padding: 2px 0;
+  font: inherit;
+  text-align: left;
+  color: inherit;
+  cursor: pointer;
+  border-radius: var(--r-xs);
+}
+
+.hbar:focus-visible {
+  outline: 2px solid rgba(47, 123, 255, 0.6);
+  outline-offset: 2px;
+}
+
+.hbar__label {
+  font-size: 11.5px;
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  transition: color 0.2s var(--ease);
+}
+
+.hbar__track {
+  display: block;
+  height: 12px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.045);
+  overflow: hidden;
+}
+
+.hbar__fill {
+  display: block;
+  height: 100%;
+  border-radius: 0 4px 4px 0;
+  background: var(--viz-blue);
+  transition: width 0.4s var(--ease), filter 0.2s var(--ease);
+}
+
+.hbar__value {
+  font-size: 11.5px;
+  font-weight: 650;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.hbar:hover .hbar__fill,
+.hbar:focus-visible .hbar__fill {
+  filter: brightness(1.22);
+}
+
+.hbar:hover .hbar__label {
+  color: var(--text);
+}
+
+.hbar.is-dim {
+  opacity: 0.38;
+}
+
+.hbar.is-on .hbar__label {
+  color: #fff;
+  font-weight: 650;
+}
+
+.hbar.is-on .hbar__track {
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.22);
+}
+
+.bars__foot {
+  margin: 2px 0 0;
+  font-size: 10.5px;
+  color: var(--faint);
+}
+
+.bars__none {
+  margin: 6px 0;
+  font-size: 11.5px;
+  color: var(--faint);
+}
+
+/* ---- колонки по дням ---- */
+
+.legend {
+  display: flex;
+  gap: 14px;
+  align-items: center;
+  font-size: 10.5px;
+  color: var(--muted);
+}
+
+.legend__item {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  white-space: nowrap;
+}
+
+.legend__item i {
+  width: 10px;
+  height: 10px;
+  border-radius: 3px;
+}
+
+.cols {
+  display: flex;
+  align-items: flex-end;
+  gap: 10px;
+  min-height: 150px;
+}
+
+.col {
+  flex: 1 1 0;
+  min-width: 0;
+  /* Дней мало — колонка всё равно остаётся колонкой, а не плитой. */
+  max-width: 96px;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: flex-end;
+  border: 0;
+  background: none;
+  padding: 0;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+  border-radius: var(--r-xs);
+}
+
+.col:focus-visible {
+  outline: 2px solid rgba(47, 123, 255, 0.6);
+  outline-offset: 2px;
+}
+
+.col__cap {
+  font-size: 10px;
+  color: var(--text-dim);
+  text-align: center;
+  margin-bottom: 3px;
+  font-variant-numeric: tabular-nums;
+}
+
+.col__stack {
+  display: flex;
+  flex-direction: column;
+  gap: 2px; /* зазор цветом поверхности отделяет слои друг от друга */
+}
+
+.col__seg {
+  display: block;
+  width: 100%;
+}
+
+.col__stack .col__seg:first-child {
+  border-radius: 4px 4px 0 0;
+}
+
+.col__seg--hit { background: var(--viz-hit); }
+.col__seg--miss { background: var(--viz-miss); }
+
+.col__day {
+  margin-top: 6px;
+  font-size: 10px;
+  color: var(--faint);
+  text-align: center;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.col:hover .col__seg,
+.col:focus-visible .col__seg {
+  filter: brightness(1.2);
+}
+
+.col.is-dim {
+  opacity: 0.38;
+}
+
+.col.is-on .col__cap,
+.col.is-on .col__day {
+  color: #fff;
+}
+
+/* ---- таблица ---- */
+
+.spanel--table {
+  padding-bottom: 6px;
+}
+
+.stats__wrap {
+  overflow-x: auto;
+}
+
+.stats__table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.stats__table th {
+  position: relative;
+  padding: 7px 10px;
+  text-align: left;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+  border-bottom: 1px solid var(--stroke);
+  white-space: nowrap;
+  user-select: none;
+}
+
+.stats__table th[data-sort] {
+  cursor: pointer;
+}
+
+.stats__table th[data-sort]:hover {
+  color: var(--text-dim);
+}
+
+.stats__table th.is-sorted {
+  color: var(--text);
+}
+
+.stats__table th.is-sorted::after {
+  content: " ↑";
+}
+
+.stats__table th.is-sorted.is-desc::after {
+  content: " ↓";
+}
+
+.stats__table td {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--stroke-2);
+  vertical-align: middle;
+  color: var(--text-dim);
+}
+
+.stats__table tr:last-child td {
+  border-bottom: 0;
+}
+
+.stats__table tbody tr:hover td {
+  background: rgba(255, 255, 255, 0.025);
+}
+
+.t-id {
+  white-space: nowrap;
+}
+
+.t-id__code {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--text);
+  margin-right: 8px;
+}
+
+.t-open {
+  border: 1px solid var(--stroke-2);
+  border-radius: 999px;
+  background: var(--glass-2);
+  color: var(--muted);
+  font: inherit;
+  font-size: 10px;
+  font-weight: 650;
+  padding: 2px 9px;
+  cursor: pointer;
+  transition: border-color 0.2s var(--ease), color 0.2s var(--ease);
+}
+
+.t-open:hover {
+  border-color: rgba(47, 123, 255, 0.55);
+  color: var(--text);
+}
+
+.t-number {
+  font-family: var(--mono);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.t-blame {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  max-width: 100%;
+  border: 1px solid var(--stroke-2);
+  border-radius: 999px;
+  background: var(--glass-2);
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 11px;
+  padding: 3px 10px 3px 4px;
+  cursor: pointer;
+  transition: border-color 0.2s var(--ease), color 0.2s var(--ease);
+}
+
+.t-blame span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.t-blame:hover {
+  border-color: rgba(47, 123, 255, 0.55);
+  color: var(--text);
+}
+
+.t-blame i {
+  font-style: normal;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  border-radius: 999px;
+  padding: 2px 7px;
+}
+
+.t-blame--cell i {
+  background: rgba(239, 176, 60, 0.16);
+  color: var(--hit-soft);
+}
+
+.t-blame--place i {
+  background: rgba(47, 206, 122, 0.14);
+  color: var(--miss-soft);
+}
+
+.t-when {
+  font-family: var(--mono);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.t-none {
+  color: var(--faint);
+}
+
+.t-hub a {
+  color: var(--cyan);
+  text-decoration: none;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.t-hub a:hover {
+  text-decoration: underline;
+}
+
+@media (max-width: 1240px) {
+  .kpis {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .stats__grid {
+    grid-template-columns: minmax(0, 1fr);
   }
 }

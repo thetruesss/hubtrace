@@ -222,6 +222,7 @@
               <div class="seg seg--tabs" id="result-tabs" role="tablist">
                 <button class="seg__btn is-on" type="button" data-view="list" role="tab">Список</button>
                 <button class="seg__btn" type="button" data-view="detail" role="tab">Детализация</button>
+                <button class="seg__btn" type="button" data-view="stats" role="tab">Аналитика</button>
               </div>
               <button id="btn-copy" class="btn btn--primary" type="button" disabled>
                 <span class="btn__swap">
@@ -337,6 +338,130 @@
               <span class="detail__count" id="detail-count"></span>
             </div>
             <div class="detail__scroll" id="detail-list"></div>
+          </div>
+
+          <div class="stats" id="result-stats" hidden>
+            <div class="detail__bar glass">
+              <label class="detail__search">
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2" />
+                  <path d="m16 16 4.5 4.5" fill="none" stroke="currentColor" stroke-width="2"
+                        stroke-linecap="round" />
+                </svg>
+                <input
+                  id="stats-search"
+                  type="search"
+                  spellcheck="false"
+                  placeholder="ID, ячейка, склад, номер отправления — можно списком"
+                />
+              </label>
+              <div class="detail__filters">
+                <label class="pick">
+                  <span>Результат</span>
+                  <select id="stats-verdict">
+                    <option value="">любой</option>
+                    <option value="hit">склад есть</option>
+                    <option value="miss">склада нет</option>
+                    <option value="issue">не вышло</option>
+                  </select>
+                </label>
+                <label class="pick">
+                  <span>Ячейка</span>
+                  <select id="stats-cell">
+                    <option value="">любая</option>
+                  </select>
+                </label>
+                <label class="pick">
+                  <span>Склад</span>
+                  <select id="stats-place">
+                    <option value="">любой</option>
+                  </select>
+                </label>
+                <label class="pick">
+                  <span>Корзинка</span>
+                  <select id="stats-bucket">
+                    <option value="">любая</option>
+                  </select>
+                </label>
+                <label class="pick">
+                  <span>Статус</span>
+                  <select id="stats-status">
+                    <option value="">любой</option>
+                  </select>
+                </label>
+                <label class="pick">
+                  <span>Путь</span>
+                  <select id="stats-via">
+                    <option value="">любой</option>
+                    <option value="api">запрос</option>
+                    <option value="dom">страница</option>
+                  </select>
+                </label>
+                <button id="stats-reset" class="btn btn--ghost btn--sm" type="button" hidden>Сбросить</button>
+              </div>
+              <div class="detail__chips" id="stats-chips"></div>
+              <span class="detail__count" id="stats-count"></span>
+            </div>
+
+            <div class="stats__scroll" id="stats-scroll">
+              <div class="kpis" id="stats-kpis"></div>
+
+              <div class="stats__grid">
+                <section class="panel glass spanel">
+                  <div class="spanel__head">
+                    <h3>Виновные ячейки</h3>
+                    <span class="spanel__sub">склад найден — смотрим последнюю ячейку верхней строки о нём</span>
+                  </div>
+                  <div class="bars" id="chart-cells"></div>
+                </section>
+                <section class="panel glass spanel">
+                  <div class="spanel__head">
+                    <h3>Виновные склады</h3>
+                    <span class="spanel__sub">склада нет — виноват верхний склад по движениям</span>
+                  </div>
+                  <div class="bars" id="chart-places"></div>
+                </section>
+                <section class="panel glass spanel">
+                  <div class="spanel__head">
+                    <h3>По дням</h3>
+                    <div class="legend" id="stats-legend"></div>
+                  </div>
+                  <div class="cols" id="chart-days"></div>
+                </section>
+                <section class="panel glass spanel">
+                  <div class="spanel__head">
+                    <h3>Статусы отправлений</h3>
+                    <span class="spanel__sub">как в карточке Hub</span>
+                  </div>
+                  <div class="bars" id="chart-status"></div>
+                </section>
+              </div>
+
+              <section class="panel glass spanel spanel--table">
+                <div class="spanel__head">
+                  <h3>Все ID</h3>
+                  <span class="spanel__sub" id="stats-table-count"></span>
+                </div>
+                <div class="stats__wrap">
+                  <table class="stats__table" id="stats-table">
+                    <thead>
+                      <tr>
+                        <th data-sort="id">ID</th>
+                        <th data-sort="number">Номер</th>
+                        <th data-sort="verdict">Результат</th>
+                        <th data-sort="blame">Виновник</th>
+                        <th data-sort="at">Когда</th>
+                        <th data-sort="bucket">Корзинка</th>
+                        <th data-sort="status">Статус</th>
+                        <th data-sort="via">Путь</th>
+                        <th></th>
+                      </tr>
+                    </thead>
+                    <tbody id="stats-rows"></tbody>
+                  </table>
+                </div>
+              </section>
+            </div>
           </div>
         </section>
       </main>
