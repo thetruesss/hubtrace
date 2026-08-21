@@ -963,15 +963,50 @@ const CYRILLIC = /[А-Яа-яЁё]/;
  * Берём только кириллические подписи: английское слово со страницы
  * означало бы, что и она не знает перевода.
  */
+/*
+ * Сводим строки по дате, а не по месту в списке.
+ *
+ * По месту работало, только пока оба пути отдавали ровно один и тот же
+ * срез: чуть разошлись — и i-я строка у них уже про разные события, а
+ * подпись уезжала не тому коду. Разойтись они могут запросто: список видов
+ * перемещения приезжает со страницы, и один путь может узнать про новый вид
+ * раньше другого. Дата же у события одна на оба пути.
+ */
+function labelsByDate(rows) {
+  const byDate = new Map();
+  if (!Array.isArray(rows)) return byDate;
+  for (const row of rows) {
+    const at = String(row?.[1] || "").trim();
+    const label = String(row?.[0] || "").trim();
+    if (!at || !label) continue;
+    const known = byDate.get(at);
+    /* Две строки одной секундой с разными подписями — не учимся ни на одной. */
+    if (known === undefined) byDate.set(at, label);
+    else if (known !== label) byDate.set(at, "");
+  }
+  return byDate;
+}
+
 function learnChangeLabels(api, dom) {
   const codes = api?.report?.codes;
-  const rows = dom?.report?.lastRows;
-  if (!Array.isArray(codes) || !Array.isArray(rows)) return;
-  if (!codes.length || codes.length !== rows.length) return;
+  const apiRows = api?.report?.lastRows;
+  const domRows = dom?.report?.lastRows;
+  if (!Array.isArray(codes) || !codes.length || !Array.isArray(domRows)) return;
+
+  /* Срезы совпали по длине — строки те же и в том же порядке, сводить по
+     месту точнее всего. Разошлись — выручает дата. */
+  const sameShape = codes.length === domRows.length;
+  const byDate = sameShape ? null : labelsByDate(domRows);
+  if (!sameShape && (!byDate.size || !Array.isArray(apiRows))) return;
 
   let learned = 0;
   codes.forEach((code, index) => {
-    const label = String(rows[index]?.[0] || "").trim();
+    let label;
+    if (sameShape) label = String(domRows[index]?.[0] || "").trim();
+    else {
+      const at = String(apiRows[index]?.[1] || "").trim();
+      label = at ? byDate.get(at) || "" : "";
+    }
     if (!code || !label || state.changeLabels[code]) return;
     if (!CYRILLIC.test(label) || label.length > 40) return;
     state.changeLabels[code] = label;
