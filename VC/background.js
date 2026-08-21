@@ -108,6 +108,7 @@ const state = {
   workerTabIds: new Set(),
 
   recipe: null,
+  cardRecipe: null,
   startedAt: 0,
   pausedAt: 0,
   pausedMs: 0,
@@ -791,6 +792,34 @@ function isHardStop(item) {
   return ["auth", "missing", "stopped", "paused"].includes(item?.status);
 }
 
+function reportWeight(item) {
+  const report = item?.report;
+  if (!report) return 0;
+  return (
+    (report.number ? 4 : 0) +
+    (report.status ? 3 : 0) +
+    (report.warehouseAt ? 2 : 0) +
+    (report.lastRows?.length ? 1 : 0)
+  );
+}
+
+/* Отчёт склеиваем из обеих попыток: DOM даёт номер и статус со страницы,
+   быстрый путь — строки истории. Терять то, что уже добыто, незачем. */
+function mergeReports(a, b) {
+  if (!a?.report) return b?.report || null;
+  if (!b?.report) return a.report;
+  const strong = reportWeight(a) >= reportWeight(b) ? a.report : b.report;
+  const weak = strong === a.report ? b.report : a.report;
+  return {
+    number: strong.number || weak.number || "",
+    status: strong.status || weak.status || "",
+    warehouseAt: strong.warehouseAt || weak.warehouseAt || "",
+    warehouseCell: strong.warehouseCell || weak.warehouseCell || "",
+    columns: strong.columns?.length ? strong.columns : weak.columns || [],
+    lastRows: strong.lastRows?.length ? strong.lastRows : weak.lastRows || []
+  };
+}
+
 function betterOf(a, b) {
   if (!b) return a;
   if (!a) return b;
@@ -820,7 +849,10 @@ async function domScanWithRetry(worker, posting) {
     attempt += 1;
     await sleep(150);
     if (state.stopping) break;
-    best = betterOf(best, await domScan(worker, posting));
+    const next = await domScan(worker, posting);
+    const merged = mergeReports(best, next);
+    best = betterOf(best, next);
+    if (merged) best = { ...best, report: merged };
   }
   return best;
 }
@@ -1061,7 +1093,8 @@ async function processOne(worker, posting, index) {
       if (state.stopping) return failItem(posting, "stopped");
       const dom = await domScanWithRetry(worker, posting);
       calibrate(api, dom, index);
-      return dom;
+      const merged = mergeReports(dom, api);
+      return merged ? { ...dom, report: merged } : dom;
     }
   }
 
@@ -1428,6 +1461,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       if (worker.tabId === tabId) {
         worker.hubReady = true;
         if (state.recipe) void sendTab(tabId, { action: "ht:setRecipe", recipe: state.recipe });
+        if (state.cardRecipe) void sendTab(tabId, { action: "ht:setCardRecipe", recipe: state.cardRecipe });
       }
     }
     if (!pending || pending.posting !== message.posting) {
@@ -1457,6 +1491,24 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       worker.phase = message.phase || "idle";
       if (message.posting) worker.posting = message.posting;
       emitState();
+    }
+    sendResponse({ ok: true });
+    return false;
+  }
+
+  if (action === "ht:cardRecipe") {
+    const next = message.recipe;
+    const current = state.cardRecipe;
+    const score = Number(next?.score) || 0;
+    const fresher =
+      !current ||
+      score > (Number(current.score) || 0) ||
+      (score >= (Number(current.score) || 0) && (Number(next.capturedAt) || 0) > (Number(current.capturedAt) || 0));
+    if (next?.itemId && fresher) {
+      state.cardRecipe = next;
+      for (const worker of state.workers.values()) {
+        if (worker.tabId != null) void sendTab(worker.tabId, { action: "ht:setCardRecipe", recipe: next });
+      }
     }
     sendResponse({ ok: true });
     return false;

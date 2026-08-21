@@ -28,6 +28,8 @@
 
   let recipe = null;
   let recipeScore = -1;
+  let cardRecipe = null;
+  let cardScore = -1;
   let abortFlag = false;
   let currentPhase = "idle";
 
@@ -90,6 +92,10 @@
       adoptRecipe(data.recipe, true);
       return;
     }
+    if (data.type === "cardRecipe" && data.recipe) {
+      adoptCardRecipe(data.recipe, true);
+      return;
+    }
     if (data.type === "replayResult") {
       const waiter = replayWaiters.get(data.ticket);
       if (!waiter) return;
@@ -120,6 +126,65 @@
     recipe = next;
     recipeScore = score;
     if (share) void toBackground({ action: "ht:recipe", recipe: next });
+  }
+
+  function adoptCardRecipe(next, share) {
+    if (!next || !next.url || !next.itemId) return;
+    const score = Number(next.score) || 0;
+    const captured = Number(next.capturedAt) || 0;
+    const currentCaptured = Number(cardRecipe?.capturedAt) || 0;
+    if (!(score > cardScore || (score >= cardScore && captured > currentCaptured))) return;
+    cardRecipe = next;
+    cardScore = score;
+    if (share) void toBackground({ action: "ht:cardRecipe", recipe: next });
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* данные для отчёта                                                   */
+  /* ------------------------------------------------------------------ */
+
+  const POSTING_NUMBER_RE = /\d{6,}-\d{2,}-\d{1,3}/;
+  const ROW_DATE_RE = /\d{2}\.\d{2}\.\d{4}[,\s]+\d{2}:\d{2}(?::\d{2})?/;
+  /* Метки, которыми Hub подписывает значения внутри одной ячейки таблицы. */
+  const ROW_LABELS = ["Лог. контейнер", "Ячейка", "Местоположение", "Свойство", "Значение"];
+
+  function splitLabelled(text) {
+    const found = [];
+    for (const label of ROW_LABELS) {
+      let from = 0;
+      for (;;) {
+        const at = text.indexOf(label, from);
+        if (at < 0) break;
+        found.push({ label, at });
+        from = at + label.length;
+      }
+    }
+    found.sort((a, b) => a.at - b.at);
+
+    const out = {};
+    for (let i = 0; i < found.length; i += 1) {
+      const start = found[i].at + found[i].label.length;
+      const end = i + 1 < found.length ? found[i + 1].at : text.length;
+      const value = norm(text.slice(start, end)).replace(/^[.:\s]+/, "");
+      if (value && !out[found[i].label]) out[found[i].label] = value;
+    }
+    return out;
+  }
+
+  function findDate(values) {
+    for (const value of values) {
+      const match = String(value || "").match(ROW_DATE_RE);
+      if (match) return match[0];
+    }
+    return "";
+  }
+
+  function findCell(values) {
+    for (const value of values) {
+      const fields = splitLabelled(String(value || ""));
+      if (fields["Ячейка"]) return fields["Ячейка"];
+    }
+    return "";
   }
 
   function askProbeForRecipe() {
@@ -336,6 +401,89 @@
     return null;
   }
 
+  function flattenRow(node, prefix, out, depth) {
+    if (!node || typeof node !== "object" || depth > 2) return out;
+    for (const key of Object.keys(node)) {
+      const value = node[key];
+      const label = prefix ? `${prefix}.${key}` : key;
+      if (value && typeof value === "object") flattenRow(value, label, out, depth + 1);
+      else out[label] = value == null ? "" : String(value);
+    }
+    return out;
+  }
+
+  /* Номер отправления и статус — из карточки предмета, не из истории. */
+  function extractCardFrom(json) {
+    const out = { number: "", status: "" };
+    if (!json) return out;
+    const match = JSON.stringify(json).match(POSTING_NUMBER_RE);
+    if (match) out.number = match[0];
+
+    const queue = [{ node: json, depth: 0 }];
+    while (queue.length && !out.status) {
+      const { node, depth } = queue.shift();
+      if (!node || typeof node !== "object" || depth > 4) continue;
+      for (const key of Object.keys(node)) {
+        const value = node[key];
+        if (
+          typeof value === "string" &&
+          /^(status|state)(_?name)?$/i.test(key) &&
+          /[А-Яа-яЁё]/.test(value) &&
+          value.length <= 40
+        ) {
+          out.status = value;
+          break;
+        }
+        if (value && typeof value === "object") queue.push({ node: value, depth: depth + 1 });
+      }
+    }
+    return out;
+  }
+
+  async function fetchCard(posting, timeoutMs) {
+    if (!cardRecipe) return { number: "", status: "" };
+    const fromId = cardRecipe.itemId;
+    const response = await replay(
+      {
+        url: swapId(cardRecipe.url, fromId, posting),
+        method: cardRecipe.method,
+        headers: cardRecipe.headers,
+        body: cardRecipe.body ? swapId(cardRecipe.body, fromId, posting) : null
+      },
+      timeoutMs
+    );
+    if (!response?.ok || !response.text) return { number: "", status: "" };
+    try {
+      return extractCardFrom(JSON.parse(response.text));
+    } catch (_err) {
+      return { number: "", status: "" };
+    }
+  }
+
+  const DATE_KEY_RE = /(date|time|дата|created|moment|stamp)/i;
+  const CELL_KEY_RE = /(cell|ячей|slot|place)/i;
+
+  function reportFromApiRows(rows, needle) {
+    const flat = rows.map((row) => flattenRow(row, "", {}, 0));
+    const columns = [];
+    for (const row of flat.slice(0, 3)) {
+      for (const key of Object.keys(row)) if (!columns.includes(key)) columns.push(key);
+    }
+    const lastRows = flat.slice(0, 3).map((row) => columns.map((key) => row[key] ?? ""));
+
+    let warehouseAt = "";
+    let warehouseCell = "";
+    const hit = flat.find((row) => Object.values(row).join(" ").toLowerCase().includes(needle));
+    if (hit) {
+      for (const key of Object.keys(hit)) {
+        if (!warehouseAt && DATE_KEY_RE.test(key) && String(hit[key]).trim()) warehouseAt = String(hit[key]);
+        if (!warehouseCell && CELL_KEY_RE.test(key) && String(hit[key]).trim()) warehouseCell = String(hit[key]);
+      }
+      if (!warehouseAt) warehouseAt = findDate(Object.values(hit));
+    }
+    return { columns, lastRows, warehouseAt, warehouseCell };
+  }
+
   async function apiScan(job) {
     if (!recipe) return { ok: false, reason: "no_recipe" };
     const posting = String(job.posting || "").trim();
@@ -357,6 +505,8 @@
       let pageable = true;
       let failed = false;
       let digest = "";
+      const allRows = [];
+      let firstJson = null;
 
       for (let page = 0; page < MAX_API_PAGES && !failed; page += 1) {
         if (abortFlag || Date.now() > deadline) return { ok: false, reason: "aborted" };
@@ -392,7 +542,12 @@
           failed = true;
           break;
         }
-        if (page === 0) digest = digestOf(response.text);
+        if (page === 0) {
+          digest = digestOf(response.text);
+          firstJson = json;
+        }
+        /* Для отчёта достаточно верхушки списка, всю историю не копим. */
+        if (allRows.length < 60) allRows.push(...rows.slice(0, 60 - allRows.length));
 
         /* Пере-сериализуем: сервер может отдавать кириллицу \u-эскейпами. */
         const haystack = JSON.stringify(rows).toLowerCase();
@@ -415,6 +570,16 @@
       if (failed) continue;
 
       const expected = total != null ? total : loaded;
+      const report = reportFromApiRows(allRows, needle);
+      const card = extractCardFrom(firstJson);
+      if (!card.number || !card.status) {
+        const extra = await fetchCard(posting, Math.max(2000, Math.min(8000, deadline - Date.now())));
+        card.number = card.number || extra.number;
+        card.status = card.status || extra.status;
+      }
+      report.number = card.number;
+      report.status = card.status;
+
       return {
         ok: true,
         via: "api",
@@ -423,7 +588,8 @@
         loaded,
         complete: total == null ? true : loaded >= total || found,
         sample,
-        digest
+        digest,
+        report
       };
     }
 
@@ -547,6 +713,63 @@
         document.querySelector("table.ozi__table__table__HAe8A") ||
         rowNodes().length
     );
+  }
+
+  /*
+   * Шапка карточки: номер отправления (0109673395-0032-1) и статус
+   * («Сформирован») — их в истории нет, они только в шапке страницы.
+   */
+  function readItemCard() {
+    const out = { number: "", status: "" };
+    const leaves = [];
+    const nodes = document.querySelectorAll("h1,h2,h3,h4,span,div,a,b,strong,p");
+    for (let i = 0; i < nodes.length && i < 900; i += 1) {
+      const el = nodes[i];
+      if (el.children.length) continue;
+      const text = norm(el.textContent);
+      if (!text || text.length > 60) continue;
+      leaves.push({ el, text });
+    }
+
+    const numberAt = leaves.findIndex((leaf) => POSTING_NUMBER_RE.test(leaf.text) && leaf.text.length <= 40);
+    if (numberAt < 0) return out;
+    out.number = (leaves[numberAt].text.match(POSTING_NUMBER_RE) || [""])[0];
+
+    /* Статус ищем среди соседей номера: короткое кириллическое слово без
+       цифр, желательно на цветной плашке. Вкладки «О предмете / Состав /
+       История» тоже подходят под описание, поэтому берём ближайшее к
+       номеру и предпочитаем то, у которого есть фон. */
+    let best = null;
+    for (let i = numberAt + 1; i < leaves.length && i <= numberAt + 12; i += 1) {
+      const text = leaves[i].text;
+      if (text.length < 3 || text.length > 30) continue;
+      if (/\d/.test(text) || !/[А-Яа-яЁё]/.test(text)) continue;
+      let painted = false;
+      try {
+        const background = getComputedStyle(leaves[i].el).backgroundColor;
+        painted = Boolean(background) && background !== "transparent" && !/rgba\(0,\s*0,\s*0,\s*0\)/.test(background);
+      } catch (_err) {
+        painted = false;
+      }
+      const rank = (painted ? 0 : 100) + (i - numberAt);
+      if (!best || rank < best.rank) best = { text, rank };
+      if (painted && i - numberAt <= 3) break;
+    }
+    if (best) out.status = best.text;
+    return out;
+  }
+
+  function tableColumns() {
+    const table = rowsTable();
+    const head = table?.querySelector("thead");
+    if (!head) return [];
+    return [...head.querySelectorAll("th, td")].map((cell) => norm(cell.textContent)).filter(Boolean);
+  }
+
+  function rowCells(row) {
+    const cells = row.querySelectorAll("td, th");
+    if (cells.length) return [...cells].map((cell) => norm(cell.textContent));
+    return [norm(row.textContent)];
   }
 
   function detectAuth() {
@@ -763,6 +986,8 @@
     let prevLength = 0;
     let found = false;
     let sample = "";
+    /* Верхняя строка с искомым складом — из неё берём дату и ячейку. */
+    let warehouseCells = null;
 
     function harvest() {
       const rows = rowNodes();
@@ -784,6 +1009,7 @@
         if (!found && value.toLowerCase().includes(needle)) {
           found = true;
           sample = value.slice(0, 280);
+          warehouseCells = rowCells(rows[i]);
         }
       }
       prevLength = length;
@@ -933,6 +1159,17 @@
       sample = needle;
     }
 
+    const card = readItemCard();
+    const tableRows = rowNodes();
+    const report = {
+      number: card.number,
+      status: card.status,
+      columns: tableColumns(),
+      lastRows: [...tableRows].slice(0, 3).map(rowCells),
+      warehouseAt: warehouseCells ? findDate(warehouseCells) : "",
+      warehouseCell: warehouseCells ? findCell(warehouseCells) : ""
+    };
+
     const loaded = seen.size;
     /* Нашли — значит дочитали ровно столько, сколько было нужно. */
     const complete = found || (total != null ? loaded >= total : drained);
@@ -942,11 +1179,12 @@
     const expected = total != null ? total : drained || found ? loaded : 0;
 
     if (abortFlag && !found && !complete) {
-      return { ok: false, status: "paused", found, expected, loaded, via: "dom" };
+      return { ok: false, status: "paused", found, expected, loaded, via: "dom", report };
     }
 
     return {
       ok: complete,
+      report,
       status: complete ? "complete" : "partial",
       via: "dom",
       found,
@@ -960,6 +1198,22 @@
   /* обработка заданий                                                   */
   /* ------------------------------------------------------------------ */
 
+  function normalizeReport(report) {
+    if (!report || typeof report !== "object") return null;
+    const rows = Array.isArray(report.lastRows) ? report.lastRows.slice(0, 3) : [];
+    return {
+      number: String(report.number || ""),
+      status: String(report.status || ""),
+      warehouseAt: String(report.warehouseAt || ""),
+      warehouseCell: String(report.warehouseCell || ""),
+      columns: (Array.isArray(report.columns) ? report.columns : []).map((value) => String(value || "")),
+      /* Режем длинные значения: в отчёт идут три строки, а не вся история. */
+      lastRows: rows.map((row) =>
+        (Array.isArray(row) ? row : []).map((value) => String(value || "").slice(0, 600))
+      )
+    };
+  }
+
   function normalizeResult(raw) {
     if (!raw) return { status: "script_error", found: false, expected: 0, loaded: 0, ok: false };
     if (raw.via === "api") {
@@ -971,7 +1225,8 @@
         loaded: Number(raw.loaded) || 0,
         ok: Boolean(raw.complete),
         sample: raw.sample || "",
-        digest: raw.digest || ""
+        digest: raw.digest || "",
+        report: normalizeReport(raw.report)
       };
     }
     return {
@@ -981,7 +1236,8 @@
       expected: Number(raw.expected) || 0,
       loaded: Number(raw.loaded) || 0,
       ok: Boolean(raw.ok),
-      sample: raw.sample || ""
+      sample: raw.sample || "",
+      report: normalizeReport(raw.report)
     };
   }
 
@@ -1022,6 +1278,12 @@
     if (message.action === "ht:setRecipe") {
       adoptRecipe(message.recipe, false);
       sendResponse({ ok: Boolean(recipe) });
+      return false;
+    }
+
+    if (message.action === "ht:setCardRecipe") {
+      adoptCardRecipe(message.recipe, false);
+      sendResponse({ ok: Boolean(cardRecipe) });
       return false;
     }
 

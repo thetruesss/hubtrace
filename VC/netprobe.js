@@ -28,6 +28,10 @@
   const probe = {
     recipe: null,
     score: -1,
+    /* Второй рецепт — карточка предмета. Номер отправления и статус живут
+       не в истории, а в ней, и для отчёта нужны оба запроса. */
+    card: null,
+    cardScore: -1,
     startedAt: Date.now(),
     capturing: true
   };
@@ -153,6 +157,48 @@
     return score;
   }
 
+  /* Похоже на карточку предмета: номер вида 0109673395-0032-1 в ответе,
+     сам предмет опознаётся по id, и это точно не история. */
+  const POSTING_NUMBER_RE = /\d{6,}-\d{2,}-\d{1,3}/;
+
+  function scoreCard(request, responseText) {
+    const url = String(request.url || "").toLowerCase();
+    if (/histor/.test(url)) return -1;
+    if (!responseText || responseText.length > 200000) return -1;
+    if (!POSTING_NUMBER_RE.test(responseText)) return -1;
+
+    let score = 20;
+    const itemId = itemIdFromHref(location.href);
+    if (itemId && `${request.url}\n${request.body || ""}`.includes(itemId)) score += 25;
+    if (itemId && responseText.includes(itemId)) score += 15;
+    if (/"(status|state|stateName|statusName)"/i.test(responseText)) score += 20;
+    if (/\/item|\/predmet|\/stock/.test(url)) score += 10;
+    /* Короткий ответ вероятнее карточка, длинный — список. */
+    score += Math.max(0, 10 - Math.floor(responseText.length / 20000));
+    return score;
+  }
+
+  function considerCard(request, responseText) {
+    const score = scoreCard(request, responseText);
+    if (score <= 0 || score <= probe.cardScore) return;
+
+    const recipe = {
+      id: `c${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`,
+      url: absolute(request.url),
+      method: String(request.method || "GET").toUpperCase(),
+      headers: cleanHeaders(request.headers),
+      body: typeof request.body === "string" ? request.body : null,
+      itemId: itemIdFromHref(location.href),
+      score,
+      capturedAt: Date.now()
+    };
+    if (!recipe.itemId) return;
+
+    probe.card = recipe;
+    probe.cardScore = score;
+    post({ type: "cardRecipe", recipe });
+  }
+
   function consider(request, responseText) {
     if (!probe.capturing) return;
     if (Date.now() - probe.startedAt > CAPTURE_WINDOW_MS) {
@@ -162,6 +208,8 @@
     if (!request || !request.url || !sameOrigin(request.url)) return;
     if (!looksLikeJson(responseText)) return;
     if (responseText.length > MAX_BODY_CHARS) return;
+
+    considerCard(request, responseText);
 
     const score = scoreCandidate(request, responseText);
     if (score <= 0 || score <= probe.score) return;
@@ -181,7 +229,7 @@
 
     probe.recipe = recipe;
     probe.score = score;
-    if (score >= GOOD_ENOUGH_SCORE) probe.capturing = false;
+    if (score >= GOOD_ENOUGH_SCORE && probe.card) probe.capturing = false;
     post({ type: "recipe", recipe });
   }
 
@@ -341,6 +389,7 @@
     if (event.origin && event.origin !== ORIGIN) return;
     if (event.data?.channel !== CHANNEL || event.data?.type !== "askRecipe") return;
     if (probe.recipe) post({ type: "recipe", recipe: probe.recipe });
+    if (probe.card) post({ type: "cardRecipe", recipe: probe.card });
   });
 
   post({ type: "probeReady" });

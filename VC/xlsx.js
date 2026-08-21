@@ -5,6 +5,12 @@
  * =HYPERLINK("...";"..."), а Excel при импорте текста разбирает имена
  * функций на языке интерфейса — в русском Excel такая ячейка станет #ИМЯ?.
  * В xlsx ссылка живёт в отношениях листа и открывается в любой локали.
+ *
+ * Поддерживаются несколько листов и два вида ссылок:
+ *   { text, link }   — наружу (на карточку в Hub);
+ *   { text, anchor } — внутрь книги, вида "Лист2!A25". Именно так сделана
+ *                      кнопка «смотреть» в отчёте: макросов в xlsx нет,
+ *                      а внутренняя ссылка даёт тот же переход одним кликом.
  */
 (() => {
   const CRC_TABLE = (() => {
@@ -114,31 +120,44 @@
     return name;
   }
 
+  /* Excel не пускает в имя листа : \ / ? * [ ] и держит предел в 31 символ. */
+  function sheetTitle(name, index) {
+    const clean = String(name || `Лист${index + 1}`).replace(/[\\/?*[\]:]/g, " ").trim();
+    return (clean || `Лист${index + 1}`).slice(0, 31);
+  }
+
   const XML_HEAD = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>';
   const NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
   const NS_R = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
   const NS_PKG = "http://schemas.openxmlformats.org/package/2006/relationships";
 
-  /*
-   * rows  — массив строк, строка — массив ячеек.
-   * Ячейка: строка/число либо { text, link, number }.
-   * Первая строка считается шапкой.
-   */
-  function buildXlsxBlob({ sheetName = "Лист1", columns = [], rows = [] }) {
-    const encoder = new TextEncoder();
+  /* Стили: 0 обычный, 1 шапка, 2 ссылка, 3 подзаголовок блока, 4 приглушённый. */
+  const STYLE_PLAIN = 0;
+  const STYLE_HEAD = 1;
+  const STYLE_LINK = 2;
+  const STYLE_TITLE = 3;
+  const STYLE_MUTED = 4;
+
+  function buildSheetXml(sheet) {
     const links = [];
     const body = [];
+    const rows = sheet.rows || [];
 
     rows.forEach((row, rowIndex) => {
       const cells = [];
-      row.forEach((raw, colIndex) => {
+      (row || []).forEach((raw, colIndex) => {
         const cell = raw && typeof raw === "object" ? raw : { text: raw };
-        const ref = `${columnName(colIndex)}${rowIndex + 1}`;
-        let style = 0;
-        if (rowIndex === 0) style = 1;
-        else if (cell.link) style = 2;
+        if (cell.text == null && cell.number == null && !cell.link && !cell.anchor) return;
 
-        if (cell.link && rowIndex > 0) links.push({ ref, target: cell.link });
+        const ref = `${columnName(colIndex)}${rowIndex + 1}`;
+        let style = cell.style != null ? cell.style : STYLE_PLAIN;
+        if (cell.style == null) {
+          if (sheet.headRow === rowIndex) style = STYLE_HEAD;
+          else if (cell.link || cell.anchor) style = STYLE_LINK;
+        }
+
+        if (cell.link) links.push({ ref, target: cell.link });
+        else if (cell.anchor) links.push({ ref, anchor: cell.anchor });
 
         if (cell.number != null && Number.isFinite(cell.number)) {
           cells.push(`<c r="${ref}" s="${style}"><v>${cell.number}</v></c>`);
@@ -148,76 +167,132 @@
           );
         }
       });
-      body.push(`<row r="${rowIndex + 1}">${cells.join("")}</row>`);
+      if (cells.length) body.push(`<row r="${rowIndex + 1}">${cells.join("")}</row>`);
     });
 
-    const width = columns.length || (rows[0] || []).length;
-    const lastCol = columnName(Math.max(0, width - 1));
-    const dimension = `A1:${lastCol}${Math.max(1, rows.length)}`;
+    const width = Math.max(
+      (sheet.columns || []).length,
+      ...rows.map((row) => (row || []).length),
+      1
+    );
+    const lastCol = columnName(width - 1);
+    const lastRow = Math.max(1, rows.length);
 
-    const colDefs = columns.length
-      ? `<cols>${columns
+    const colDefs = (sheet.columns || []).length
+      ? `<cols>${sheet.columns
           .map((col, i) => `<col min="${i + 1}" max="${i + 1}" width="${col.width || 16}" customWidth="1"/>`)
           .join("")}</cols>`
       : "";
 
+    const external = links.filter((link) => link.target);
     const hyperlinks = links.length
-      ? `<hyperlinks>${links.map((link, i) => `<hyperlink ref="${link.ref}" r:id="rIdL${i + 1}"/>`).join("")}</hyperlinks>`
+      ? `<hyperlinks>${links
+          .map((link) =>
+            link.target
+              ? `<hyperlink ref="${link.ref}" r:id="rIdL${external.indexOf(link) + 1}"/>`
+              : `<hyperlink ref="${link.ref}" location="${esc(link.anchor)}"/>`
+          )
+          .join("")}</hyperlinks>`
       : "";
 
-    /* Порядок элементов внутри worksheet задан схемой: sheetData,
-       затем autoFilter, и только потом hyperlinks. */
-    const sheet =
+    const freeze = sheet.freeze
+      ? `<pane ySplit="${sheet.freeze}" topLeftCell="A${sheet.freeze + 1}" activePane="bottomLeft" state="frozen"/>`
+      : "";
+
+    const filter = sheet.autoFilter && rows.length > 1 ? `<autoFilter ref="A1:${lastCol}${lastRow}"/>` : "";
+
+    const xml =
       `${XML_HEAD}<worksheet xmlns="${NS}" xmlns:r="${NS_R}">` +
-      `<dimension ref="${dimension}"/>` +
-      `<sheetViews><sheetView workbookViewId="0">` +
-      `<pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/>` +
-      `</sheetView></sheetViews>` +
+      `<dimension ref="A1:${lastCol}${lastRow}"/>` +
+      `<sheetViews><sheetView workbookViewId="0">${freeze}</sheetView></sheetViews>` +
       `<sheetFormatPr defaultRowHeight="15"/>` +
       colDefs +
       `<sheetData>${body.join("")}</sheetData>` +
-      (rows.length > 1 ? `<autoFilter ref="A1:${lastCol}${rows.length}"/>` : "") +
+      filter +
       hyperlinks +
       `<pageMargins left="0.7" right="0.7" top="0.75" bottom="0.75" header="0.3" footer="0.3"/>` +
       `</worksheet>`;
 
-    const sheetRels =
-      `${XML_HEAD}<Relationships xmlns="${NS_PKG}">` +
-      links
-        .map(
-          (link, i) =>
-            `<Relationship Id="rIdL${i + 1}" Type="${NS_R}/hyperlink" Target="${esc(link.target)}" TargetMode="External"/>`
-        )
-        .join("") +
-      `</Relationships>`;
+    const rels = external.length
+      ? `${XML_HEAD}<Relationships xmlns="${NS_PKG}">` +
+        external
+          .map(
+            (link, i) =>
+              `<Relationship Id="rIdL${i + 1}" Type="${NS_R}/hyperlink" Target="${esc(link.target)}" TargetMode="External"/>`
+          )
+          .join("") +
+        `</Relationships>`
+      : "";
+
+    return { xml, rels };
+  }
+
+  /*
+   * Вход: { sheets: [{ name, columns, rows, headRow, freeze, autoFilter }] }
+   * Ячейка — строка/число либо { text, number, link, anchor, style }.
+   */
+  function buildXlsxBlob(input) {
+    const encoder = new TextEncoder();
+    const sheets = (input && input.sheets ? input.sheets : [input || {}]).map((sheet, index) => ({
+      headRow: 0,
+      freeze: 1,
+      autoFilter: false,
+      ...sheet,
+      name: sheetTitle(sheet.name || sheet.sheetName, index)
+    }));
+
+    const files = [];
+    const parts = sheets.map((sheet) => buildSheetXml(sheet));
+
+    parts.forEach((part, index) => {
+      files.push({ name: `xl/worksheets/sheet${index + 1}.xml`, data: encoder.encode(part.xml) });
+      if (part.rels) {
+        files.push({
+          name: `xl/worksheets/_rels/sheet${index + 1}.xml.rels`,
+          data: encoder.encode(part.rels)
+        });
+      }
+    });
 
     const styles =
       `${XML_HEAD}<styleSheet xmlns="${NS}">` +
-      `<fonts count="3">` +
+      `<fonts count="5">` +
       `<font><sz val="11"/><color theme="1"/><name val="Calibri"/><family val="2"/><scheme val="minor"/></font>` +
       `<font><b/><sz val="11"/><color theme="1"/><name val="Calibri"/><family val="2"/><scheme val="minor"/></font>` +
       `<font><u/><sz val="11"/><color rgb="FF0563C1"/><name val="Calibri"/><family val="2"/><scheme val="minor"/></font>` +
+      `<font><b/><sz val="12"/><color rgb="FF1F3864"/><name val="Calibri"/><family val="2"/><scheme val="minor"/></font>` +
+      `<font><sz val="10"/><color rgb="FF808080"/><name val="Calibri"/><family val="2"/><scheme val="minor"/></font>` +
       `</fonts>` +
-      `<fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills>` +
+      `<fills count="3">` +
+      `<fill><patternFill patternType="none"/></fill>` +
+      `<fill><patternFill patternType="gray125"/></fill>` +
+      `<fill><patternFill patternType="solid"><fgColor rgb="FFDCE6F1"/><bgColor indexed="64"/></patternFill></fill>` +
+      `</fills>` +
       `<borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>` +
       `<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>` +
-      `<cellXfs count="3">` +
-      `<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>` +
-      `<xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1"/>` +
+      `<cellXfs count="5">` +
+      `<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0" applyAlignment="1"><alignment vertical="top" wrapText="1"/></xf>` +
+      `<xf numFmtId="0" fontId="1" fillId="2" borderId="0" xfId="0" applyFont="1" applyFill="1"/>` +
       `<xf numFmtId="0" fontId="2" fillId="0" borderId="0" xfId="0" applyFont="1"/>` +
+      `<xf numFmtId="0" fontId="3" fillId="0" borderId="0" xfId="0" applyFont="1"/>` +
+      `<xf numFmtId="0" fontId="4" fillId="0" borderId="0" xfId="0" applyFont="1"/>` +
       `</cellXfs>` +
       `<cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>` +
       `</styleSheet>`;
 
     const workbook =
-      `${XML_HEAD}<workbook xmlns="${NS}" xmlns:r="${NS_R}">` +
-      `<sheets><sheet name="${esc(sheetName).slice(0, 31)}" sheetId="1" r:id="rId1"/></sheets>` +
-      `</workbook>`;
+      `${XML_HEAD}<workbook xmlns="${NS}" xmlns:r="${NS_R}"><sheets>` +
+      sheets
+        .map((sheet, i) => `<sheet name="${esc(sheet.name)}" sheetId="${i + 1}" r:id="rId${i + 1}"/>`)
+        .join("") +
+      `</sheets></workbook>`;
 
     const workbookRels =
       `${XML_HEAD}<Relationships xmlns="${NS_PKG}">` +
-      `<Relationship Id="rId1" Type="${NS_R}/worksheet" Target="worksheets/sheet1.xml"/>` +
-      `<Relationship Id="rId2" Type="${NS_R}/styles" Target="styles.xml"/>` +
+      sheets
+        .map((sheet, i) => `<Relationship Id="rId${i + 1}" Type="${NS_R}/worksheet" Target="worksheets/sheet${i + 1}.xml"/>`)
+        .join("") +
+      `<Relationship Id="rIdStyles" Type="${NS_R}/styles" Target="styles.xml"/>` +
       `</Relationships>`;
 
     const rootRels =
@@ -230,24 +305,27 @@
       `<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>` +
       `<Default Extension="xml" ContentType="application/xml"/>` +
       `<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>` +
-      `<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>` +
+      sheets
+        .map(
+          (sheet, i) =>
+            `<Override PartName="/xl/worksheets/sheet${i + 1}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>`
+        )
+        .join("") +
       `<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>` +
       `</Types>`;
 
-    const files = [
+    files.unshift(
       { name: "[Content_Types].xml", data: encoder.encode(contentTypes) },
       { name: "_rels/.rels", data: encoder.encode(rootRels) },
       { name: "xl/workbook.xml", data: encoder.encode(workbook) },
       { name: "xl/_rels/workbook.xml.rels", data: encoder.encode(workbookRels) },
-      { name: "xl/styles.xml", data: encoder.encode(styles) },
-      { name: "xl/worksheets/sheet1.xml", data: encoder.encode(sheet) }
-    ];
-    if (links.length) {
-      files.push({ name: "xl/worksheets/_rels/sheet1.xml.rels", data: encoder.encode(sheetRels) });
-    }
+      { name: "xl/styles.xml", data: encoder.encode(styles) }
+    );
 
     return zipStore(files, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
   }
 
   globalThis.buildXlsxBlob = buildXlsxBlob;
+  globalThis.xlsxStyles = { STYLE_PLAIN, STYLE_HEAD, STYLE_LINK, STYLE_TITLE, STYLE_MUTED };
+  globalThis.xlsxSheetTitle = sheetTitle;
 })();
