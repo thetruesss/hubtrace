@@ -93,6 +93,20 @@ const state = {
   apiLastReason: "",
   apiRetryAt: 0,
   apiRetries: 0,
+  apiAuthStreak: 0,
+  apiInconclusive: 0,
+  recipeStale: false,
+  recipeStaleAt: 0,
+
+  /* Версия приложения Hub и склад оператора — общие для всех вкладок. */
+  appVersion: "",
+  placeId: "",
+  /* Известные ручки Hub отвечают. Сбрасывается, если Hub их переименует —
+     тогда быстрый путь снова держится только на подсмотренном запросе. */
+  nativeApi: true,
+  /* Последняя попытка сорвалась не из-за поломки, а потому что повторять
+     было нечем: ручек нет, запрос ещё не подсмотрен. */
+  apiNotReady: false,
 
   workers: new Map(),
   liveWorkers: 0,
@@ -104,6 +118,7 @@ const state = {
   workerTabIds: new Set(),
 
   recipe: null,
+  cardRecipe: null,
   startedAt: 0,
   pausedAt: 0,
   pausedMs: 0,
@@ -253,6 +268,7 @@ function snapshot() {
     apiNote: state.apiNote,
     apiBlockKind: state.apiBlockKind,
     apiRetryAt: state.apiRetryAt,
+    recipeStale: state.recipeStale,
     elapsedMs: elapsedMs(),
     rate: ratePerMin(),
     etaMs: etaMs(),
@@ -638,7 +654,11 @@ function cleanPosting(posting) {
 }
 
 function buildHistoryUrl(posting) {
-  return `https://hub.o3t.ru/management/stock/item/Lozon:${encodeURIComponent(cleanPosting(posting))}?&tab=history`;
+  const id = encodeURIComponent(cleanPosting(posting));
+  /* Склад оператора Hub всё равно допишет сам — но уже после загрузки.
+     Подставляем сразу: карточке предмета он нужен в самом первом запросе. */
+  const place = state.placeId ? `warehouse=${encodeURIComponent(state.placeId)}&` : "";
+  return `https://hub.o3t.ru/management/stock/item/Lozon:${id}?${place}tab=history`;
 }
 
 function failItem(posting, status, extra) {
@@ -760,6 +780,7 @@ async function apiScan(worker, posting) {
     return null;
   }
   setPhase(worker, "api", posting, "api");
+  state.apiNotReady = false;
   const reply = await Promise.race([
     sendTab(worker.tabId, {
       action: "ht:apiScan",
@@ -772,13 +793,57 @@ async function apiScan(worker, posting) {
   setPhase(worker, "idle", "", "");
   if (!reply?.ok || !reply.result) {
     state.apiLastReason = reply?.reason || "нет ответа от вкладки";
+    if (reply?.nativeMissing) {
+      /* Hub переехал на другие пути: дальше только подсмотренный запрос. */
+      state.nativeApi = false;
+      /* Рецепта ещё нет — это не поломка, а «пока нечем повторять». */
+      state.apiNotReady = !state.recipe;
+      /* Вкладкам это тоже надо знать: после каждой загрузки страницы
+         content script поднимается заново и иначе снова сходил бы за
+         несуществующей ручкой. */
+      broadcastHints();
+      return null;
+    }
+    if (reply?.auth) {
+      state.apiAuthStreak += 1;
+      markRecipeStale(reply.reason);
+    }
     return null;
   }
+  state.apiAuthStreak = 0;
   return { posting, ...reply.result };
 }
 
 function isHardStop(item) {
   return ["auth", "missing", "stopped", "paused"].includes(item?.status);
+}
+
+function reportWeight(item) {
+  const report = item?.report;
+  if (!report) return 0;
+  return (
+    (report.number ? 4 : 0) +
+    (report.status ? 3 : 0) +
+    (report.warehouseAt ? 2 : 0) +
+    (report.lastRows?.length ? 1 : 0)
+  );
+}
+
+/* Отчёт склеиваем из обеих попыток: DOM даёт номер и статус со страницы,
+   быстрый путь — строки истории. Терять то, что уже добыто, незачем. */
+function mergeReports(a, b) {
+  if (!a?.report) return b?.report || null;
+  if (!b?.report) return a.report;
+  const strong = reportWeight(a) >= reportWeight(b) ? a.report : b.report;
+  const weak = strong === a.report ? b.report : a.report;
+  return {
+    number: strong.number || weak.number || "",
+    status: strong.status || weak.status || "",
+    warehouseAt: strong.warehouseAt || weak.warehouseAt || "",
+    warehouseCell: strong.warehouseCell || weak.warehouseCell || "",
+    columns: strong.columns?.length ? strong.columns : weak.columns || [],
+    lastRows: strong.lastRows?.length ? strong.lastRows : weak.lastRows || []
+  };
 }
 
 function betterOf(a, b) {
@@ -810,13 +875,48 @@ async function domScanWithRetry(worker, posting) {
     attempt += 1;
     await sleep(150);
     if (state.stopping) break;
-    best = betterOf(best, await domScan(worker, posting));
+    const next = await domScan(worker, posting);
+    const merged = mergeReports(best, next);
+    best = betterOf(best, next);
+    if (merged) best = { ...best, report: merged };
   }
   return best;
 }
 
+function hintsMessage() {
+  return {
+    action: "ht:setHints",
+    appVersion: state.appVersion,
+    placeId: state.placeId,
+    nativeApi: state.nativeApi
+  };
+}
+
+function broadcastHints() {
+  const message = hintsMessage();
+  for (const worker of state.workers.values()) {
+    if (worker.tabId != null) void sendTab(worker.tabId, message);
+  }
+}
+
 function apiAllowed(worker) {
-  if (!state.useApi || !cfg().api || !state.recipe || !worker.hubReady) return false;
+  /*
+   * Рецепт больше не обязателен: ручки истории и карточки известны, ID
+   * подставляется прямо в путь. Раньше без подсмотренного запроса быстрый
+   * путь вообще не включался, и первые номера всегда шли обходом DOM.
+   */
+  if (!state.useApi || !cfg().api || !worker.hubReady) return false;
+  /* Ни известных ручек, ни подсмотренного запроса — повторять нечего. */
+  if (!state.nativeApi && !state.recipe) return false;
+
+  if (state.recipeStale) {
+    /* Ждём свежий захват. Если он так и не приехал — пробуем как есть,
+       лучше получить 401 и ещё одну попытку, чем встать на DOM насовсем. */
+    if (Date.now() - state.recipeStaleAt < RECIPE_REFRESH_TIMEOUT_MS) return false;
+    state.recipeStale = false;
+    state.recipeStaleAt = 0;
+  }
+
   if (state.apiState === "blocked") return apiRetryDue();
   return true;
 }
@@ -854,6 +954,36 @@ function spotCheckDue() {
 
 const API_RETRY_BASE_MS = 45000;
 const API_MAX_RETRIES = 3;
+/* Если свежий рецепт не приехал за это время — снимаем стоп-кран сами,
+   иначе прогон навсегда останется на медленном обходе DOM. */
+const RECIPE_REFRESH_TIMEOUT_MS = 60000;
+const API_AUTH_STREAK_LIMIT = 6;
+
+/*
+ * Свежесть рецепта важнее его «качества»: повторный захват того же
+ * эндпоинта даёт такой же score, а вместе с ним приезжает новый токен.
+ * Со строгим «больше» свежий рецепт отвергался, токен протухал, и сервер
+ * начинал отвечать 401 до самого перезапуска расширения.
+ */
+function acceptRecipe(next) {
+  if (!state.recipe) return true;
+  if (state.recipeStale) return true;
+  const score = Number(next.score) || 0;
+  const current = Number(state.recipe.score) || 0;
+  if (score > current) return true;
+  return score >= current && (Number(next.capturedAt) || 0) > (Number(state.recipe.capturedAt) || 0);
+}
+
+/* 401/403 — не повод хоронить быстрый путь: нужен свежий захват. Пока он
+   не приехал, воркеры идут через DOM, а загрузка страницы как раз и даёт
+   пробнику поймать новый токен. */
+function markRecipeStale(status) {
+  if (state.recipeStale) return;
+  state.recipeStale = true;
+  state.recipeStaleAt = Date.now();
+  notice("api", `Токен устарел (ответ ${status || 401}). Обновляю его загрузкой страницы.`);
+  emitState(true);
+}
 
 /*
  * Отказ отказу рознь. Расхождение с обходом DOM или одинаковые ответы на
@@ -912,21 +1042,51 @@ function requeueApiResults() {
   return indexes.length;
 }
 
+const API_INCONCLUSIVE_LIMIT = 3;
+
 function calibrate(api, dom, index) {
   if (!api) {
+    if (state.recipeStale) {
+      if (state.apiAuthStreak >= API_AUTH_STREAK_LIMIT) {
+        blockApi(`Токен не обновляется: ${state.apiLastReason || "ответ 401"}.`, "unavailable");
+      }
+      return;
+    }
     state.apiFailStreak += 1;
     if (state.apiFailStreak >= 3) {
       blockApi(`Быстрый путь недоступен: ${state.apiLastReason || "нет ответа"}. Работаю через DOM.`, "unavailable");
     }
     return;
   }
-  if (isHardStop(dom) || dom?.status === "timeout" || dom?.status === "tab_error") {
-    /* Сверить не с чем, но и застревать в двойном проходе на каждом номере
-       тоже не надо — отложим следующую сверку. */
+
+  /*
+   * Сверять можно только с полным обходом DOM. Если он сам не дочитал
+   * список, его «не нашёл» ничего не доказывает — и раньше такое
+   * расхождение навсегда выключало быстрый путь, хотя неправ был как раз
+   * обход страницы.
+   */
+  const domTrusted = Boolean(dom?.ok) && dom?.status === "complete";
+  if (!domTrusted) {
     state.apiSinceCheck = 0;
+    state.apiInconclusive += 1;
+    if (
+      state.apiInconclusive >= API_INCONCLUSIVE_LIMIT &&
+      state.apiState !== "trusted" &&
+      api.status === "complete"
+    ) {
+      state.apiState = "trusted";
+      state.apiRetries = 0;
+      state.apiBlockKind = "";
+      notice(
+        "api",
+        "Обход DOM не дочитывает список, сверять не с чем. Доверяю быстрому пути: он берёт итог из ответа сервера."
+      );
+      emitState(true);
+    }
     return;
   }
 
+  state.apiInconclusive = 0;
   state.apiSinceCheck = 0;
   if (Boolean(api.found) === Boolean(dom?.found)) {
     state.apiFailStreak = 0;
@@ -957,6 +1117,9 @@ async function processOne(worker, posting, index) {
   if (apiAllowed(worker)) {
     if (state.apiState === "trusted" && !spotCheckDue()) {
       const api = await apiScan(worker, posting);
+      /* Попытка не считается: известной ручки не оказалось, а рецепта ещё
+         не было. Ждём захвата, а не выключаем быстрый путь. */
+      if (!api && state.apiNotReady) return domScanWithRetry(worker, posting);
       if (api) {
         state.apiFailStreak = 0;
         state.apiSinceCheck += 1;
@@ -964,9 +1127,17 @@ async function processOne(worker, posting, index) {
         watchDigest(api);
         return api;
       }
-      state.apiFailStreak += 1;
-      if (state.apiFailStreak >= 3) {
-        blockApi(`Быстрый путь перестал отвечать: ${state.apiLastReason || "нет ответа"}.`, "unavailable");
+      if (state.recipeStale) {
+        /* Это протухший токен, а не поломка. Номер берём через DOM — заодно
+           загрузка страницы обновит рецепт. */
+        if (state.apiAuthStreak >= API_AUTH_STREAK_LIMIT) {
+          blockApi(`Токен не обновляется: ${state.apiLastReason || "ответ 401"}.`, "unavailable");
+        }
+      } else {
+        state.apiFailStreak += 1;
+        if (state.apiFailStreak >= 3) {
+          blockApi(`Быстрый путь перестал отвечать: ${state.apiLastReason || "нет ответа"}.`, "unavailable");
+        }
       }
     } else {
       /* Калибровка и периодические сверки: считаем оба пути и сравниваем. */
@@ -974,7 +1145,8 @@ async function processOne(worker, posting, index) {
       if (state.stopping) return failItem(posting, "stopped");
       const dom = await domScanWithRetry(worker, posting);
       calibrate(api, dom, index);
-      return dom;
+      const merged = mergeReports(dom, api);
+      return merged ? { ...dom, report: merged } : dom;
     }
   }
 
@@ -1170,6 +1342,9 @@ async function runScan(payload, postings, warehouse) {
   state.uncheckCurrentOnly = settings.uncheckCurrentOnly;
   state.apiState = "unknown";
   state.apiNote = "";
+  /* Новый прогон — снова пробуем известные ручки: Hub мог и вернуться. */
+  state.nativeApi = true;
+  state.apiNotReady = false;
   state.apiFailStreak = 0;
   state.apiSinceCheck = 0;
   state.apiIndexes = new Set();
@@ -1178,6 +1353,10 @@ async function runScan(payload, postings, warehouse) {
   state.apiLastReason = "";
   state.apiRetryAt = 0;
   state.apiRetries = 0;
+  state.apiAuthStreak = 0;
+  state.apiInconclusive = 0;
+  state.recipeStale = false;
+  state.recipeStaleAt = 0;
   state.domInFlight = 0;
   state.anchorTabId = null;
   state.workerTabIds = new Set();
@@ -1337,6 +1516,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       if (worker.tabId === tabId) {
         worker.hubReady = true;
         if (state.recipe) void sendTab(tabId, { action: "ht:setRecipe", recipe: state.recipe });
+        if (state.cardRecipe) void sendTab(tabId, { action: "ht:setCardRecipe", recipe: state.cardRecipe });
+        void sendTab(tabId, hintsMessage());
       }
     }
     if (!pending || pending.posting !== message.posting) {
@@ -1371,10 +1552,52 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return false;
   }
 
+  if (action === "ht:cardRecipe") {
+    const next = message.recipe;
+    const current = state.cardRecipe;
+    const score = Number(next?.score) || 0;
+    const fresher =
+      !current ||
+      score > (Number(current.score) || 0) ||
+      (score >= (Number(current.score) || 0) && (Number(next.capturedAt) || 0) > (Number(current.capturedAt) || 0));
+    if (next?.itemId && fresher) {
+      state.cardRecipe = next;
+      for (const worker of state.workers.values()) {
+        if (worker.tabId != null) void sendTab(worker.tabId, { action: "ht:setCardRecipe", recipe: next });
+      }
+    }
+    sendResponse({ ok: true });
+    return false;
+  }
+
+  /*
+   * Версия приложения Hub и склад оператора: их видит первая же вкладка,
+   * а нужны они всем — без склада не собрать карточку предмета.
+   */
+  if (action === "ht:hints") {
+    let changed = false;
+    if (message.appVersion && !state.appVersion) {
+      state.appVersion = String(message.appVersion);
+      changed = true;
+    }
+    if (message.placeId && !state.placeId) {
+      state.placeId = String(message.placeId);
+      changed = true;
+    }
+    if (changed) broadcastHints();
+    sendResponse({ ok: true });
+    return false;
+  }
+
   if (action === "ht:recipe") {
     const next = message.recipe;
-    if (next?.itemId && (!state.recipe || (Number(next.score) || 0) > (Number(state.recipe.score) || 0))) {
+    if (next?.itemId && acceptRecipe(next)) {
       state.recipe = next;
+      if (state.recipeStale) {
+        state.recipeStale = false;
+        state.recipeStaleAt = 0;
+        notice("api", "Токен обновлён, возвращаюсь на быстрый путь.");
+      }
       for (const worker of state.workers.values()) {
         if (worker.tabId != null) void sendTab(worker.tabId, { action: "ht:setRecipe", recipe: next });
       }

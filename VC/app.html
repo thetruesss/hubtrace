@@ -70,13 +70,13 @@
                   <button id="btn-clear" class="btn btn--ghost btn--sm" type="button" disabled>Очистить</button>
                 </div>
               </div>
-              <p class="hint">Один номер на строку. Можно вставить столбец из Excel или перетащить сюда файл.</p>
+              <p class="hint">Один ID на строку. Можно перетащить сюда файл Excel или CSV — ID найдутся в любой колонке.</p>
               <div class="drop" id="drop">
                 <textarea id="postings" spellcheck="false" placeholder="551373007622000&#10;551373007622001"></textarea>
                 <div class="drop__overlay"><span>Отпустите файл</span></div>
               </div>
               <p class="panel__foot" id="input-stats">Пока пусто</p>
-              <input id="file-input" type="file" accept=".txt,.csv,.tsv,text/plain" hidden />
+              <input id="file-input" type="file" accept=".xlsx,.csv,.tsv,.txt,text/plain" hidden />
             </section>
 
             <aside class="side">
@@ -224,7 +224,6 @@
                   <span class="btn__done">Скопировано</span>
                 </span>
               </button>
-              <button id="btn-xlsx" class="btn btn--ghost" type="button" disabled>Excel</button>
               <button id="btn-again" class="btn btn--ghost" type="button">Ещё раз</button>
             </div>
           </div>
@@ -285,6 +284,20 @@
       </main>
     </div>
 
+    <button id="btn-xlsx" class="fab" type="button" hidden>
+      <span class="fab__ring" aria-hidden="true"></span>
+      <svg class="fab__icon" viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M12 3v11m0 0 4-4m-4 4-4-4" fill="none" stroke="currentColor" stroke-width="2"
+              stroke-linecap="round" stroke-linejoin="round" />
+        <path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2" fill="none" stroke="currentColor"
+              stroke-width="2" stroke-linecap="round" />
+      </svg>
+      <span class="fab__text">
+        <b>Скачать отчёт</b>
+        <em id="fab-note">Excel · 2 листа</em>
+      </span>
+    </button>
+
     <div class="toasts" id="toasts" aria-live="polite"></div>
 
     <template id="tpl-deck">
@@ -325,6 +338,7 @@
     </template>
 
     <script src="xlsx.js"></script>
+    <script src="sheet.js"></script>
     <script src="app.js"></script>
   </body>
 </html>

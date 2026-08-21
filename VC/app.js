@@ -55,6 +55,7 @@ const ui = {
   workers: [],
   lists: { hits: [], misses: [], issues: [] },
   finished: null,
+  reportSaved: false,
   recentWarehouses: [],
   rates: {}
 };
@@ -150,18 +151,29 @@ function parsePostings(raw) {
     .map((line) => line.trim())
     .filter(Boolean);
 
+  /* В строке из Excel колонок несколько, и ID далеко не всегда первый:
+     рядом стоят номер отправления, дата, склад. Берём ту часть, которая
+     похожа на ID; не нашлось — оставляем прежнее поведение. */
+  const firstId = (parts) => parts.find((part) => sheetReader.looksLikeId(part));
+
   const tokens = [];
   for (const line of lines) {
     if (line.includes("\t")) {
-      tokens.push(line.split("\t")[0].trim());
+      const parts = line.split("\t").map((part) => part.trim()).filter(Boolean);
+      tokens.push(firstId(parts) || parts[0] || "");
       continue;
     }
     if (/[,;]/.test(line)) {
-      tokens.push(...line.split(/[,;]+/).map((part) => part.trim()).filter(Boolean));
+      const parts = line.split(/[,;]+/).map((part) => part.trim()).filter(Boolean);
+      const id = firstId(parts);
+      if (id) tokens.push(id);
+      else tokens.push(...parts);
       continue;
     }
     const parts = line.split(/\s+/);
-    if (parts.length > 1 && parts.every((part) => /^[A-Za-z0-9:_-]+$/.test(part))) tokens.push(...parts);
+    const id = firstId(parts);
+    if (id) tokens.push(id);
+    else if (parts.length > 1 && parts.every((part) => /^[A-Za-z0-9:_-]+$/.test(part))) tokens.push(...parts);
     else tokens.push(parts[0]);
   }
 
@@ -324,6 +336,7 @@ function setStep(name) {
   ui.currentStep = name;
   for (const [key, el] of Object.entries(screens)) el.hidden = key !== name;
   syncSteps();
+  renderFab();
 }
 
 /* ------------------------------------------------------------------ */
@@ -722,7 +735,30 @@ function updateFormState() {
     if (col) col.classList.toggle("is-empty", !filled);
   }
   $("btn-copy").disabled = !$("hits").value.trim();
-  $("btn-xlsx").disabled = !ui.finished;
+  renderFab();
+}
+
+/*
+ * Кнопка выгрузки живёт в правом нижнем углу и пульсирует, пока отчёт не
+ * скачали: после долгого прогона это единственное, что осталось сделать.
+ */
+function renderFab() {
+  const fab = $("btn-xlsx");
+  if (!fab) return;
+  const ready = Boolean(ui.finished) && ui.currentStep === "result";
+  fab.hidden = !ready;
+  fab.classList.toggle("is-waiting", ready && !ui.reportSaved);
+  fab.classList.toggle("is-done", ready && ui.reportSaved);
+
+  const note = $("fab-note");
+  if (!note) return;
+  if (ui.reportSaved) {
+    note.textContent = "Скачано · нажмите ещё раз";
+    return;
+  }
+  const rows = (ui.finished?.results || []).filter(Boolean).length;
+  const details = (ui.finished?.results || []).filter((item) => item?.report?.lastRows?.length).length;
+  note.textContent = details ? `${rows} строк · детали по ${details}` : `${rows} строк`;
 }
 
 function showError(message) {
@@ -762,6 +798,7 @@ function renderList(name) {
 function renderResults(payload) {
   const results = (payload?.results || []).filter(Boolean);
   ui.finished = payload || null;
+  ui.reportSaved = false;
   ui.lists = splitResults(results);
 
   const inputCount = payload?.inputCount || results.length;
@@ -820,14 +857,61 @@ function renderResults(payload) {
   }
 }
 
+const REPORT_SHEET = "Отчёт";
+const DETAIL_SHEET = "Последние операции";
+
+const REPORT_COLUMNS = [
+  { title: "Номер отправления", width: 22 },
+  { title: "ID отправления", width: 22 },
+  { title: "Результат", width: 12 },
+  { title: "Статус", width: 26 },
+  { title: "Полнота проверки", width: 18 },
+  { title: "Корзинка", width: 12 },
+  /* Путь ячейки Hub пишет через «/», а переезд — через «→»: строка длинная. */
+  { title: "Последняя ячейка", width: 52 },
+  { title: "Подробнее", width: 14 }
+];
+
+/* Дата в Hub приходит как «15.08.2026, 09:18:58»; с быстрого пути может
+   прилететь ISO — принимаем оба. */
+function parseHubDate(raw) {
+  const text = String(raw || "").trim();
+  if (!text) return null;
+  const match = text.match(/(\d{2})\.(\d{2})\.(\d{4})[,\s]+(\d{2}):(\d{2})(?::(\d{2}))?/);
+  if (match) {
+    return new Date(
+      Number(match[3]), Number(match[2]) - 1, Number(match[1]),
+      Number(match[4]), Number(match[5]), Number(match[6] || 0)
+    );
+  }
+  const stamp = Date.parse(text);
+  return Number.isFinite(stamp) ? new Date(stamp) : null;
+}
+
+const BUCKETS = [
+  { upTo: 4, label: "0–4 ч" },
+  { upTo: 12, label: "4–12 ч" },
+  { upTo: 24, label: "12–24 ч" },
+  { upTo: 48, label: "24–48 ч" }
+];
+
+/* Возраст верхней строки с искомым складом. */
+function bucketOf(raw, now) {
+  const date = parseHubDate(raw);
+  if (!date) return "";
+  const hours = (now - date.getTime()) / 3600000;
+  if (hours < 0) return BUCKETS[0].label;
+  for (const bucket of BUCKETS) if (hours < bucket.upTo) return bucket.label;
+  return "48 ч+";
+}
+
 function hubUrl(posting) {
   const clean = String(posting || "").trim().replace(/^Lozon:/i, "");
   return `https://hub.o3t.ru/management/stock/item/Lozon:${encodeURIComponent(clean)}?&tab=history`;
 }
 
-/* В выгрузке «Результат» и «Статус» — разные колонки, поэтому статус
-   берём технический, а не подпись для ленты (там у найденных всегда «есть»). */
-const EXPORT_STATUS = {
+/* Технический статус проверки, не тот, что на странице Hub. */
+const CHECK_STATUS = {
   complete: "проверено",
   partial: "мало строк",
   missing: "нет страницы",
@@ -843,45 +927,83 @@ const EXPORT_STATUS = {
   exception: "ошибка"
 };
 
-const EXPORT_COLUMNS = [
-  { title: "Номер", width: 22 },
-  { title: "Результат", width: 12 },
-  { title: "Статус", width: 16 },
-  { title: "Загружено", width: 11 },
-  { title: "Всего", width: 9 },
-  { title: "Путь", width: 8 },
-  { title: "Ссылка", width: 62 }
-];
-
-function exportRows() {
-  return (ui.finished?.results || []).filter(Boolean).map((item) => ({
-    posting: item.posting,
-    url: hubUrl(item.posting),
-    result: item.found ? "есть" : "нет",
-    status: EXPORT_STATUS[item.status] || item.status || "неизвестно",
-    loaded: Number(item.loaded) || 0,
-    expected: Number(item.expected) || 0,
-    via: item.via || ""
-  }));
-}
-
+/*
+ * Кнопки внутри xlsx не бывает: макросы требуют .xlsm, а Excel блокирует их
+ * по умолчанию. Тот же переход одним кликом даёт внутренняя гиперссылка —
+ * «смотреть» прыгает на второй лист к блоку этого отправления, а оттуда
+ * ссылка возвращает обратно в ту же строку отчёта.
+ */
 function buildXlsx() {
-  const rows = [EXPORT_COLUMNS.map((col) => col.title)];
-  for (const row of exportRows()) {
-    rows.push([
-      { text: row.posting, link: row.url },
-      row.result,
-      row.status,
-      { number: row.loaded },
-      { number: row.expected },
-      row.via,
-      { text: row.url, link: row.url }
+  const results = (ui.finished?.results || []).filter(Boolean);
+  const now = Date.now();
+
+  const detailRows = [];
+  const anchors = new Map();
+
+  results.forEach((item, index) => {
+    const report = item.report;
+    if (!report?.lastRows?.length) return;
+
+    const reportRow = index + 2;
+    anchors.set(index, `'${DETAIL_SHEET}'!A${detailRows.length + 1}`);
+
+    const title = report.number ? `${report.number} · ID ${item.posting}` : `ID ${item.posting}`;
+    detailRows.push([
+      { text: title, style: xlsxStyles.STYLE_TITLE },
+      { text: "← к отчёту", anchor: `'${REPORT_SHEET}'!A${reportRow}` }
     ]);
-  }
+
+    const columns = report.columns?.length
+      ? report.columns
+      : Array.from({ length: report.lastRows[0].length }, (_, i) => `Колонка ${i + 1}`);
+    detailRows.push(columns.map((title2) => ({ text: title2, style: xlsxStyles.STYLE_HEAD })));
+
+    for (const row of report.lastRows) detailRows.push(row.map((value) => ({ text: value })));
+    detailRows.push([]);
+  });
+
+  const reportRows = [REPORT_COLUMNS.map((col) => ({ text: col.title, style: xlsxStyles.STYLE_HEAD }))];
+  results.forEach((item, index) => {
+    const report = item.report || {};
+    const anchor = anchors.get(index);
+    reportRows.push([
+      { text: report.number || "" },
+      { text: item.posting, link: hubUrl(item.posting) },
+      { text: item.found ? "есть" : "нет" },
+      { text: report.status || "" },
+      { text: CHECK_STATUS[item.status] || item.status || "" },
+      { text: bucketOf(report.warehouseAt, now) },
+      { text: report.warehouseCell || "" },
+      anchor ? { text: "смотреть →", anchor } : { text: "" }
+    ]);
+  });
+
+  /* Колонки листа деталей идут в порядке таблицы Hub: тип изменения, дата,
+     пользователь, изменения (самая длинная), описание. */
+  const detailWidths = [
+    { width: 24 }, { width: 22 }, { width: 30 }, { width: 72 },
+    { width: 40 }, { width: 40 }, { width: 40 }, { width: 40 }
+  ];
+
   return buildXlsxBlob({
-    sheetName: ui.finished?.warehouse ? `Hub Trace ${ui.finished.warehouse}`.slice(0, 31) : "Hub Trace",
-    columns: EXPORT_COLUMNS,
-    rows
+    sheets: [
+      {
+        name: REPORT_SHEET,
+        columns: REPORT_COLUMNS,
+        rows: reportRows,
+        headRow: 0,
+        freeze: 1,
+        autoFilter: true
+      },
+      {
+        name: DETAIL_SHEET,
+        columns: detailWidths,
+        rows: detailRows,
+        headRow: -1,
+        freeze: 0,
+        autoFilter: false
+      }
+    ]
   });
 }
 
@@ -942,6 +1064,7 @@ async function startScan() {
   ui.stopping = false;
   ui.hasResults = false;
   ui.finished = null;
+  ui.reportSaved = false;
   ui.apiState = "unknown";
   ui.apiNote = "";
 
@@ -1033,15 +1156,49 @@ $("file-input").addEventListener("change", (event) => {
   event.target.value = "";
 });
 
+function appendToField(text) {
+  const current = postingsEl.value.trim();
+  postingsEl.value = current ? `${current}\n${text}` : text;
+  updateCount();
+}
+
+/*
+ * Из файла берём только ID: и в .xlsx, и в выгрузке CSV нужный столбец
+ * стоит где угодно, а рядом с ним — номера отправлений, даты, склады.
+ * Раньше всё это целиком уезжало в поле вместе со знаками табуляции.
+ */
 async function readFile(file) {
+  let result;
   try {
-    const text = await file.text();
-    postingsEl.value = postingsEl.value.trim() ? `${postingsEl.value.trim()}\n${text}` : text;
-    updateCount();
-    toast("ok", `Загружено из ${file.name}`);
+    result = await sheetReader.readIdsFromFile(file);
   } catch (_err) {
     showError("Не получилось прочитать файл.");
+    return;
   }
+
+  if (result.error) {
+    showError(result.error);
+    return;
+  }
+
+  if (result.ids.length) {
+    appendToField(result.ids.join("\n"));
+    toast("ok", `${file.name}: ${result.ids.length} ${plural(result.ids.length, ["ID", "ID", "ID"])}`);
+    return;
+  }
+
+  /* ID по признаку не нашлись. Для .xlsx подсказать больше нечего, а
+     текстовый файл отдаём как есть — вдруг там список в другом виде. */
+  if (result.kind === "xlsx") {
+    showError(`В ${file.name} не нашлось ни одного ID (от 10 цифр, в конце 000).`);
+    return;
+  }
+  if (!result.text.trim()) {
+    showError(`Файл ${file.name} пустой.`);
+    return;
+  }
+  appendToField(result.text.trim());
+  toast("warn", `В ${file.name} не видно ID — вставил текст как есть`);
 }
 
 const drop = $("drop");
@@ -1117,6 +1274,8 @@ $("btn-xlsx").addEventListener("click", () => {
   if (!ui.finished) return;
   try {
     saveBlob(buildXlsx(), exportName("xlsx"));
+    ui.reportSaved = true;
+    renderFab();
   } catch (error) {
     toast("error", `Не получилось собрать файл: ${String(error?.message || error)}`);
   }
