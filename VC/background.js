@@ -684,12 +684,22 @@ function cleanPosting(posting) {
   return String(posting || "").trim().replace(/^Lozon:/i, "");
 }
 
+/*
+ * Вкладка истории.
+ *
+ * Внутри «Истории» Hub держит три фишки фильтра: «Все» (tab=history),
+ * «Перемещения» (tab=transitionHistory) и «Свойства» (tab=propertiesHistory).
+ * Открываем «Перемещения»: там строки про движение предмета — приезды на
+ * склад, ячейки, контейнеры, рейсы, — а не смены статуса и тайм-слота.
+ */
+const HISTORY_TAB = "transitionHistory";
+
 function buildHistoryUrl(posting) {
   const id = encodeURIComponent(cleanPosting(posting));
   /* Склад оператора Hub всё равно допишет сам — но уже после загрузки.
      Подставляем сразу: карточке предмета он нужен в самом первом запросе. */
   const place = state.placeId ? `warehouse=${encodeURIComponent(state.placeId)}&` : "";
-  return `https://hub.o3t.ru/management/stock/item/Lozon:${id}?${place}tab=history`;
+  return `https://hub.o3t.ru/management/stock/item/Lozon:${id}?${place}tab=${HISTORY_TAB}`;
 }
 
 function failItem(posting, status, extra) {
@@ -1194,11 +1204,28 @@ function calibrate(api, dom, index) {
     return;
   }
 
+  /*
+   * Расхождения бывают двух разных сортов.
+   *
+   * Страница открыта на «Перемещениях» — это фильтр, там нет смен статуса,
+   * тайм-слота и прочего. Запрос же берёт историю целиком. Поэтому «запрос
+   * нашёл, а страница нет» — обычное дело: строка просто не того вида,
+   * который показывает фильтр. Выключать за это быстрый путь нельзя, иначе
+   * весь прогон свалится на страницу на ровном месте.
+   *
+   * А вот обратное — страница видит склад, запрос его пропустил — значит
+   * запрос читает не то. Это и есть поломка.
+   */
+  if (api.found && !dom?.found) {
+    state.apiFailStreak = 0;
+    return;
+  }
+
   const back = requeueApiResults();
   blockApi(
     back
-      ? `Быстрый путь разошёлся с обходом DOM на ${dom?.posting || index}. Отключил его и переснимаю ${back} номер(ов).`
-      : `Быстрый путь разошёлся с обходом DOM на ${dom?.posting || index}. Отключил его.`,
+      ? `Обход DOM нашёл склад там, где запрос его не увидел (${dom?.posting || index}). Отключил быстрый путь и переснимаю ${back} номер(ов).`
+      : `Обход DOM нашёл склад там, где запрос его не увидел (${dom?.posting || index}). Отключил быстрый путь.`,
     "mismatch"
   );
 }

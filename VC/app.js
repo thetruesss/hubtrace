@@ -974,9 +974,11 @@ function bucketOf(raw, now) {
   return "48 ч+";
 }
 
+/* «Перемещения» — та же вкладка «История», но с фишкой фильтра, на которой
+   видно движение предмета. Открываем ссылки из отчёта сразу на ней. */
 function hubUrl(posting) {
   const clean = String(posting || "").trim().replace(/^Lozon:/i, "");
-  return `https://hub.o3t.ru/management/stock/item/Lozon:${encodeURIComponent(clean)}?&tab=history`;
+  return `https://hub.o3t.ru/management/stock/item/Lozon:${encodeURIComponent(clean)}?&tab=transitionHistory`;
 }
 
 /* Технический статус проверки, не тот, что на странице Hub. */
