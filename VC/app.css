@@ -2073,6 +2073,7 @@ input[type="number"] {
 
 .seg--tabs {
   --seg-count: 2;
+  --seg-index: 0;
   flex: 0 0 auto;
   padding: 3px;
 }
@@ -2084,10 +2085,26 @@ input[type="number"] {
   font-size: 12px;
 }
 
-.seg--tabs .seg__btn.is-on {
-  color: #fff;
+/*
+ * Подсветка едет за выбранной вкладкой, а не перекрашивается рывком.
+ * Ширина считается от числа кнопок, сдвиг — от индекса выбранной.
+ */
+.seg--tabs::before {
+  content: "";
+  position: absolute;
+  top: 3px;
+  bottom: 3px;
+  left: 3px;
+  width: calc((100% - 6px) / var(--seg-count));
+  border-radius: var(--r-xs);
   background: linear-gradient(180deg, rgba(46, 121, 255, 0.95), rgba(0, 91, 255, 0.82));
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.24), 0 4px 14px rgba(0, 91, 255, 0.32);
+  transform: translateX(calc(var(--seg-index) * 100%));
+  transition: transform 0.34s var(--sp);
+}
+
+.seg--tabs .seg__btn.is-on {
+  color: #fff;
 }
 
 .detail {
@@ -2096,6 +2113,19 @@ input[type="number"] {
   display: flex;
   flex-direction: column;
   gap: var(--gap);
+}
+
+/* Пространства сменяют друг друга, а не мигают: уходящее гаснет и слегка
+   уезжает, приходящее проявляется. */
+.result-grid,
+.detail {
+  animation: view-in 0.28s var(--ease) both;
+}
+
+.result-grid.is-leaving,
+.detail.is-leaving {
+  animation: view-out 0.16s var(--ease) both;
+  pointer-events: none;
 }
 
 .detail__bar {
@@ -2147,6 +2177,55 @@ input[type="number"] {
 
 .detail__search input::placeholder {
   color: var(--faint);
+}
+
+.detail__filters {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.pick {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 30px;
+  padding: 0 4px 0 11px;
+  border-radius: 999px;
+  border: 1px solid var(--stroke-2);
+  background: rgba(6, 10, 19, 0.5);
+  font-size: 11px;
+  color: var(--faint);
+  transition: border-color 0.24s var(--ease);
+}
+
+.pick:focus-within {
+  border-color: rgba(47, 123, 255, 0.55);
+}
+
+.pick:has(select:not([value=""])) {
+  color: var(--text-dim);
+}
+
+.pick select {
+  height: 26px;
+  max-width: 150px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-dim);
+  font-family: inherit;
+  font-size: 11.5px;
+  font-weight: 600;
+  padding: 0 6px;
+  cursor: pointer;
+  outline: none;
+}
+
+.pick select option {
+  background: #0a0e18;
+  color: var(--text);
 }
 
 .detail__chips {
@@ -2703,6 +2782,27 @@ input[type="number"] {
   to {
     opacity: 0;
     transform: translateX(24px);
+  }
+}
+
+@keyframes view-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes view-out {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+    transform: translateY(-4px);
   }
 }
 

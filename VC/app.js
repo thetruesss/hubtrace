@@ -878,9 +878,9 @@ function renderResults(payload) {
     renderList(name);
   }
 
-  detailQuery = [];
-  const search = $("detail-search");
-  if (search) search.value = "";
+  buildDetailIndex(results);
+  resetDetailFilters();
+  fillFilterOptions();
   setResultView("list");
   renderDetail();
 
@@ -941,6 +941,9 @@ const BUCKETS = [
   { upTo: 24, label: "12–24 ч" },
   { upTo: 48, label: "24–48 ч" }
 ];
+
+/* Порядок корзинок для сортировки в фильтре. */
+const BUCKET_ORDER = [...BUCKETS.map((bucket) => bucket.label), "48 ч+"];
 
 /* Возраст верхней строки с искомым складом. */
 function bucketOf(raw, now) {
@@ -1521,17 +1524,121 @@ async function boot() {
  * операции таблицей.
  */
 let detailQuery = [];
+/* {item, hay} — строку для поиска собираем один раз на результат, а не на
+   каждое нажатие клавиши. */
+let detailIndex = [];
+const detailFilters = { verdict: "", bucket: "", status: "", via: "" };
 
-function setResultView(view) {
+const VIA_LABELS = { api: "запрос", dom: "страница" };
+
+function haystackOf(item) {
+  const report = item.report || {};
+  const kind = classify(item);
+  return [
+    item.posting,
+    report.number,
+    report.status,
+    report.warehouseAt,
+    report.warehouseCell,
+    bucketOf(report.warehouseAt, Date.now()),
+    kind === "hit" ? "есть склад" : kind === "miss" ? "нет склада" : "не вышло",
+    CHECK_STATUS[item.status] || item.status,
+    VIA_LABELS[item.via] || item.via,
+    ...(report.columns || []),
+    ...(report.lastRows || []).flat()
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+}
+
+function buildDetailIndex(results) {
+  detailIndex = results.map((item) => ({ item, hay: haystackOf(item) }));
+}
+
+/* Списки значений в фильтрах — из того, что реально есть в прогоне. */
+function fillFilterOptions() {
+  const buckets = [];
+  const statuses = [];
+  for (const { item } of detailIndex) {
+    const bucket = bucketOf(item.report?.warehouseAt, Date.now());
+    if (bucket && !buckets.includes(bucket)) buckets.push(bucket);
+    const status = item.report?.status;
+    if (status && !statuses.includes(status)) statuses.push(status);
+  }
+  buckets.sort((a, b) => BUCKET_ORDER.indexOf(a) - BUCKET_ORDER.indexOf(b));
+  statuses.sort((a, b) => a.localeCompare(b, "ru"));
+
+  const fill = (id, values, anyLabel) => {
+    const select = $(id);
+    if (!select) return;
+    const keep = select.value;
+    select.innerHTML = "";
+    const any = document.createElement("option");
+    any.value = "";
+    any.textContent = anyLabel;
+    select.appendChild(any);
+    for (const value of values) {
+      const option = document.createElement("option");
+      option.value = value;
+      option.textContent = value;
+      select.appendChild(option);
+    }
+    select.value = values.includes(keep) ? keep : "";
+  };
+  fill("filter-bucket", buckets, "любая");
+  fill("filter-status", statuses, "любой");
+}
+
+function passesFilters(item) {
+  if (detailFilters.verdict && classify(item) !== detailFilters.verdict) return false;
+  if (detailFilters.via && item.via !== detailFilters.via) return false;
+  if (detailFilters.status && item.report?.status !== detailFilters.status) return false;
+  if (detailFilters.bucket && bucketOf(item.report?.warehouseAt, Date.now()) !== detailFilters.bucket) return false;
+  return true;
+}
+
+function filtersActive() {
+  return Object.values(detailFilters).some(Boolean) || detailQuery.length > 0;
+}
+
+let resultView = "list";
+let viewSwapTimer = null;
+
+/*
+ * Смена пространства: уходящее гаснет, приходящее проявляется. Подсветка
+ * вкладок едет за выбранной — за это отвечает --seg-index.
+ */
+function setResultView(view, animate) {
   const tabs = $("result-tabs");
   const grid = document.querySelector(".result-grid");
   const detail = $("result-detail");
   if (!tabs || !grid || !detail) return;
 
-  for (const btn of $$(".seg__btn", tabs)) btn.classList.toggle("is-on", btn.dataset.view === view);
-  grid.hidden = view !== "list";
-  detail.hidden = view !== "detail";
-  if (view === "detail") renderDetail();
+  const buttons = $$(".seg__btn", tabs);
+  const at = buttons.findIndex((btn) => btn.dataset.view === view);
+  tabs.style.setProperty("--seg-index", String(Math.max(0, at)));
+  for (const btn of buttons) btn.classList.toggle("is-on", btn.dataset.view === view);
+
+  const from = view === "list" ? detail : grid;
+  const to = view === "list" ? grid : detail;
+  const same = resultView === view;
+  resultView = view;
+
+  window.clearTimeout(viewSwapTimer);
+  const show = () => {
+    from.hidden = true;
+    from.classList.remove("is-leaving");
+    to.hidden = false;
+    if (view === "detail") renderDetail();
+  };
+
+  if (!animate || same || from.hidden) {
+    show();
+    return;
+  }
+  from.classList.add("is-leaving");
+  viewSwapTimer = window.setTimeout(show, 160);
 }
 
 /* Поиск принимает и один ID, и список: через пробел, запятую или строками. */
@@ -1542,10 +1649,11 @@ function parseDetailQuery(raw) {
     .filter(Boolean);
 }
 
-function matchesDetail(item) {
+function matchesDetail(entry) {
+  if (!passesFilters(entry.item)) return false;
   if (!detailQuery.length) return true;
-  const hay = `${item.posting} ${item.report?.number || ""}`.toLowerCase();
-  return detailQuery.some((needle) => hay.includes(needle));
+  /* Несколько значений — это «или»: так ищут списком ID. */
+  return detailQuery.some((needle) => entry.hay.includes(needle));
 }
 
 function verdictOf(item) {
@@ -1606,8 +1714,6 @@ function detailCard(item) {
   addFact("Корзинка", bucketOf(report.warehouseAt, Date.now()));
   addFact("Когда", report.warehouseAt);
   addFact("Последняя ячейка", report.warehouseCell);
-  addFact("Проверка", CHECK_STATUS[item.status] || item.status || "");
-  addFact("Строк", item.expected ? `${item.loaded || 0} из ${item.expected}` : "");
   if (facts.childElementCount) card.appendChild(facts);
 
   const rows = report.lastRows || [];
@@ -1673,23 +1779,25 @@ function renderDetail() {
   const list = $("detail-list");
   if (!list) return;
 
-  const all = (ui.finished?.results || []).filter(Boolean);
-  const shown = all.filter(matchesDetail);
+  const shown = detailIndex.filter(matchesDetail);
+  const all = detailIndex.length;
 
   const count = $("detail-count");
   if (count) {
-    count.textContent = detailQuery.length
-      ? `${shown.length} из ${all.length}`
-      : `${all.length} ${plural(all.length, ["отправление", "отправления", "отправлений"])}`;
+    count.textContent = filtersActive()
+      ? `${shown.length} из ${all}`
+      : `${all} ${plural(all, ["отправление", "отправления", "отправлений"])}`;
   }
+  const reset = $("filter-reset");
+  if (reset) reset.hidden = !filtersActive();
   renderDetailChips();
 
   list.innerHTML = "";
   if (!shown.length) {
     const empty = el("div", "detail__empty");
-    empty.appendChild(el("b", null, all.length ? "Ничего не нашлось" : "Пока пусто"));
+    empty.appendChild(el("b", null, all ? "Ничего не нашлось" : "Пока пусто"));
     empty.appendChild(
-      el("span", null, all.length ? "Проверьте ID или очистите поиск." : "Запустите проверку — детали появятся здесь.")
+      el("span", null, all ? "Смягчите фильтры или очистите поиск." : "Запустите проверку — детали появятся здесь.")
     );
     list.appendChild(empty);
     return;
@@ -1698,11 +1806,11 @@ function renderDetail() {
   /* Больших прогонов это касается напрямую: рисовать тысячи карточек
      незачем, до них никто не долистает. */
   const LIMIT = 300;
-  for (const item of shown.slice(0, LIMIT)) list.appendChild(detailCard(item));
+  for (const entry of shown.slice(0, LIMIT)) list.appendChild(detailCard(entry.item));
   if (shown.length > LIMIT) {
     const more = el("div", "detail__empty");
     more.appendChild(el("b", null, `Показаны первые ${LIMIT}`));
-    more.appendChild(el("span", null, "Сузьте поиск по ID, чтобы увидеть остальные."));
+    more.appendChild(el("span", null, "Сузьте поиск или фильтры, чтобы увидеть остальные."));
     list.appendChild(more);
   }
 }
@@ -1712,7 +1820,7 @@ function mountDetail() {
   if (tabs) {
     tabs.addEventListener("click", (event) => {
       const btn = event.target.closest("[data-view]");
-      if (btn) setResultView(btn.dataset.view);
+      if (btn) setResultView(btn.dataset.view, true);
     });
   }
 
@@ -1726,6 +1834,35 @@ function mountDetail() {
         renderDetail();
       }, 160);
     });
+  }
+
+  const bind = (id, key) => {
+    const select = $(id);
+    if (!select) return;
+    select.addEventListener("change", () => {
+      detailFilters[key] = select.value;
+      renderDetail();
+    });
+  };
+  bind("filter-verdict", "verdict");
+  bind("filter-bucket", "bucket");
+  bind("filter-status", "status");
+  bind("filter-via", "via");
+
+  $("filter-reset")?.addEventListener("click", () => {
+    resetDetailFilters();
+    renderDetail();
+  });
+}
+
+function resetDetailFilters() {
+  detailQuery = [];
+  for (const key of Object.keys(detailFilters)) detailFilters[key] = "";
+  const search = $("detail-search");
+  if (search) search.value = "";
+  for (const id of ["filter-verdict", "filter-bucket", "filter-status", "filter-via"]) {
+    const select = $(id);
+    if (select) select.value = "";
   }
 }
 

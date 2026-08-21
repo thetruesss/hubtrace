@@ -115,8 +115,8 @@ const state = {
   apiTune: null,
   /* Что ответил сервер на каждый вариант — показываем в интерфейсе. */
   apiProbe: [],
-  /* Круг добора: номера, которые в первый заход не вышли. */
-  retryDone: false,
+  /* Круги добора: номера, которые не вышли или дочитались не полностью. */
+  retryRound: 0,
   retryIndexes: new Set(),
   /* Последняя попытка сорвалась не из-за поломки, а потому что повторять
      было нечем: ручек нет, запрос ещё не подсмотрен. */
@@ -1254,7 +1254,13 @@ async function processOne(worker, posting, index) {
 
 function commit(index, item) {
   /* На круге добора номер приходит второй раз — счётчик не должен расти. */
-  if (state.results[index] == null) state.processed += 1;
+  const prev = state.results[index];
+  if (prev == null) state.processed += 1;
+  /* И не должен ухудшаться: если прошлый заход прочитал больше, оставляем
+     его, а отчёт собираем из обоих. */
+  const best = betterOf(prev, item) || item;
+  const merged = mergeReports(prev, item);
+  item = merged ? { ...best, report: merged } : best;
   state.results[index] = item;
   emit({
     action: "scanProgress",
@@ -1322,24 +1328,52 @@ function isIssue(item) {
 }
 
 /*
- * Круг добора. Первый заход мог не выйти по случайной причине: вкладка не
- * успела, сервер ответил не тем, страница не дочиталась. Такие номера
- * прогоняем ещё раз — и сразу обоими путями, чтобы взять тот, который
- * ответил лучше.
+ * Доля прочитанной истории.
+ *
+ * Склад нашёлся — дальше читать незачем, история просмотрена ровно до
+ * нужного места. А вот «нет» стоит чего-то только если список прочитан
+ * почти весь: 20 строк из 83 не доказывают ничего.
+ */
+const COVERAGE_TARGET = 0.8;
+const MAX_RETRY_ROUNDS = 3;
+
+function coverageOf(item) {
+  if (!item) return 0;
+  if (item.found) return 1;
+  const expected = Number(item.expected) || 0;
+  const loaded = Number(item.loaded) || 0;
+  if (!expected) return loaded > 0 ? 1 : 0;
+  return Math.min(1, loaded / expected);
+}
+
+function needsMore(item) {
+  return isIssue(item) || coverageOf(item) < COVERAGE_TARGET;
+}
+
+/*
+ * Круги добора. Заход мог не выйти по случайной причине: вкладка не
+ * успела, сервер ответил не тем, страница не дочиталась до конца. Такие
+ * номера прогоняем ещё раз — сразу обоими путями, и берём тот результат,
+ * который прочитал больше. Кругов до трёх: если и после них список не
+ * дочитан, честнее показать это в «не вышло», чем крутиться бесконечно.
  */
 function queueRetries() {
-  if (state.retryDone || state.stopping) return false;
-  state.retryDone = true;
+  if (state.stopping || state.retryRound >= MAX_RETRY_ROUNDS) return false;
 
   const again = [];
   state.results.forEach((item, index) => {
-    if (isIssue(item)) again.push(index);
+    if (needsMore(item)) again.push(index);
   });
   if (!again.length) return false;
 
+  state.retryRound += 1;
   state.retryIndexes = new Set(again);
   state.requeue.push(...again);
-  notice("api", `Не вышло ${again.length} — иду по ним ещё раз, запросом и страницей.`);
+  notice(
+    "api",
+    `Дочитываю ${again.length} номер(ов) — круг ${state.retryRound} из ${MAX_RETRY_ROUNDS}, ` +
+      "запросом и страницей."
+  );
   return true;
 }
 
@@ -1491,8 +1525,7 @@ async function runScan(payload, postings, warehouse) {
   state.apiTune = null;
   state.apiProbe = [];
   state.apiNotReady = false;
-  /* Круг добора по ошибкам делается один раз за прогон. */
-  state.retryDone = false;
+  state.retryRound = 0;
   state.retryIndexes = new Set();
   state.apiFailStreak = 0;
   state.apiSinceCheck = 0;
