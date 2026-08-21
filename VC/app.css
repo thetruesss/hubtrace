@@ -1657,9 +1657,21 @@ input[type="number"] {
   margin: 0;
   padding: 0;
   display: grid;
+  /*
+   * Строки держат свою высоту, а лишнее уходит в прокрутку.
+   *
+   * Без этого сетка при max-height раздавала высоту поровну, и с ростом
+   * числа потоков строки сплющивались: на трёх вкладках 36 пикселей, на
+   * девяти — 20, на двенадцати — 16, с обрезанным текстом. Помогала этому
+   * и сама строка: у неё overflow: hidden, а такой элемент разрешает
+   * сжимать себя до нуля.
+   */
+  grid-auto-rows: max-content;
   gap: 6px;
   max-height: 232px;
   overflow-y: auto;
+  /* Полоса прокрутки не должна наезжать на плашки справа. */
+  scrollbar-gutter: stable;
 }
 
 .lanes__list:empty {
@@ -1678,6 +1690,7 @@ input[type="number"] {
   grid-template-columns: 20px minmax(0, 1fr) max-content;
   align-items: center;
   gap: 9px;
+  min-height: 34px;
   padding: 7px 10px;
   border-radius: var(--r-xs);
   background: var(--glass-2);
