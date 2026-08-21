@@ -3463,3 +3463,238 @@ input[type="number"] {
     grid-template-columns: minmax(0, 1fr);
   }
 }
+
+/* ---- переключатель вида ---- */
+
+.stats__viewbar {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.stats__viewlabel {
+  font-size: 10.5px;
+  color: var(--faint);
+  letter-spacing: 0.02em;
+}
+
+.seg--viz {
+  --seg-count: 3;
+  --seg-index: 0;
+  flex: 0 0 auto;
+}
+
+.seg--viz .seg__btn {
+  flex: 0 0 auto;
+  min-width: 92px;
+  height: 26px;
+  font-size: 11px;
+}
+
+/* ---- «График»: линии по дням ---- */
+
+.line {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.line__plot {
+  position: relative;
+  height: 150px;
+  border-radius: var(--r-xs);
+  /* Три тихие горизонтали — сетка одной ступенью от поверхности. */
+  background:
+    linear-gradient(rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0.06)) 0 8% / 100% 1px no-repeat,
+    linear-gradient(rgba(255, 255, 255, 0.045), rgba(255, 255, 255, 0.045)) 0 51.5% / 100% 1px no-repeat,
+    linear-gradient(rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0.06)) 0 95% / 100% 1px no-repeat;
+}
+
+.line__plot svg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+
+.line__path {
+  fill: none;
+  stroke-width: 2;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+  vector-effect: non-scaling-stroke;
+  transition: opacity 0.2s var(--ease);
+}
+
+.line__path.is-dim {
+  opacity: 0.3;
+}
+
+.line__max {
+  position: absolute;
+  left: 2px;
+  top: 2px;
+  font-size: 9.5px;
+  color: var(--faint);
+  font-variant-numeric: tabular-nums;
+}
+
+.line__dot {
+  position: absolute;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  /* Кольцо цветом поверхности: точка читается и там, где линии пересеклись. */
+  box-shadow: 0 0 0 2px #0a0e18;
+  transform: translate(-50%, -50%);
+  transition: opacity 0.2s var(--ease);
+}
+
+.line__dot.is-dim {
+  opacity: 0.3;
+}
+
+.line__days {
+  display: grid;
+  gap: 4px;
+}
+
+.line__days span {
+  font-size: 10px;
+  color: var(--faint);
+  text-align: center;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ---- подписи-фишки серий (график и диаграмма) ---- */
+
+.lchips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.lchips--column {
+  flex-direction: column;
+  align-items: flex-start;
+  min-width: 0;
+  flex: 1;
+}
+
+.lchip {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  max-width: 100%;
+  border: 1px solid var(--stroke-2);
+  border-radius: 999px;
+  background: var(--glass-2);
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 11px;
+  padding: 3px 10px;
+  cursor: pointer;
+  transition: border-color 0.2s var(--ease), color 0.2s var(--ease), opacity 0.2s var(--ease);
+}
+
+.lchip i {
+  flex: 0 0 auto;
+  width: 10px;
+  height: 10px;
+  border-radius: 3px;
+}
+
+.lchip span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.lchip b {
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+}
+
+.lchip:hover {
+  border-color: rgba(47, 123, 255, 0.55);
+  color: var(--text);
+}
+
+.lchip.is-on {
+  border-color: rgba(47, 123, 255, 0.65);
+  color: #fff;
+}
+
+.lchip.is-dim {
+  opacity: 0.45;
+}
+
+.lchip.is-rest {
+  cursor: default;
+  color: var(--faint);
+}
+
+.lchip.is-rest:hover {
+  border-color: var(--stroke-2);
+}
+
+/* ---- «Диаграмма»: доли кольцом ---- */
+
+.donut {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+}
+
+.donut__ring {
+  flex: 0 0 auto;
+  width: 148px;
+  height: 148px;
+}
+
+.donut__seg {
+  fill: none;
+  stroke-width: 17;
+  cursor: pointer;
+  transition: opacity 0.2s var(--ease), stroke-width 0.2s var(--ease);
+}
+
+.donut__seg:hover {
+  stroke-width: 19;
+}
+
+.donut__seg.is-dim {
+  opacity: 0.35;
+}
+
+.donut__seg.is-on {
+  stroke-width: 20;
+}
+
+.donut__total,
+.donut__label {
+  pointer-events: none;
+}
+
+.donut__total {
+  font-family: inherit;
+  font-size: 22px;
+  font-weight: 700;
+  fill: var(--text);
+  text-anchor: middle;
+}
+
+.donut__label {
+  font-family: inherit;
+  font-size: 8.5px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  fill: var(--faint);
+  text-anchor: middle;
+}

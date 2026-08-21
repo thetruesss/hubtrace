@@ -1918,8 +1918,11 @@ mountDetail();
  */
 let statsIndex = [];
 let statsQuery = [];
-const statsFilters = { verdict: "", cell: "", place: "", bucket: "", status: "", via: "", day: "" };
+const statsFilters = { verdict: "", cell: "", place: "", bucket: "", status: "", op: "", day: "" };
 let statsSort = { key: "at", dir: -1 };
+/* Вид графиков: гистограмма, график, диаграмма. Это не фильтр — «Сбросить»
+   его не трогает, а выбранный вид переживает новый прогон. */
+let statsMode = "bars";
 
 const STATS_SELECTS = {
   verdict: "stats-verdict",
@@ -1927,7 +1930,7 @@ const STATS_SELECTS = {
   place: "stats-place",
   bucket: "stats-bucket",
   status: "stats-status",
-  via: "stats-via"
+  op: "stats-op"
 };
 
 /* «A → B» — предмет доехал до B; «A → —» — последним известным остаётся A. */
@@ -2000,15 +2003,19 @@ function buildStatsIndex(results) {
   statsIndex = results.map((item) => {
     const blame = blameOf(item);
     const stamp = parseHubDate(blame.at);
+    /* Последняя операция — тип верхней строки истории, словами Hub. */
+    const op = String(withLabels(item.report)[0]?.[0] || "").trim();
     return {
       item,
       blame,
+      op,
       bucket: bucketOf(item.report?.warehouseAt, now),
       day: stamp ? `${pad(stamp.getDate())}.${pad(stamp.getMonth() + 1)}` : "",
       dayTs: stamp ? new Date(stamp.getFullYear(), stamp.getMonth(), stamp.getDate()).getTime() : 0,
       hay: [haystackOf(item), blame.value, BLAME_TAGS[blame.kind] || ""].join(" ").toLowerCase()
     };
   });
+  assignStatsColors();
 }
 
 const STATS_NO_SKIP = new Set();
@@ -2017,7 +2024,7 @@ function passesStats(entry, skip) {
   const s = skip || STATS_NO_SKIP;
   const item = entry.item;
   if (!s.has("verdict") && statsFilters.verdict && classify(item) !== statsFilters.verdict) return false;
-  if (!s.has("via") && statsFilters.via && item.via !== statsFilters.via) return false;
+  if (!s.has("op") && statsFilters.op && entry.op !== statsFilters.op) return false;
   if (!s.has("status") && statsFilters.status && (item.report?.status || "") !== statsFilters.status) return false;
   if (!s.has("bucket") && statsFilters.bucket && entry.bucket !== statsFilters.bucket) return false;
   if (!s.has("cell") && statsFilters.cell) {
@@ -2075,18 +2082,22 @@ function fillStatsOptions() {
 
   const buckets = [];
   const statuses = [];
+  const ops = [];
   for (const entry of statsIndex) {
     if (entry.bucket && !buckets.includes(entry.bucket)) buckets.push(entry.bucket);
     const status = entry.item.report?.status;
     if (status && !statuses.includes(status)) statuses.push(status);
+    if (entry.op && !ops.includes(entry.op)) ops.push(entry.op);
   }
   buckets.sort((a, b) => BUCKET_ORDER.indexOf(a) - BUCKET_ORDER.indexOf(b));
   statuses.sort((a, b) => a.localeCompare(b, "ru"));
+  ops.sort((a, b) => a.localeCompare(b, "ru"));
 
   fill("stats-cell", cells, "любая");
   fill("stats-place", places, "любой");
   fill("stats-bucket", buckets, "любая");
   fill("stats-status", statuses, "любой");
+  fill("stats-op", ops, "любая");
 }
 
 function syncStatsControls() {
@@ -2195,52 +2206,348 @@ function renderBarChart(hostId, rows, options) {
   if (feet.length) host.appendChild(el("p", "bars__foot", feet.join(" · ")));
 }
 
+/*
+ * Один и тот же срез — три вида. Цвет закреплён за значением на весь
+ * прогон (по полному списку, а не по текущему рангу): фильтр не должен
+ * перекрашивать выживших. Палитры проверены валидатором на тёмной
+ * поверхности: категориальная пятёрка и порядковая синяя лента для дней.
+ */
+const STATS_CAT = ["#3987e5", "#d95926", "#199e70", "#c98500", "#d55181"];
+const STATS_REST = "#5b6478";
+const DAY_RAMP = ["#9ec4ff", "#63a3ef", "#3987e5", "#2262b8", "#184f95"];
+
+let statsColors = { cell: new Map(), place: new Map(), status: new Map() };
+
+function assignStatsColors() {
+  const dims = {
+    cell: (entry) => (entry.blame.kind === "cell" ? entry.blame.value : ""),
+    place: (entry) => (entry.blame.kind === "place" ? entry.blame.value : ""),
+    status: (entry) => entry.item.report?.status || ""
+  };
+  statsColors = {};
+  for (const [dim, keyOf] of Object.entries(dims)) {
+    const map = new Map();
+    tallyBy(statsIndex, keyOf).forEach(([value], index) => {
+      map.set(value, STATS_CAT[index] || STATS_REST);
+    });
+    statsColors[dim] = map;
+  }
+}
+
+/* Дни среза по порядку времени (не больше 16 последних). */
+function statsDays(entries) {
+  const byDay = new Map();
+  for (const entry of entries) {
+    if (!entry.day) continue;
+    const known = byDay.get(entry.day);
+    if (!known || entry.dayTs < known.ts) byDay.set(entry.day, { day: entry.day, ts: entry.dayTs });
+  }
+  let days = [...byDay.values()].sort((a, b) => a.ts - b.ts);
+  if (days.length > 16) days = days.slice(-16);
+  return days;
+}
+
+/* Ряды для «Графика»: по каждому значению — счёт на каждый день. */
+function seriesByDay(entries, keyOf, colorOf, topN) {
+  const days = statsDays(entries);
+  const at = new Map(days.map((day, index) => [day.day, index]));
+  const names = tallyBy(entries, keyOf).slice(0, topN);
+  const series = names.map(([name, total]) => {
+    const points = days.map(() => 0);
+    for (const entry of entries) {
+      if (keyOf(entry) !== name) continue;
+      const index = at.get(entry.day);
+      if (index != null) points[index] += 1;
+    }
+    return { name, total, points, color: colorOf(name) };
+  });
+  return { days, series };
+}
+
+function legendChip(name, total, color, state, pick) {
+  const chip = document.createElement("button");
+  chip.type = "button";
+  chip.className = `lchip${state}`;
+  chip.title = state === " is-on" ? "Снять фильтр" : "Показать все ID с этим значением";
+  const mark = el("i");
+  mark.style.background = color;
+  chip.append(mark, el("span", null, name), el("b", null, String(total)));
+  chip.addEventListener("click", () => pick(name));
+  return chip;
+}
+
+function chipState(active, name) {
+  return active === name ? " is-on" : active ? " is-dim" : "";
+}
+
+function renderLineChart(hostId, data, options) {
+  const host = $(hostId);
+  if (!host) return;
+  host.innerHTML = "";
+
+  const { days, series } = data;
+  if (!days.length || !series.length) {
+    chartEmpty(host, options.empty || "Под фильтры ничего не попало.");
+    return;
+  }
+
+  const max = Math.max(1, ...series.flatMap((line) => line.points));
+  const box = el("div", "line");
+  const plot = el("div", "line__plot");
+  plot.appendChild(el("span", "line__max", String(max)));
+
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("viewBox", "0 0 100 100");
+  svg.setAttribute("preserveAspectRatio", "none");
+  const xOf = (index) => (days.length === 1 ? 50 : (index / (days.length - 1)) * 100);
+  const yOf = (value) => 95 - (value / max) * 86;
+
+  for (const line of series) {
+    const poly = document.createElementNS("http://www.w3.org/2000/svg", "polyline");
+    poly.setAttribute("points", line.points.map((value, index) => `${xOf(index)},${yOf(value)}`).join(" "));
+    poly.setAttribute("class", `line__path${chipState(options.active, line.name)}`);
+    poly.style.stroke = line.color;
+    svg.appendChild(poly);
+  }
+  plot.appendChild(svg);
+
+  /* Точки — HTML поверх: SVG с preserveAspectRatio=none растянул бы круги. */
+  for (const line of series) {
+    line.points.forEach((value, index) => {
+      const dot = el("i", `line__dot${chipState(options.active, line.name)}`);
+      dot.style.left = `${xOf(index)}%`;
+      dot.style.top = `${yOf(value)}%`;
+      dot.style.background = line.color;
+      dot.title = `${line.name} · ${days[index].day}: ${value}`;
+      plot.appendChild(dot);
+    });
+  }
+  box.appendChild(plot);
+
+  const labels = el("div", "line__days");
+  labels.style.gridTemplateColumns = `repeat(${days.length}, 1fr)`;
+  for (const day of days) labels.appendChild(el("span", null, day.day));
+  box.appendChild(labels);
+
+  const legend = el("div", "lchips");
+  for (const line of series) {
+    legend.appendChild(legendChip(line.name, line.total, line.color, chipState(options.active, line.name), options.pick));
+  }
+  box.appendChild(legend);
+  if (options.foot) box.appendChild(el("p", "bars__foot", options.foot));
+  host.appendChild(box);
+}
+
+function renderDonutChart(hostId, rows, options) {
+  const host = $(hostId);
+  if (!host) return;
+  host.innerHTML = "";
+
+  if (!rows.length) {
+    chartEmpty(host, options.empty || "Под фильтры ничего не попало.");
+    return;
+  }
+
+  const top = rows.slice(0, 5);
+  const rest = rows.slice(5);
+  const restCount = rest.reduce((sum, [, count]) => sum + count, 0);
+  const segments = [...top.map(([name, count], index) => ({
+    name, count, color: options.colorOf(name, index), pickable: true
+  }))];
+  if (restCount) segments.push({ name: `остальные · ${rest.length}`, count: restCount, color: STATS_REST, pickable: false });
+
+  const total = segments.reduce((sum, seg) => sum + seg.count, 0) || 1;
+  const box = el("div", "donut");
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("viewBox", "0 0 120 120");
+  svg.setAttribute("class", "donut__ring");
+
+  const R = 44;
+  const LEN = 2 * Math.PI * R;
+  /* Зазор цветом поверхности отделяет соседние доли друг от друга. */
+  const GAP = segments.length > 1 ? 2.6 : 0;
+  let offset = 0;
+  for (const seg of segments) {
+    const share = (seg.count / total) * LEN;
+    const circle = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+    circle.setAttribute("cx", "60");
+    circle.setAttribute("cy", "60");
+    circle.setAttribute("r", String(R));
+    circle.setAttribute("class", `donut__seg${seg.pickable ? chipState(options.active, seg.name) : ""}`);
+    circle.style.stroke = seg.color;
+    circle.setAttribute("stroke-dasharray", `${Math.max(0.5, share - GAP)} ${LEN - Math.max(0.5, share - GAP)}`);
+    circle.setAttribute("stroke-dashoffset", String(-offset));
+    circle.setAttribute("transform", "rotate(-90 60 60)");
+    const title = document.createElementNS("http://www.w3.org/2000/svg", "title");
+    title.textContent = `${seg.name}: ${seg.count}`;
+    circle.appendChild(title);
+    if (seg.pickable) circle.addEventListener("click", () => options.pick(seg.name));
+    svg.appendChild(circle);
+    offset += share;
+  }
+
+  const centerValue = document.createElementNS("http://www.w3.org/2000/svg", "text");
+  centerValue.setAttribute("x", "60");
+  centerValue.setAttribute("y", "58");
+  centerValue.setAttribute("class", "donut__total");
+  centerValue.textContent = String(total);
+  svg.appendChild(centerValue);
+  const centerLabel = document.createElementNS("http://www.w3.org/2000/svg", "text");
+  centerLabel.setAttribute("x", "60");
+  centerLabel.setAttribute("y", "74");
+  centerLabel.setAttribute("class", "donut__label");
+  centerLabel.textContent = options.centerLabel || "ID";
+  svg.appendChild(centerLabel);
+  box.appendChild(svg);
+
+  const legend = el("div", "lchips lchips--column");
+  for (const seg of segments) {
+    if (seg.pickable) {
+      legend.appendChild(legendChip(seg.name, seg.count, seg.color, chipState(options.active, seg.name), options.pick));
+    } else {
+      const still = el("span", "lchip is-rest");
+      const mark = el("i");
+      mark.style.background = seg.color;
+      still.append(mark, el("span", null, seg.name), el("b", null, String(seg.count)));
+      legend.appendChild(still);
+    }
+  }
+  box.appendChild(legend);
+  host.appendChild(box);
+}
+
 function renderStatsCharts() {
   const cellSlice = statsIndex.filter(
-    (entry) => passesStats(entry, new Set(["cell"])) && entry.blame.kind === "cell"
+    (entry) => passesStats(entry, new Set(["cell"])) && entry.blame.kind === "cell" && entry.blame.value
   );
-  const cellRows = tallyBy(cellSlice, (entry) => entry.blame.value);
-  const cellMissing = cellSlice.filter((entry) => !entry.blame.value).length;
-  renderBarChart("chart-cells", cellRows, {
-    color: "var(--viz-hit)",
-    active: statsFilters.cell,
-    pick: (value) => toggleStatsFilter("cell", value),
-    foot: cellMissing ? `ячейка не прочиталась: ${cellMissing}` : "",
-    empty: "Ни одного ID с найденным складом под фильтрами."
-  });
-
   const placeSlice = statsIndex.filter(
-    (entry) => passesStats(entry, new Set(["place"])) && entry.blame.kind === "place"
+    (entry) => passesStats(entry, new Set(["place"])) && entry.blame.kind === "place" && entry.blame.value
   );
-  const placeRows = tallyBy(placeSlice, (entry) => entry.blame.value);
-  const placeMissing = placeSlice.filter((entry) => !entry.blame.value).length;
-  renderBarChart("chart-places", placeRows, {
-    color: "var(--viz-miss)",
-    active: statsFilters.place,
-    pick: (value) => toggleStatsFilter("place", value),
-    foot: placeMissing ? `склад не прочитался: ${placeMissing}` : "",
-    empty: "Ни одного ID без склада под фильтрами."
-  });
-
   const statusSlice = statsIndex.filter((entry) => passesStats(entry, new Set(["status"])));
-  renderBarChart("chart-status", tallyBy(statusSlice, (entry) => entry.item.report?.status || ""), {
-    color: "var(--viz-blue)",
-    active: statsFilters.status,
-    pick: (value) => toggleStatsFilter("status", value),
-    empty: "Статусы не прочитались."
-  });
+  const daySlice = statsIndex.filter((entry) => passesStats(entry, new Set(["day"])) && entry.day);
 
-  renderDaysChart();
+  const dims = [
+    {
+      host: "chart-cells",
+      slice: cellSlice,
+      keyOf: (entry) => entry.blame.value,
+      colors: statsColors.cell,
+      barColor: "var(--viz-hit)",
+      key: "cell",
+      empty: "Ни одного ID с найденным складом под фильтрами."
+    },
+    {
+      host: "chart-places",
+      slice: placeSlice,
+      keyOf: (entry) => entry.blame.value,
+      colors: statsColors.place,
+      barColor: "var(--viz-miss)",
+      key: "place",
+      empty: "Ни одного ID без склада под фильтрами."
+    },
+    {
+      host: "chart-status",
+      slice: statusSlice,
+      keyOf: (entry) => entry.item.report?.status || "",
+      colors: statsColors.status,
+      barColor: "var(--viz-blue)",
+      key: "status",
+      empty: "Статусы не прочитались."
+    }
+  ];
+
+  for (const dim of dims) {
+    const active = statsFilters[dim.key];
+    const pick = (value) => toggleStatsFilter(dim.key, value);
+    const colorOf = (name) => dim.colors.get(name) || STATS_REST;
+
+    if (statsMode === "line") {
+      renderLineChart(dim.host, seriesByDay(dim.slice, dim.keyOf, colorOf, 3), {
+        active,
+        pick,
+        empty: dim.empty,
+        foot: tallyBy(dim.slice, dim.keyOf).length > 3 ? "линии — три самых частых значения; остальное в гистограмме" : ""
+      });
+      continue;
+    }
+    if (statsMode === "donut") {
+      renderDonutChart(dim.host, tallyBy(dim.slice, dim.keyOf), {
+        active,
+        pick,
+        colorOf,
+        empty: dim.empty
+      });
+      continue;
+    }
+
+    const rows = tallyBy(dim.slice, dim.keyOf);
+    const missing =
+      dim.key === "cell"
+        ? statsIndex.filter((entry) => passesStats(entry, new Set(["cell"])) && entry.blame.kind === "cell" && !entry.blame.value).length
+        : dim.key === "place"
+          ? statsIndex.filter((entry) => passesStats(entry, new Set(["place"])) && entry.blame.kind === "place" && !entry.blame.value).length
+          : 0;
+    renderBarChart(dim.host, rows, {
+      color: dim.barColor,
+      active,
+      pick,
+      foot: missing ? `${dim.key === "cell" ? "ячейка" : "склад"} не прочиталась: ${missing}` : "",
+      empty: dim.empty
+    });
+  }
+
+  renderDaysPanel(daySlice);
+}
+
+/* «По дням»: столбики, две линии есть/нет или доли дней синей лентой. */
+function renderDaysPanel(slice) {
+  const legend = $("stats-legend");
+
+  if (statsMode === "line") {
+    if (legend) legend.innerHTML = "";
+    const data = seriesByDay(
+      slice.filter((entry) => classify(entry.item) !== "issue"),
+      (entry) => (classify(entry.item) === "hit" ? "склад есть" : "склада нет"),
+      (name) => (name === "склад есть" ? "var(--viz-hit)" : "var(--viz-miss)"),
+      2
+    );
+    renderLineChart("chart-days", data, {
+      active: statsFilters.verdict === "hit" ? "склад есть" : statsFilters.verdict === "miss" ? "склада нет" : "",
+      pick: (name) => toggleStatsFilter("verdict", name === "склад есть" ? "hit" : "miss"),
+      empty: "Дат верхних операций не нашлось."
+    });
+    return;
+  }
+
+  if (statsMode === "donut") {
+    if (legend) legend.innerHTML = "";
+    const days = statsDays(slice);
+    const shade = new Map(
+      days.map((day, index) => [
+        day.day,
+        DAY_RAMP[days.length === 1 ? 2 : Math.round((index * (DAY_RAMP.length - 1)) / (days.length - 1))]
+      ])
+    );
+    renderDonutChart("chart-days", tallyBy(slice, (entry) => entry.day), {
+      active: statsFilters.day,
+      pick: (value) => toggleStatsFilter("day", value),
+      colorOf: (name) => shade.get(name) || STATS_REST,
+      centerLabel: "ID",
+      empty: "Дат верхних операций не нашлось."
+    });
+    return;
+  }
+
+  renderDaysChart(slice);
 }
 
 /* Колонки по дням: снизу «склад есть», сверху «склада нет», зазор 2px. */
-function renderDaysChart() {
+function renderDaysChart(slice) {
   const host = $("chart-days");
   const legend = $("stats-legend");
   if (!host) return;
   host.innerHTML = "";
 
-  const slice = statsIndex.filter((entry) => passesStats(entry, new Set(["day"])) && entry.day);
   const byDay = new Map();
   for (const entry of slice) {
     const bucket = byDay.get(entry.day) || { day: entry.day, ts: entry.dayTs, hit: 0, miss: 0 };
@@ -2326,7 +2633,7 @@ const STATS_SORT_VALUES = {
     return at < 0 ? BUCKET_ORDER.length : at;
   },
   status: (entry) => entry.item.report?.status || "",
-  via: (entry) => entry.item.via || ""
+  op: (entry) => entry.op || ""
 };
 
 function sortStats(entries) {
@@ -2413,7 +2720,7 @@ function renderStatsTable(shown) {
     tr.appendChild(el("td", "t-when", entry.blame.at || "—"));
     tr.appendChild(el("td", null, entry.bucket || "—"));
     tr.appendChild(el("td", null, report.status || "—"));
-    tr.appendChild(el("td", "t-via", VIA_LABELS[item.via] || item.via || "—"));
+    tr.appendChild(el("td", null, entry.op || "—"));
 
     const hubCell = el("td", "t-hub");
     const link = el("a", null, "Hub ↗");
@@ -2459,6 +2766,16 @@ function renderStats() {
   if (!host) return;
 
   syncStatsControls();
+
+  const mode = $("stats-mode");
+  if (mode) {
+    const buttons = $$(".seg__btn", mode);
+    const at = buttons.findIndex((btn) => btn.dataset.viz === statsMode);
+    mode.style.setProperty("--seg-index", String(Math.max(0, at)));
+    mode.style.setProperty("--seg-count", String(buttons.length || 1));
+    for (const btn of buttons) btn.classList.toggle("is-on", btn.dataset.viz === statsMode);
+  }
+
   const shown = statsIndex.filter((entry) => passesStats(entry));
 
   const count = $("stats-count");
@@ -2521,6 +2838,13 @@ function mountStats() {
 
   $("stats-reset")?.addEventListener("click", () => {
     resetStatsFilters();
+    renderStats();
+  });
+
+  $("stats-mode")?.addEventListener("click", (event) => {
+    const btn = event.target.closest("[data-viz]");
+    if (!btn || btn.dataset.viz === statsMode) return;
+    statsMode = btn.dataset.viz;
     renderStats();
   });
 

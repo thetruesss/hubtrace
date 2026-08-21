@@ -390,11 +390,9 @@
                   </select>
                 </label>
                 <label class="pick">
-                  <span>Путь</span>
-                  <select id="stats-via">
-                    <option value="">любой</option>
-                    <option value="api">запрос</option>
-                    <option value="dom">страница</option>
+                  <span>Операция</span>
+                  <select id="stats-op">
+                    <option value="">любая</option>
                   </select>
                 </label>
                 <button id="stats-reset" class="btn btn--ghost btn--sm" type="button" hidden>Сбросить</button>
@@ -405,6 +403,16 @@
 
             <div class="stats__scroll" id="stats-scroll">
               <div class="kpis" id="stats-kpis"></div>
+
+              <div class="stats__viewbar">
+                <span class="stats__viewlabel">Вид</span>
+                <div class="seg seg--viz" id="stats-mode" role="group" aria-label="Вид графиков">
+                  <span class="seg__pill" aria-hidden="true"></span>
+                  <button class="seg__btn is-on" type="button" data-viz="bars">Гистограмма</button>
+                  <button class="seg__btn" type="button" data-viz="line">График</button>
+                  <button class="seg__btn" type="button" data-viz="donut">Диаграмма</button>
+                </div>
+              </div>
 
               <div class="stats__grid">
                 <section class="panel glass spanel">
@@ -453,7 +461,7 @@
                         <th data-sort="at">Когда</th>
                         <th data-sort="bucket">Корзинка</th>
                         <th data-sort="status">Статус</th>
-                        <th data-sort="via">Путь</th>
+                        <th data-sort="op">Операция</th>
                         <th></th>
                       </tr>
                     </thead>
