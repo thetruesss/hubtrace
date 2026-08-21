@@ -285,6 +285,8 @@
    */
   const TRANSITION_TYPES = ["InnerWarehouse", "OnWarehouse", "InTripContainer", "InContainer", "OnCell"];
   let auditTypes = TRANSITION_TYPES.slice();
+  /* Хоть одна запись за прогон совпала со списком типов — значит он живой. */
+  let typesConfirmed = false;
 
   function adoptAuditTypes(next) {
     if (!Array.isArray(next) || !next.length) return false;
@@ -971,6 +973,11 @@
     let hit = null;
     let size = apiTune.pageSize;
     let retuned = false;
+    /* Сервер не принял список типов и отдал лишнее — «Всего» из ответа
+       тогда не про наш срез. */
+    let trimmed = false;
+    /* Прочитано с сервера: по нему листаем. loaded — что оставили себе. */
+    let read = 0;
 
     for (let page = 0; page < MAX_API_PAGES; page += 1) {
       if (abortFlag || Date.now() > deadline) return { ok: false, reason: "aborted" };
@@ -1013,14 +1020,16 @@
         return { ok: false, missing: true, reason: snippet(response) };
       }
 
-      const records = json.records;
+      const raw = Array.isArray(json.records) ? json.records : [];
+      const records = keepTransitions(raw);
+      if (records.length !== raw.length) trimmed = true;
       if (page === 0) {
         digest = digestOf(response.text);
         if (Number.isFinite(json.totalCount)) total = Number(json.totalCount);
         /* Строк меньше, чем просили, а в списке их больше — сервер режет
            страницу по своему пределу. Дальше идём его шагом. */
-        if (records.length && records.length < size && total != null && total > records.length) {
-          size = records.length;
+        if (raw.length && raw.length < size && total != null && total > raw.length) {
+          size = raw.length;
         }
       }
 
@@ -1031,16 +1040,21 @@
       }
 
       loaded += records.length;
+      read += raw.length;
       if (!found && hit) {
         found = true;
         sample = JSON.stringify(hit).slice(0, 280);
       }
 
       if (found) break;
-      if (!records.length) break;
-      if (total != null && loaded >= total) break;
+      /*
+       * Листаем по тому, что отдал сервер, а не по тому, что оставили себе:
+       * страница целиком из не-перемещений — не повод бросить чтение.
+       */
+      if (!raw.length) break;
+      if (total != null && read >= total) break;
       /* Итог неизвестен: неполная страница — значит список кончился. */
-      if (total == null && records.length < size) break;
+      if (total == null && raw.length < size) break;
     }
 
     const report = reportFromAudit(head, hit);
@@ -1052,9 +1066,9 @@
       ok: true,
       via: "api",
       found,
-      expected: total != null ? total : loaded,
+      expected: trimmed || total == null ? loaded : total,
       loaded,
-      complete: total == null || loaded >= total || found,
+      complete: trimmed || total == null || loaded >= total || found,
       sample,
       digest,
       report
@@ -1166,6 +1180,32 @@
     return retry;
   }
 
+  /*
+   * Подставляем в подсмотренное тело наш список типов.
+   *
+   * Рецепт снимается с любой вкладки Hub, какая окажется открытой, — в том
+   * числе с «Все». Раньше тело повторялось как есть, и такой рецепт тянул
+   * всю историю: в «Последние операции» уезжали смены статуса и тайм-слота,
+   * хотя вкладку мы открываем на «Перемещениях».
+   */
+  function forceTypes(node, depth) {
+    if (!node || typeof node !== "object" || depth > 4) return false;
+    let touched = false;
+    for (const key of Object.keys(node)) {
+      if (key === "changeType" || key === "changeTypes") {
+        if (Array.isArray(node[key])) {
+          node[key] = auditTypes.slice();
+          touched = true;
+        }
+        continue;
+      }
+      if (node[key] && typeof node[key] === "object") {
+        touched = forceTypes(node[key], depth + 1) || touched;
+      }
+    }
+    return touched;
+  }
+
   function buildRequest(posting, pageIndex, pageSize, timeoutMs) {
     const fromId = recipe.itemId;
     const tunedUrl = tuneQuery(swapId(recipe.url, fromId, posting), pageIndex, pageSize);
@@ -1176,7 +1216,9 @@
       try {
         const parsed = JSON.parse(body);
         bodyTouched = tuneJson(parsed, pageIndex, pageSize, 0);
-        if (bodyTouched) body = JSON.stringify(parsed);
+        /* Список типов ставим свой независимо от того, что было в рецепте. */
+        forceTypes(parsed, 0);
+        body = JSON.stringify(parsed);
       } catch (_err) {
         bodyTouched = false;
       }
@@ -1346,6 +1388,26 @@
     return { columns: [], lastRows: [], warehouseAt, warehouseCell: "" };
   }
 
+  /*
+   * Оставляем только те записи, которые показывает открытая вкладка.
+   *
+   * Пусто на выходе при непустом входе значит одно из двух: либо на этой
+   * странице и правда нет перемещений, либо наш список типов разошёлся с
+   * Hub. Различаем по памяти прогона: если совпадение хоть раз было, список
+   * верный — и пустая страница именно пустая. Пока совпадений не видели,
+   * отдаём страницу как есть, чтобы не показать пустоту вместо истории.
+   */
+  function keepTransitions(rows) {
+    if (!Array.isArray(rows) || !rows.length) return rows || [];
+    if (!looksLikeAudit(rows)) return rows;
+    const kept = rows.filter((record) => auditTypes.includes(String(record?.changeType || "")));
+    if (kept.length) {
+      typesConfirmed = true;
+      return kept;
+    }
+    return typesConfirmed ? kept : rows;
+  }
+
   function reportFromRows(rows, needle) {
     if (!looksLikeAudit(rows)) return reportFromApiRows(rows, needle);
     const hit = rows.find((record) => recordMatches(record, needle));
@@ -1416,6 +1478,9 @@
       let pageable = true;
       let failed = false;
       let digest = "";
+      let filtered = false;
+      /* Прочитано с сервера: по нему листаем. loaded — что оставили себе. */
+      let read = 0;
       const allRows = [];
       let firstJson = null;
 
@@ -1450,12 +1515,21 @@
           break;
         }
 
-        const rows = findRows(json);
-        if (!rows) {
+        const raw = findRows(json);
+        if (!raw) {
           failure = "в ответе не нашлось списка строк";
           failed = true;
           break;
         }
+
+        /*
+         * Страховка: сервер мог не принять наш список типов и отдать всю
+         * историю. Тогда лишние строки убираем сами, а «Всего» из ответа
+         * больше не про наш срез — считаем итог по прочитанному.
+         */
+        const rows = keepTransitions(raw);
+        if (rows.length !== raw.length) filtered = true;
+
         if (page === 0) {
           digest = digestOf(response.text);
           firstJson = json;
@@ -1472,18 +1546,23 @@
         }
 
         loaded += rows.length;
+        read += raw.length;
         const pageTotal = findTotal(json);
         if (pageTotal != null) total = pageTotal;
 
         if (found) break;
-        if (!rows.length) break;
-        if (total != null && loaded >= total) break;
+        /*
+         * Листаем по тому, что отдал сервер, а не по тому, что оставили
+         * себе: страница целиком из не-перемещений — не повод бросить.
+         */
+        if (!raw.length) break;
+        if (total != null && read >= total) break;
         if (!pageable) break;
       }
 
       if (failed) continue;
 
-      const expected = total != null ? total : loaded;
+      const expected = filtered || total == null ? loaded : total;
       const report = reportFromRows(allRows, needle);
       const left = () => Math.max(2000, Math.min(8000, deadline - Date.now()));
 
@@ -1516,7 +1595,7 @@
         found,
         expected,
         loaded,
-        complete: total == null ? true : loaded >= total || found,
+        complete: filtered || total == null ? true : loaded >= total || found,
         sample,
         digest,
         report
@@ -1903,6 +1982,65 @@
     return out;
   }
 
+  /*
+   * Подписи типов, которых на «Перемещениях» быть не должно: «Статус
+   * предмета», «Тайм-слот» и прочее из общей истории.
+   *
+   * Список именно запретный, а не разрешительный. Разрешительный отбрасывал
+   * бы и незнакомый вид перемещения — тот самый, подпись которого мы как раз
+   * учим со страницы: назвать его по-русски заранее нечем, и строка уезжала
+   * бы в мусор вместе с уроком.
+   */
+  function foreignWords() {
+    const words = new Set();
+    const mine = new Set(auditTypes);
+    const collect = (table) => {
+      for (const code of Object.keys(table)) {
+        if (mine.has(code)) continue;
+        const label = norm(table[code]).toLowerCase();
+        if (label) words.add(label);
+      }
+    };
+    collect(CHANGE_TYPES);
+    collect(learnedTypes);
+    /* Своё слово важнее: одну и ту же подпись носят разные коды. */
+    for (const code of mine) words.delete(norm(changeTypeLabel(code)).toLowerCase());
+    return words;
+  }
+
+  /* Колонка «Тип изменения» — по ней и отличаем перемещение. */
+  function typeColumnAt(columns) {
+    const titles = columns || tableColumns();
+    const at = titles.findIndex((title) => /^тип/i.test(title));
+    return at >= 0 ? at : 0;
+  }
+
+  /* В колонке типа лежит одна плашка, так что весь её текст — и есть подпись. */
+  function rowTypeText(row, at) {
+    const own = row.children;
+    let cell = own && own[at];
+    if (!cell || (cell.tagName !== "TD" && cell.tagName !== "TH")) {
+      const cells = rowCellNodes(row);
+      cell = cells[at] || cells[0];
+    }
+    return cell ? norm(cell.textContent).toLowerCase() : "";
+  }
+
+  /*
+   * То же, что keepTransitions, только для отрисованной таблицы: вкладка
+   * «Перемещения» показывает лишь их, но если страница почему-то открылась
+   * на всей истории, её строки не должны уехать в «Последние операции».
+   * Незнакомая подпись остаётся — вдруг это новый вид перемещения.
+   */
+  function keepTransitionRows(rows, words, at) {
+    const list = [...rows];
+    if (!list.length) return list;
+    const foreign = words || foreignWords();
+    if (!foreign.size) return list;
+    const column = at == null ? typeColumnAt() : at;
+    return list.filter((row) => !foreign.has(rowTypeText(row, column)));
+  }
+
   /* Дата строки — из колонки «Дата», а не поиском по всей строке: в
      «Описании» тоже встречаются даты. */
   function rowDate(row, columns) {
@@ -2116,7 +2254,7 @@
    * открывает «Перемещения». Сюда попадаем, только если история почему-то
    * не отрисовалась сама.
    */
-  const HISTORY_LABELS = ["перемещения", "история перемещений", "история", "все"];
+  const HISTORY_LABELS = ["перемещения", "история перемещений", "история"];
 
   /*
    * Перебираем ярлыки по порядку, но «уже открыта» и «не нашлось» — разные
@@ -2160,7 +2298,12 @@
     const left = () => deadline - Date.now();
     const dead = () => abortFlag || left() <= 0;
 
+    /* seen — строки-перемещения, seenAll — вообще все: по ним меряем, дочитали
+       ли мы список, ведь счётчик «Всего» на странице считает всё подряд. */
     const seen = new Set();
+    const seenAll = new Set();
+    /* Страница открылась не на «Перемещениях» — счётчик тогда не про нас. */
+    let domTrimmed = false;
     let prevLength = 0;
     let found = false;
     let sample = "";
@@ -2169,14 +2312,29 @@
     let warehouseFields = null;
     let warehouseDate = "";
 
+    /* Шапка не меняется по ходу списка — ищем колонку типа один раз. */
+    let typeAt = null;
+    function typeColumn() {
+      if (typeAt == null) {
+        const columns = tableColumns();
+        if (columns.length) typeAt = typeColumnAt(columns);
+      }
+      return typeAt == null ? 0 : typeAt;
+    }
+
     function harvest() {
       const rows = rowNodes();
+      const keep = new Set(keepTransitionRows(rows, foreignWords(), typeColumn()));
+      if (keep.size !== rows.length) domTrimmed = true;
       const length = rows.length;
       let start;
       if (length > prevLength) start = Math.max(0, prevLength - OVERLAP);
       else if (length < prevLength || length <= FULL_PASS_LIMIT) start = 0;
       else start = Math.max(0, length - 120);
-      if (length < prevLength) seen.clear();
+      if (length < prevLength) {
+        seen.clear();
+        seenAll.clear();
+      }
 
       for (let i = start; i < length; i += 1) {
         const raw = rows[i].textContent;
@@ -2184,7 +2342,10 @@
         const value = norm(raw);
         if (!value) continue;
         const key = value.length > 320 ? value.slice(0, 320) : value;
-        if (seen.has(key)) continue;
+        if (seenAll.has(key)) continue;
+        seenAll.add(key);
+        /* Не перемещение — прочли, но себе не берём. */
+        if (!keep.has(rows[i])) continue;
         seen.add(key);
         if (!found && value.toLowerCase().includes(needle)) {
           found = true;
@@ -2286,7 +2447,7 @@
     }
 
     /* 3. Догружаем список прыжками в конец. */
-    const needMore = () => total == null || seen.size < total;
+    const needMore = () => total == null || seenAll.size < total;
     /* drained — список перестал расти, то есть прочитан до конца. */
     let drained = !needMore();
 
@@ -2342,7 +2503,7 @@
     }
 
     const card = readItemCard();
-    const tableRows = rowNodes();
+    const tableRows = keepTransitionRows(rowNodes(), foreignWords(), typeColumn());
     const report = {
       number: card.number,
       status: card.status,
@@ -2357,11 +2518,22 @@
 
     const loaded = seen.size;
     /* Нашли — значит дочитали ровно столько, сколько было нужно. */
-    const complete = found || (total != null ? loaded >= total : drained);
+    const complete = found || (total != null ? seenAll.size >= total : drained);
     /* Итог неизвестен: если список вычитан до конца или искомое уже нашлось,
        «всего» = сколько прочли. Ноль остаётся только там, где мы правда не
-       дочитали — в ленте это и читается как «мало строк». */
-    const expected = total != null ? total : drained || found ? loaded : 0;
+       дочитали — в ленте это и читается как «мало строк».
+
+       А если страница показала не только перемещения, счётчик «Всего» на ней
+       про всю историю — сравнивать наш срез с ним нельзя. */
+    const expected = domTrimmed
+      ? complete || found
+        ? loaded
+        : 0
+      : total != null
+        ? total
+        : drained || found
+          ? loaded
+          : 0;
 
     if (abortFlag && !found && !complete) {
       return { ok: false, status: "paused", found, expected, loaded, via: "dom", report };
