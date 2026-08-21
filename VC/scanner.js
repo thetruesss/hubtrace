@@ -106,7 +106,7 @@
         placeId = String(data.placeId);
         changed = true;
       }
-      if (changed) void toBackground({ action: "ht:hints", appVersion, placeId });
+      if (changed) void toBackground({ action: "ht:hints", appVersion, placeId, apiTune });
       return;
     }
     if (data.type === "replayResult") {
@@ -272,9 +272,36 @@
   const AUDIT_PATH = "/p-api/scms-article-gateway/v1/articles/{id}/auditV3";
   const BOXES_PATH = "/p-api/scms-article-gateway/v3/boxes/getBoxesFromTopologyAndContent";
 
-  /* Заголовок версии приложения Hub шлёт со всеми своими запросами. Он не
-     обязателен, но с ним запрос неотличим от родного — берём, если видели. */
+  /*
+   * Заголовки x-o3-app-name / x-o3-app-version Hub шлёт со всеми своими
+   * запросами, и без них сервер может не ответить. Их значения лежат прямо
+   * в странице:
+   *
+   *   window.__FE_VARS__.envs.config.O3_SERVICE_NAME → "scms"
+   *   window.__FE_VARS__.envs.config.GIT_BRANCH      → "release/LSACC-2105"
+   *
+   * Раньше версию ждали от перехваченного запроса Hub — и вкладка, которая
+   * поднялась раньше первого такого запроса, уходила в отказ по заголовку,
+   * а номер сваливался на обход страницы.
+   */
   let appVersion = "";
+  let appName = "scms";
+  let varsRead = false;
+
+  function readBuildVars() {
+    if (varsRead || !document.scripts) return;
+    for (const script of document.scripts) {
+      if (script.src) continue;
+      const text = script.textContent;
+      if (!text || text.length > 300000 || !text.includes("__FE_VARS__")) continue;
+      const branch = text.match(/"GIT_BRANCH"\s*:\s*"([^"]+)"/);
+      const service = text.match(/"O3_SERVICE_NAME"\s*:\s*"([^"]+)"/);
+      if (branch && !appVersion) appVersion = branch[1];
+      if (service && service[1]) appName = service[1];
+      varsRead = true;
+      return;
+    }
+  }
   /* Склад оператора: нужен только карточке предмета. */
   let placeId = "";
 
@@ -302,33 +329,152 @@
     }
   }
 
-  function apiHeaders() {
-    const out = {
-      accept: "application/json, text/plain, */*",
-      "content-type": "application/json",
-      "x-o3-app-name": "scms"
-    };
-    if (appVersion) out["x-o3-app-version"] = appVersion;
+  /*
+   * Подобранный под сервер вариант запроса.
+   *
+   * Ровно один ответ Hub у нас есть — из него видно и путь, и тело. Но
+   * сервер может не принять всё, что мы из этого вывели: страницу в 500
+   * строк, отсутствие заголовка версии, нумерацию страниц с единицы. На
+   * первом же запросе перебираем варианты и запоминаем тот, что прошёл,
+   * — дальше ходим только им.
+   *
+   * Без этого одна такая мелочь выключала быстрый путь целиком: три
+   * неудачных ответа подряд, и весь прогон уходил на обход страницы.
+   */
+  const PAGE_SIZES = [500, 100, 20];
+  const HEADER_SETS = ["full", "noVersion", "plain"];
+
+  let apiTune = null;
+  /* Что именно ответил сервер на каждый вариант — это уходит в интерфейс,
+     иначе «быстрый путь недоступен» ничего не объясняет. */
+  let apiProbeLog = [];
+
+  function variants() {
+    const out = [];
+    for (const headers of HEADER_SETS) {
+      /* Без заголовков версии проверяем только самый безопасный размер. */
+      const sizes = headers === "full" ? PAGE_SIZES : [20];
+      for (const pageSize of sizes) {
+        for (const base of [1, 0]) out.push({ pageSize, headers, base });
+      }
+    }
     return out;
   }
 
-  function auditRequest(posting, pageNumber, pageSize) {
+  /*
+   * Версию кладём в сам вариант, а не берём из локальной переменной.
+   * Вкладка, поднявшаяся позже, могла ещё не увидеть ни одного запроса Hub
+   * — и, работая по общему варианту «с заголовками», уходила в 403 без
+   * версии, а номер сваливался на обход страницы.
+   */
+  function apiHeaders(tune) {
+    const kind = typeof tune === "string" ? tune : tune?.headers;
+    const version = (typeof tune === "object" && tune?.version) || appVersion;
+    const out = {
+      accept: "application/json, text/plain, */*",
+      "content-type": "application/json"
+    };
+    if (kind === "plain") return out;
+    out["x-o3-app-name"] = (typeof tune === "object" && tune?.appName) || appName;
+    if (kind !== "noVersion" && version) out["x-o3-app-version"] = version;
+    return out;
+  }
+
+  function auditRequest(posting, pageIndex, tune) {
+    const use = tune || apiTune || { pageSize: PAGE_SIZES[0], headers: "full", base: 1 };
     return {
       url: ORIGIN + AUDIT_PATH.replace("{id}", encodeURIComponent(posting)),
       method: "POST",
-      headers: apiHeaders(),
+      headers: apiHeaders(use),
       body: JSON.stringify({
         filters: { changeType: [], users: [], encryptedUsers: [], timeRange: { startTime: null, endTime: null } },
-        pagination: { pageNumber, pageSize }
+        pagination: { pageNumber: pageIndex + use.base, pageSize: use.pageSize }
       })
     };
+  }
+
+  function describe(tune) {
+    return `страница ${tune.pageSize}, заголовки ${tune.headers}, нумерация с ${tune.base}`;
+  }
+
+  /* Короткая выжимка ответа: по ней видно, ругается сервер на тело, на
+     заголовки или отдаёт html вместо json. */
+  function snippet(response) {
+    if (!response) return "нет ответа";
+    if (response.error) return `сеть: ${response.error}`;
+    const text = String(response.text || "").replace(/\s+/g, " ").trim();
+    return `${response.status || "?"}${text ? ` · ${text.slice(0, 160)}` : ""}`;
+  }
+
+  function readAudit(response) {
+    if (!response || !response.ok || !response.text) return null;
+    let json;
+    try {
+      json = JSON.parse(response.text);
+    } catch (_err) {
+      return null;
+    }
+    if (!json || !Array.isArray(json.records)) return null;
+    return json;
+  }
+
+  /*
+   * Подбор варианта. Успехом считаем не просто 200, а ответ со списком:
+   * страница-заглушка и «ок, но пусто при непустом итоге» тоже мимо.
+   */
+  /* Одна попытка подбора не должна съесть весь бюджет номера. */
+  const PROBE_ATTEMPT_MS = 4000;
+
+  async function tuneApi(posting, budgetMs) {
+    if (apiTune) return { tune: apiTune, json: null };
+    /* Версия и имя сервиса есть в самой странице — читаем до перебора. */
+    readBuildVars();
+    apiProbeLog = [];
+    const until = Date.now() + Math.max(4000, budgetMs);
+
+    for (const tune of variants()) {
+      if (abortFlag) return null;
+      const rest = until - Date.now();
+      if (rest <= 500) {
+        apiProbeLog.push("подбор прерван по времени");
+        return null;
+      }
+      const response = await replay(auditRequest(posting, 0, tune), Math.min(PROBE_ATTEMPT_MS, rest));
+      const json = readAudit(response);
+
+      if (!json) {
+        apiProbeLog.push(`${describe(tune)} → ${snippet(response)}`);
+        /* 401 не про вариант запроса, а про сессию: перебор не поможет. */
+        if (response && (response.status === 401 || response.status === 403)) return null;
+        continue;
+      }
+      /* Пустая страница при непустом итоге — нумерация не та. */
+      if (!json.records.length && Number(json.totalCount) > 0) {
+        apiProbeLog.push(`${describe(tune)} → 200, но список пуст при итоге ${json.totalCount}`);
+        continue;
+      }
+
+      apiTune = { ...tune, version: appVersion || "", appName };
+      apiProbeLog.push(`${describe(tune)} → подошёл`);
+      void toBackground({
+        action: "ht:hints",
+        appVersion,
+        placeId,
+        apiTune,
+        probe: apiProbeLog.slice()
+      });
+      /* Ответ пригодится как первая страница выборки — второй раз за тем же
+         ходить незачем. */
+      return { tune: apiTune, json, text: response.text, posting };
+    }
+    return null;
   }
 
   function boxesRequest(posting) {
     return {
       url: ORIGIN + BOXES_PATH,
       method: "POST",
-      headers: apiHeaders(),
+      headers: apiHeaders(apiTune || "full"),
       body: JSON.stringify({
         placeId: Number(placeId) || 0,
         boxes: [{ boxId: String(posting), boxSource: "Lozon" }]
@@ -652,6 +798,24 @@
     if (!posting || !needle) return { ok: false, reason: "нет данных задания" };
 
     const deadline = Date.now() + Math.max(4000, Number(job.timeoutMs) || 20000);
+    const left = () => Math.max(2000, deadline - Date.now());
+
+    /* Первый запрос прогона подбирает вариант, который принимает сервер. */
+    let primed = null;
+    if (!apiTune) {
+      /* Подбору — большая часть бюджета номера, остальное самой выборке. */
+      const tuned = await tuneApi(posting, Math.floor((deadline - Date.now()) * 0.6));
+      if (!tuned) {
+        return {
+          ok: false,
+          missing: true,
+          reason: apiProbeLog.length ? apiProbeLog[apiProbeLog.length - 1] : "ручка не отвечает",
+          probe: apiProbeLog.slice()
+        };
+      }
+      /* Удачный ответ подбора — это и есть первая страница этого номера. */
+      if (tuned.json && tuned.posting === posting) primed = tuned;
+    }
 
     let loaded = 0;
     let total = null;
@@ -660,48 +824,61 @@
     let digest = "";
     const head = [];
     let hit = null;
-    /* Просим страницу побольше, чтобы уложиться в один запрос. Если сервер
-       режет её по-своему, узнаем это по первому же ответу и дальше будем
-       ходить его шагом — иначе вторая страница уехала бы мимо. */
-    let size = DEFAULT_PAGE_SIZE;
+    let size = apiTune.pageSize;
+    let retuned = false;
 
-    for (let page = 1; page <= MAX_API_PAGES; page += 1) {
+    for (let page = 0; page < MAX_API_PAGES; page += 1) {
       if (abortFlag || Date.now() > deadline) return { ok: false, reason: "aborted" };
 
-      const left = Math.max(2000, deadline - Date.now());
-      const response = await replay(auditRequest(posting, page, size), left);
+      let response;
+      if (page === 0 && primed) {
+        response = { ok: true, status: 200, text: primed.text };
+        primed = null;
+      } else {
+        response = await replay(auditRequest(posting, page, { ...apiTune, pageSize: size }), left());
+      }
 
       if (!response) return { ok: false, reason: "нет ответа" };
       if (response.status === 401 || response.status === 403) {
+        /*
+         * 403 приходит и когда серверу не хватило заголовка, а не только
+         * когда не пустила сессия. Общий вариант мог быть подобран другой
+         * вкладкой при других подсказках — пробуем подобрать заново, и
+         * только если и это не вышло, отдаём отказ.
+         */
+        if (!retuned) {
+          retuned = true;
+          apiTune = null;
+          const again = await tuneApi(posting, Math.floor((deadline - Date.now()) * 0.5));
+          if (again) {
+            primed = again.json && again.posting === posting ? again : null;
+            size = apiTune.pageSize;
+            page -= 1;
+            continue;
+          }
+        }
         return { ok: false, auth: true, status: response.status, reason: `ответ ${response.status}` };
       }
-      if (response.status === 404 || response.status === 405) {
-        /* Ручка переехала — дальше пробовать нечего, пусть работает рецепт. */
-        return { ok: false, missing: true, reason: `ответ ${response.status}` };
-      }
-      if (!response.ok || !response.text) {
-        return { ok: false, reason: response.error ? `сеть: ${response.error}` : `ответ ${response.status || "?"}` };
-      }
 
-      let json;
-      try {
-        json = JSON.parse(response.text);
-      } catch (_err) {
-        return { ok: false, missing: true, reason: "ответ не JSON" };
+      const json = readAudit(response);
+      if (!json) {
+        /* Вариант работал, а теперь нет — Hub мог поменяться на ходу.
+           Сбрасываем подбор, следующий номер подберёт заново. */
+        apiTune = null;
+        return { ok: false, missing: true, reason: snippet(response) };
       }
 
-      const records = Array.isArray(json?.records) ? json.records : null;
-      if (!records) return { ok: false, missing: true, reason: "в ответе нет records" };
-
-      if (page === 1) {
+      const records = json.records;
+      if (page === 0) {
         digest = digestOf(response.text);
-        if (Number.isFinite(json?.totalCount)) total = Number(json.totalCount);
-        /* Строк меньше, чем просили, а в списке их больше — сервер обрезал
+        if (Number.isFinite(json.totalCount)) total = Number(json.totalCount);
+        /* Строк меньше, чем просили, а в списке их больше — сервер режет
            страницу по своему пределу. Дальше идём его шагом. */
         if (records.length && records.length < size && total != null && total > records.length) {
           size = records.length;
         }
       }
+
       /* В отчёт идут первые три строки, всю историю копить незачем. */
       for (const record of records) {
         if (head.length < 3) head.push(record);
@@ -1008,29 +1185,48 @@
   /* Известная ручка отвалилась — в этой вкладке больше не пробуем. */
   let nativeOff = false;
 
+  function withNative(result, nativeReport) {
+    if (!result || result.ok) return result;
+    return { ...nativeReport, ...result };
+  }
+
   async function apiScan(job) {
     /*
      * Сначала известные ручки Hub: им не нужен подсмотренный запрос, так
      * что быстрый путь работает с самого первого номера, а не после того,
      * как страница сама сходит за историей.
      */
+    let nativeFail = null;
     if (!nativeOff) {
       const native = await nativeScan(job);
       if (native.ok || native.auth) return native;
       if (native.missing) nativeOff = true;
-      if (!recipe) {
-        return {
-          ok: false,
-          reason: native.reason || "no_recipe",
-          /* Ручка не отвечает, а подсмотренного запроса ещё нет: это не
-             поломка быстрого пути, а «пока нечем» — фон не должен считать
-             такую попытку провалом и выключать API. */
-          nativeMissing: Boolean(native.missing)
-        };
-      }
+      nativeFail = native;
     }
 
-    if (!recipe) return { ok: false, reason: "no_recipe" };
+    /*
+     * Про мёртвую ручку фон должен узнать в любом случае — даже когда есть
+     * подсмотренный запрос и номер удастся дочитать им. Иначе каждая
+     * вкладка ходила бы за ней заново, а лог подбора не доезжал до
+     * интерфейса, и «быстрый путь недоступен» оставалось без объяснения.
+     */
+    const nativeReport = nativeFail
+      ? {
+          nativeMissing: Boolean(nativeFail.missing),
+          probe: nativeFail.probe || apiProbeLog.slice()
+        }
+      : {};
+
+    if (!recipe) {
+      return {
+        ok: false,
+        reason: nativeFail?.reason || "no_recipe",
+        ...nativeReport,
+        /* Ни ручки, ни подсмотренного запроса: это не поломка быстрого
+           пути, а «пока нечем» — фон не должен считать попытку провалом. */
+        notReady: true
+      };
+    }
     const posting = String(job.posting || "").trim();
     if (!posting) return { ok: false, reason: "no_posting" };
     const needle = String(job.warehouse || "").toLowerCase();
@@ -1054,7 +1250,7 @@
       let firstJson = null;
 
       for (let page = 0; page < MAX_API_PAGES && !failed; page += 1) {
-        if (abortFlag || Date.now() > deadline) return { ok: false, reason: "aborted" };
+        if (abortFlag || Date.now() > deadline) return withNative({ ok: false, reason: "aborted" }, nativeReport);
 
         const built = buildRequest(posting, page, pageSize, Math.max(2000, deadline - Date.now()));
         pageable = built.pageable;
@@ -1065,7 +1261,10 @@
           else if (response.error) failure = `сеть: ${response.error}`;
           else if (response.status === 401 || response.status === 403) {
             /* Токен в рецепте протух — нужен свежий захват, а не повтор. */
-            return { ok: false, auth: true, status: response.status, reason: `ответ ${response.status}` };
+            return withNative(
+              { ok: false, auth: true, status: response.status, reason: `ответ ${response.status}` },
+              nativeReport
+            );
           } else if (!response.ok) failure = `ответ ${response.status || "?"}`;
           else failure = "пустой ответ";
           failed = true;
@@ -1138,7 +1337,7 @@
       };
     }
 
-    return { ok: false, reason: failure || "запрос не подошёл" };
+    return withNative({ ok: false, reason: failure || "запрос не подошёл" }, nativeReport);
   }
 
   /* ------------------------------------------------------------------ */
@@ -2071,6 +2270,8 @@
          страницы content script поднимается заново и без этого ходил бы
          за ней снова и снова. */
       if (message.nativeApi === false) nativeOff = true;
+      /* Вариант запроса уже подобран другой вкладкой — не подбираем снова. */
+      if (message.apiTune && !apiTune) apiTune = message.apiTune;
       sendResponse({ ok: true });
       return false;
     }
@@ -2090,7 +2291,9 @@
               ok: false,
               reason: raw?.reason || "api_failed",
               auth: Boolean(raw?.auth),
-              nativeMissing: Boolean(raw?.nativeMissing)
+              nativeMissing: Boolean(raw?.nativeMissing),
+              notReady: Boolean(raw?.notReady),
+              probe: raw?.probe || []
             });
             return;
           }
@@ -2112,9 +2315,10 @@
   /* Подсказки нужны всем вкладкам, а узнаёт их та, что открылась первой:
      склад оператора Hub дописывает в адрес уже после загрузки страницы. */
   function shareHints() {
+    readBuildVars();
     readPlaceFromLocation();
     if (!appVersion && !placeId) return;
-    void toBackground({ action: "ht:hints", appVersion, placeId });
+    void toBackground({ action: "ht:hints", appVersion, placeId, apiTune });
   }
 
   async function announce() {

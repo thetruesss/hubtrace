@@ -47,6 +47,11 @@ const ui = {
   hasResults: false,
   currentStep: "input",
   apiState: "unknown",
+  /* Ответы сервера на каждый вариант запроса — показываем, когда быстрый
+     путь не завёлся: иначе непонятно, что чинить. */
+  apiProbe: [],
+  apiTune: null,
+  apiLastReason: "",
   apiNote: "",
   elapsedMs: 0,
   elapsedAt: 0,
@@ -576,10 +581,10 @@ function renderApiBadge() {
     text = "включён — история читается запросом";
     tone = "is-on";
   } else if (ui.apiState === "blocked") {
-    text = ui.apiNote || "отключён, работаю через DOM";
+    text = ui.apiNote || ui.apiLastReason || "отключён, работаю через DOM";
     tone = "is-off";
   } else if (ui.running) {
-    text = "проверяю на первых номерах";
+    text = "пробую первый запрос";
   }
 
   for (const el of $$("[data-api-state]")) {
@@ -588,6 +593,42 @@ function renderApiBadge() {
     el.classList.toggle("is-on", tone === "is-on");
     el.classList.toggle("is-off", tone === "is-off");
   }
+
+  renderApiProbe();
+}
+
+/*
+ * Что именно ответил Hub на каждый вариант запроса. Пока быстрый путь
+ * работает, это лишний шум — показываем только когда он не завёлся или
+ * когда пользователь сам раскрыл подробности.
+ */
+function renderApiProbe() {
+  const box = $("api-probe");
+  if (!box) return;
+
+  const lines = ui.apiProbe || [];
+  const failed = ui.apiState === "blocked" || (settings.useApi && !ui.apiTune && lines.length > 0);
+  const show = lines.length > 0 && failed;
+
+  box.hidden = !show;
+  if (!show) return;
+
+  box.innerHTML = "";
+  const title = document.createElement("b");
+  title.textContent = "Ответы Hub на быстрый путь";
+  box.appendChild(title);
+
+  const list = document.createElement("ul");
+  for (const line of lines.slice(0, 12)) {
+    const item = document.createElement("li");
+    item.textContent = line;
+    list.appendChild(item);
+  }
+  box.appendChild(list);
+
+  const hint = document.createElement("em");
+  hint.textContent = "Пришлите это разработчику — по строкам видно, что именно не принял сервер.";
+  box.appendChild(hint);
 }
 
 function renderRunState() {
@@ -947,10 +988,13 @@ function buildXlsx() {
     const reportRow = index + 2;
     anchors.set(index, `'${DETAIL_SHEET}'!A${detailRows.length + 1}`);
 
-    const title = report.number ? `${report.number} · ID ${item.posting}` : `ID ${item.posting}`;
+    /* Номер отправления и ID — в разные ячейки, как в самом отчёте:
+       склеенные в одну строку, они не ищутся и не сортируются. */
     detailRows.push([
-      { text: title, style: xlsxStyles.STYLE_TITLE },
-      { text: "← к отчёту", anchor: `'${REPORT_SHEET}'!A${reportRow}` }
+      { text: report.number || "", style: xlsxStyles.STYLE_TITLE },
+      /* Стиль не задаём: ячейка со ссылкой сама получает вид ссылки. */
+      { text: item.posting, link: hubUrl(item.posting) },
+      { text: "← к отчёту", anchor: `'${REPORT_SHEET}'!A${reportRow}`, style: xlsxStyles.STYLE_BACK }
     ]);
 
     const columns = report.columns?.length
@@ -974,7 +1018,7 @@ function buildXlsx() {
       { text: CHECK_STATUS[item.status] || item.status || "" },
       { text: bucketOf(report.warehouseAt, now) },
       { text: report.warehouseCell || "" },
-      anchor ? { text: "смотреть →", anchor } : { text: "" }
+      anchor ? { text: "смотреть →", anchor, style: xlsxStyles.STYLE_JUMP } : { text: "" }
     ]);
   });
 
@@ -1311,6 +1355,9 @@ function absorbState(next) {
   ui.stopping = Boolean(next.stopping);
   ui.apiState = next.apiState || "unknown";
   ui.apiNote = next.apiNote || "";
+  ui.apiProbe = Array.isArray(next.apiProbe) ? next.apiProbe : [];
+  ui.apiTune = next.apiTune || null;
+  ui.apiLastReason = next.apiLastReason || "";
   ui.workers = Array.isArray(next.workers) ? next.workers : [];
   ui.elapsedMs = Number(next.elapsedMs) || 0;
   ui.elapsedAt = Date.now();
@@ -1457,43 +1504,69 @@ async function boot() {
 /* вкладке подпись не появляется, чтобы не лезть под руку.             */
 /* ------------------------------------------------------------------ */
 
-const SIGNATURE = {
-  greetAfterMs: 9000,
-  idleEveryMs: 12 * 60 * 1000,
-  durationMs: 3600,
-  minGapMs: 60 * 1000
+/*
+ * Подпись автора.
+ *
+ * Раньше она разворачивалась на весь экран через несколько секунд после
+ * запуска — ровно тогда, когда человек вставляет номера. Теперь это
+ * плашка в левом нижнем углу: раз в десять минут появляется, сама гаснет
+ * через несколько секунд, а пока на ней курсор — ждёт, чтобы по ссылке
+ * можно было спокойно кликнуть.
+ */
+const CREDIT = {
+  everyMs: 10 * 60 * 1000,
+  showMs: 7000,
+  /* После ухода курсора даём короткую отсрочку, а не гасим мгновенно. */
+  afterHoverMs: 1500
 };
 
-let signatureShownAt = 0;
-let signatureTimer = null;
+let creditTimer = null;
+let creditPending = false;
 
-function playSignature(reason) {
-  const el = $("signature");
-  if (!el) return false;
-  if (document.hidden) return false;
-  /* Проверка важнее пасхалки. */
-  if (ui.running) return false;
-  if (reason !== "manual" && Date.now() - signatureShownAt < SIGNATURE.minGapMs) return false;
-
-  signatureShownAt = Date.now();
-  el.classList.remove("is-on");
-  void el.offsetWidth;
-  el.classList.add("is-on");
-
-  window.clearTimeout(signatureTimer);
-  signatureTimer = window.setTimeout(() => el.classList.remove("is-on"), SIGNATURE.durationMs);
-  return true;
+function hideCredit() {
+  window.clearTimeout(creditTimer);
+  creditTimer = null;
+  $("credit")?.classList.remove("is-on");
 }
 
-window.setTimeout(() => playSignature("greet"), SIGNATURE.greetAfterMs);
-window.setInterval(() => playSignature("idle"), SIGNATURE.idleEveryMs);
+function showCredit() {
+  const el = $("credit");
+  if (!el) return;
+  /* Во вкладке, которую не видно, показывать нечего — покажем, когда
+     на неё вернутся. */
+  if (document.hidden) {
+    creditPending = true;
+    return;
+  }
+  creditPending = false;
+  el.classList.add("is-on");
+  window.clearTimeout(creditTimer);
+  creditTimer = window.setTimeout(hideCredit, CREDIT.showMs);
+}
 
-/* Пропущенное из-за занятости приложение показываем, когда оно освободилось. */
-document.addEventListener("visibilitychange", () => {
-  if (document.hidden || ui.running) return;
-  if (Date.now() - signatureShownAt < SIGNATURE.idleEveryMs) return;
-  window.setTimeout(() => playSignature("idle"), 1500);
-});
+function mountCredit() {
+  const el = $("credit");
+  if (!el) return;
 
+  el.addEventListener("mouseenter", () => {
+    if (!el.classList.contains("is-on")) return;
+    window.clearTimeout(creditTimer);
+    creditTimer = null;
+  });
+  el.addEventListener("mouseleave", () => {
+    if (!el.classList.contains("is-on")) return;
+    window.clearTimeout(creditTimer);
+    creditTimer = window.setTimeout(hideCredit, CREDIT.afterHoverMs);
+  });
+  /* Ссылка открывается в новой вкладке — плашку сразу убираем. */
+  el.querySelector(".credit__link")?.addEventListener("click", hideCredit);
+
+  window.setInterval(showCredit, CREDIT.everyMs);
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden && creditPending) window.setTimeout(showCredit, 1200);
+  });
+}
+
+mountCredit();
 
 void boot();

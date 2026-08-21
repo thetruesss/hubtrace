@@ -1088,6 +1088,44 @@ input[type="number"] {
   color: var(--hit-soft);
 }
 
+/* Ответы Hub на попытки быстрого пути: видно, что именно не принял сервер. */
+.probe {
+  margin: 8px 0 0 44px;
+  padding: 10px 12px;
+  border: 1px solid var(--stroke-2);
+  border-radius: var(--r-sm);
+  background: var(--glass-2);
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--muted);
+}
+
+.probe b {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--text-dim);
+  font-weight: 650;
+}
+
+.probe ul {
+  margin: 0;
+  padding-left: 16px;
+  list-style: disc;
+}
+
+.probe li {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  word-break: break-word;
+}
+
+.probe em {
+  display: block;
+  margin-top: 6px;
+  font-style: normal;
+  opacity: 0.75;
+}
+
 .deck__hint {
   margin: 0;
   color: var(--faint);
@@ -2015,128 +2053,121 @@ input[type="number"] {
 /* ================================================================== */
 /*  подпись автора                                                     */
 /*                                                                     */
-/*  Раньше это была бегущая строка под слоем панелей (z-index 1 против  */
-/*  2 у .shell), поэтому её съедало матовое стекло. Теперь подпись —    */
-/*  отдельная сцена поверх интерфейса с собственной подложкой.         */
+/*  Раньше подпись на полэкрана выезжала при запуске и мешала работать. */
+/*  Теперь это тихое свечение в левом нижнем углу: появляется раз в     */
+/*  десять минут, само гаснет, а пока на нём курсор — ждёт.            */
 /* ================================================================== */
 
-.sig {
+.credit {
   position: fixed;
-  inset: 0;
-  z-index: 30;
-  display: grid;
-  place-items: center;
-  pointer-events: none;
-  visibility: hidden;
-  --sig-dur: 3.6s;
-}
-
-.sig.is-on {
-  visibility: visible;
-}
-
-.sig__veil {
-  position: absolute;
-  inset: 0;
-  opacity: 0;
-  background:
-    radial-gradient(1100px 640px at 50% 50%, rgba(8, 14, 28, 0.62) 0%, rgba(4, 6, 13, 0.9) 100%);
-  backdrop-filter: blur(7px) saturate(115%);
-  -webkit-backdrop-filter: blur(7px) saturate(115%);
-}
-
-.sig.is-on .sig__veil {
-  animation: sig-veil var(--sig-dur) ease both;
-}
-
-.sig__stage {
-  position: relative;
-  display: grid;
-  justify-items: center;
-  gap: 22px;
-  padding: 0 6vw;
-}
-
-.sig__row {
-  display: flex;
+  left: 22px;
+  bottom: 22px;
+  z-index: 40;
+  display: inline-flex;
   align-items: center;
-  gap: clamp(18px, 3vw, 40px);
-}
-
-.sig__spark {
-  width: 11px;
-  height: 11px;
-  border-radius: 2px;
-  opacity: 0;
-  transform: rotate(45deg) scale(0.4);
-  background: #dff0ff;
-  box-shadow: 0 0 12px rgba(255, 255, 255, 0.9), 0 0 26px rgba(122, 208, 255, 0.85);
-  flex-shrink: 0;
-}
-
-.sig.is-on .sig__spark {
-  animation: sig-spark var(--sig-dur) ease both;
-}
-
-.sig__name {
-  position: relative;
-  font-size: clamp(38px, 6.6vw, 86px);
-  font-weight: 750;
-  letter-spacing: 0.14em;
-  line-height: 1.05;
+  gap: 10px;
+  padding: 11px 18px 11px 15px;
+  border-radius: 999px;
+  border: 1px solid rgba(122, 208, 255, 0.28);
+  background: linear-gradient(135deg, rgba(14, 26, 48, 0.86), rgba(8, 14, 28, 0.82));
+  backdrop-filter: blur(14px) saturate(130%);
+  -webkit-backdrop-filter: blur(14px) saturate(130%);
+  box-shadow:
+    0 10px 34px rgba(0, 0, 0, 0.5),
+    0 0 0 1px rgba(255, 255, 255, 0.04) inset,
+    0 0 26px rgba(122, 208, 255, 0.18);
+  font-size: 12.5px;
+  color: var(--text-dim);
   white-space: nowrap;
   opacity: 0;
-  background: linear-gradient(100deg, #79ccff 0%, #ffffff 34%, #a7d8ff 56%, #e2f1ff 100%);
+  visibility: hidden;
+  pointer-events: none;
+  transform: translateY(16px) scale(0.94);
+  transition:
+    opacity 0.5s var(--ease),
+    transform 0.6s var(--sp),
+    visibility 0s linear 0.5s;
+}
+
+.credit.is-on {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+  transform: none;
+  transition:
+    opacity 0.5s var(--ease),
+    transform 0.6s var(--sp),
+    visibility 0s;
+}
+
+/* Ореол под плашкой: то, из-за чего она «светится», а не просто лежит. */
+.credit::before {
+  content: "";
+  position: absolute;
+  inset: -14px -18px;
+  z-index: -1;
+  border-radius: inherit;
+  background: radial-gradient(60% 120% at 30% 50%, rgba(122, 208, 255, 0.3), transparent 70%);
+  filter: blur(14px);
+  opacity: 0;
+  transition: opacity 0.6s var(--ease);
+}
+
+.credit.is-on::before {
+  opacity: 1;
+  animation: credit-halo 4.5s ease-in-out infinite;
+}
+
+.credit__dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: var(--cyan);
+  box-shadow: 0 0 10px rgba(122, 208, 255, 0.95), 0 0 22px rgba(122, 208, 255, 0.6);
+}
+
+.credit.is-on .credit__dot {
+  animation: credit-dot 2.6s ease-in-out infinite;
+}
+
+.credit__link {
+  position: relative;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  text-decoration: none;
+  background: linear-gradient(100deg, #79ccff 0%, #ffffff 38%, #a7d8ff 62%, #79ccff 100%);
   background-size: 260% 100%;
   -webkit-background-clip: text;
   background-clip: text;
   -webkit-text-fill-color: transparent;
 }
 
-/* Свечение — копия текста под ним, размытая. */
-.sig__name::before {
-  content: attr(data-text);
+.credit.is-on .credit__link {
+  animation: credit-sweep 5s linear infinite;
+}
+
+.credit__link::after {
+  content: "";
   position: absolute;
-  inset: 0;
-  z-index: -1;
-  color: #7ad0ff;
-  -webkit-text-fill-color: #7ad0ff;
-  background: none;
-  filter: blur(18px);
-  opacity: 0.75;
-  letter-spacing: inherit;
-}
-
-.sig.is-on .sig__name {
-  animation: sig-rise var(--sig-dur) cubic-bezier(0.2, 0.7, 0.25, 1) both,
-    sig-sweep var(--sig-dur) linear both;
-}
-
-.sig__rule {
-  width: min(46vw, 430px);
+  left: 0;
+  right: 0;
+  bottom: -2px;
   height: 1px;
-  opacity: 0;
+  background: linear-gradient(90deg, transparent, rgba(122, 208, 255, 0.9), transparent);
   transform: scaleX(0);
-  background: linear-gradient(90deg, transparent, rgba(122, 208, 255, 0.95), transparent);
-  box-shadow: 0 0 14px rgba(122, 208, 255, 0.55);
+  transition: transform 0.35s var(--ease);
 }
 
-.sig.is-on .sig__rule {
-  animation: sig-rule var(--sig-dur) cubic-bezier(0.2, 0.7, 0.25, 1) both;
+.credit__link:hover::after,
+.credit__link:focus-visible::after {
+  transform: scaleX(1);
 }
 
-.sig__caption {
-  opacity: 0;
-  font-size: 11px;
-  font-weight: 650;
-  letter-spacing: 0.42em;
-  text-transform: uppercase;
-  color: #9fb4d4;
-  padding-left: 0.42em;
-}
-
-.sig.is-on .sig__caption {
-  animation: sig-caption var(--sig-dur) ease both;
+.credit__link:focus-visible {
+  outline: 2px solid var(--cyan);
+  outline-offset: 3px;
+  border-radius: 3px;
 }
 
 /* ================================================================== */
@@ -2316,95 +2347,34 @@ input[type="number"] {
   }
 }
 
-@keyframes sig-veil {
-  0% {
-    opacity: 0;
-  }
-  14%,
-  76% {
-    opacity: 1;
-  }
-  100% {
-    opacity: 0;
-  }
-}
-
-@keyframes sig-rise {
-  0% {
-    opacity: 0;
-    transform: translateY(16px) scale(0.985);
-    filter: blur(7px);
-  }
-  20%,
-  78% {
-    opacity: 1;
-    transform: none;
-    filter: blur(0);
-  }
-  100% {
-    opacity: 0;
-    transform: translateY(-10px);
-    filter: blur(5px);
-  }
-}
-
-@keyframes sig-sweep {
-  0% {
-    background-position: 0% 50%;
-  }
-  100% {
-    background-position: 260% 50%;
-  }
-}
-
-@keyframes sig-rule {
-  0% {
-    opacity: 0;
-    transform: scaleX(0);
-  }
-  24% {
-    opacity: 1;
-  }
-  46%,
-  78% {
-    opacity: 1;
-    transform: scaleX(1);
-  }
-  100% {
-    opacity: 0;
-    transform: scaleX(1);
-  }
-}
-
-@keyframes sig-spark {
-  0% {
-    opacity: 0;
-    transform: rotate(45deg) scale(0.35);
-  }
-  26%,
-  76% {
-    opacity: 0.92;
-    transform: rotate(45deg) scale(1);
-  }
-  100% {
-    opacity: 0;
-    transform: rotate(45deg) scale(0.35);
-  }
-}
-
-@keyframes sig-caption {
+@keyframes credit-halo {
   0%,
-  12% {
-    opacity: 0;
-    letter-spacing: 0.18em;
+  100% {
+    opacity: 0.75;
   }
-  34%,
-  78% {
-    opacity: 0.72;
-    letter-spacing: 0.42em;
+  50% {
+    opacity: 1;
+  }
+}
+
+@keyframes credit-dot {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.55;
+    transform: scale(0.82);
+  }
+}
+
+@keyframes credit-sweep {
+  0% {
+    background-position: 160% 0;
   }
   100% {
-    opacity: 0;
+    background-position: -60% 0;
   }
 }
 
@@ -2519,11 +2489,9 @@ input[type="number"] {
   .bg__glow {
     animation: none !important;
   }
-  .sig.is-on .sig__veil,
-  .sig.is-on .sig__name,
-  .sig.is-on .sig__rule,
-  .sig.is-on .sig__spark,
-  .sig.is-on .sig__caption {
-    animation: sig-veil var(--sig-dur) linear both !important;
+  .credit.is-on::before,
+  .credit.is-on .credit__dot,
+  .credit.is-on .credit__link {
+    animation: none !important;
   }
 }
