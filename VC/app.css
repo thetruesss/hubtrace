@@ -2051,6 +2051,352 @@ input[type="number"] {
 }
 
 /* ================================================================== */
+/*  детализация                                                        */
+/*                                                                     */
+/*  Второе пространство экрана результата: то же, что уходит вторым     */
+/*  листом в Excel, но здесь и с поиском. Карточка повторяет вид        */
+/*  страницы Hub — заголовок с номером, плашка статуса, таблица.       */
+/* ================================================================== */
+
+.seg--tabs {
+  --seg-count: 2;
+  flex: 0 0 auto;
+  padding: 3px;
+}
+
+.seg--tabs .seg__btn {
+  flex: 0 0 auto;
+  min-width: 104px;
+  height: 30px;
+  font-size: 12px;
+}
+
+.seg--tabs .seg__btn.is-on {
+  color: #fff;
+  background: linear-gradient(180deg, rgba(46, 121, 255, 0.95), rgba(0, 91, 255, 0.82));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.24), 0 4px 14px rgba(0, 91, 255, 0.32);
+}
+
+.detail {
+  min-height: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap);
+}
+
+.detail__bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  border-radius: var(--r);
+  flex-wrap: wrap;
+}
+
+.detail__search {
+  position: relative;
+  flex: 1 1 340px;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  height: 38px;
+  padding: 0 14px;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--stroke-2);
+  background: rgba(6, 10, 19, 0.5);
+  transition: border-color 0.24s var(--ease), box-shadow 0.24s var(--ease);
+}
+
+.detail__search:focus-within {
+  border-color: rgba(47, 123, 255, 0.6);
+  box-shadow: 0 0 0 3px rgba(0, 91, 255, 0.18);
+}
+
+.detail__search svg {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+  color: var(--faint);
+}
+
+.detail__search input {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font-size: 12.5px;
+  font-family: inherit;
+  outline: none;
+}
+
+.detail__search input::placeholder {
+  color: var(--faint);
+}
+
+.detail__chips {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.detail__chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 26px;
+  padding: 0 6px 0 10px;
+  border-radius: 999px;
+  border: 1px solid var(--stroke-2);
+  background: var(--glass-2);
+  color: var(--text-dim);
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+.detail__chip button {
+  width: 16px;
+  height: 16px;
+  border: 0;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 0.2s var(--ease), color 0.2s var(--ease);
+}
+
+.detail__chip button:hover {
+  background: rgba(240, 90, 74, 0.22);
+  color: #ffd9d4;
+}
+
+.detail__count {
+  margin-left: auto;
+  font-size: 11.5px;
+  color: var(--faint);
+  white-space: nowrap;
+}
+
+.detail__scroll {
+  min-height: 0;
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap);
+  padding-right: 4px;
+}
+
+/* Карточки — колонка в flex-контейнере, а такие элементы по умолчанию
+   ужимаются под высоту родителя: содержимое обрезалось. */
+.detail__scroll > * {
+  flex: 0 0 auto;
+}
+
+.detail__empty {
+  display: grid;
+  place-items: center;
+  gap: 8px;
+  padding: 54px 20px;
+  border-radius: var(--r);
+  border: 1px dashed var(--stroke-2);
+  color: var(--faint);
+  font-size: 12.5px;
+  text-align: center;
+}
+
+/* ---- карточка отправления ---- */
+
+.card {
+  border-radius: var(--r);
+  border: 1px solid var(--stroke-2);
+  background: var(--glass-2);
+  overflow: hidden;
+}
+
+.card__head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--stroke-2);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.045), transparent);
+}
+
+.card__number {
+  font-size: 16px;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  color: var(--text);
+}
+
+.card__badge {
+  display: inline-flex;
+  align-items: center;
+  height: 24px;
+  padding: 0 11px;
+  border-radius: 999px;
+  font-size: 11.5px;
+  font-weight: 650;
+  border: 1px solid rgba(122, 208, 255, 0.3);
+  background: rgba(122, 208, 255, 0.12);
+  color: #bfe4ff;
+}
+
+.card__id {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--muted);
+  text-decoration: none;
+  border-bottom: 1px dashed rgba(122, 208, 255, 0.4);
+  transition: color 0.2s var(--ease);
+}
+
+.card__id:hover {
+  color: var(--cyan);
+}
+
+.card__verdict {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 26px;
+  padding: 0 12px;
+  border-radius: 999px;
+  font-size: 11.5px;
+  font-weight: 650;
+}
+
+.card__verdict::before {
+  content: "";
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.card__verdict.is-hit {
+  color: var(--hit-soft);
+  background: rgba(239, 176, 60, 0.14);
+  border: 1px solid rgba(239, 176, 60, 0.32);
+}
+
+.card__verdict.is-miss {
+  color: var(--miss-soft);
+  background: rgba(47, 206, 122, 0.12);
+  border: 1px solid rgba(47, 206, 122, 0.3);
+}
+
+.card__verdict.is-issue {
+  color: #ffc9c2;
+  background: rgba(240, 90, 74, 0.14);
+  border: 1px solid rgba(240, 90, 74, 0.32);
+}
+
+.card__facts {
+  display: flex;
+  gap: 22px;
+  flex-wrap: wrap;
+  padding: 11px 16px;
+  border-bottom: 1px solid var(--stroke-2);
+  font-size: 11.5px;
+}
+
+.card__fact {
+  display: flex;
+  gap: 7px;
+  align-items: baseline;
+}
+
+.card__fact b {
+  color: var(--faint);
+  font-weight: 600;
+}
+
+.card__fact span {
+  color: var(--text-dim);
+}
+
+.card__table {
+  overflow-x: auto;
+}
+
+.card__table table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11.5px;
+}
+
+.card__table th {
+  position: sticky;
+  top: 0;
+  text-align: left;
+  font-weight: 650;
+  color: var(--faint);
+  padding: 9px 14px;
+  background: rgba(8, 13, 24, 0.9);
+  border-bottom: 1px solid var(--stroke-2);
+  white-space: nowrap;
+}
+
+.card__table td {
+  padding: 10px 14px;
+  vertical-align: top;
+  color: var(--text-dim);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.045);
+  line-height: 1.5;
+}
+
+.card__table tr:last-child td {
+  border-bottom: 0;
+}
+
+.card__table tr:hover td {
+  background: rgba(255, 255, 255, 0.022);
+}
+
+/* Первая колонка Hub — плашка типа изменения. */
+.card__type {
+  display: inline-flex;
+  align-items: center;
+  height: 22px;
+  padding: 0 10px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.07);
+  border: 1px solid var(--stroke-2);
+  color: var(--text-dim);
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.card__when {
+  font-family: var(--mono);
+  font-size: 11px;
+  white-space: nowrap;
+  color: var(--text-dim);
+}
+
+/* Метка значения внутри ячейки «Изменения». */
+.card__label {
+  color: var(--faint);
+  font-weight: 600;
+}
+
+.card__none {
+  padding: 18px 16px;
+  color: var(--faint);
+  font-size: 12px;
+}
+
+/* ================================================================== */
 /*  подпись автора                                                     */
 /*                                                                     */
 /*  Раньше подпись на полэкрана выезжала при запуске и мешала работать. */

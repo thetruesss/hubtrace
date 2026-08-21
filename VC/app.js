@@ -878,6 +878,12 @@ function renderResults(payload) {
     renderList(name);
   }
 
+  detailQuery = [];
+  const search = $("detail-search");
+  if (search) search.value = "";
+  setResultView("list");
+  renderDetail();
+
   /* Плашка сверху после финиша должна показывать итог, а не последний
      тик живого таймера. */
   const duration = Number(payload?.durationMs) || 0;
@@ -1503,6 +1509,227 @@ async function boot() {
 /* когда приложение простаивает. Во время проверки и на скрытой        */
 /* вкладке подпись не появляется, чтобы не лезть под руку.             */
 /* ------------------------------------------------------------------ */
+
+/* ------------------------------------------------------------------ */
+/* детализация                                                         */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Второе пространство экрана результата. Там же, что уходит вторым листом
+ * в Excel, только на странице и с поиском: карточка на отправление,
+ * заголовок как в Hub (номер, плашка статуса, ID ссылкой) и последние
+ * операции таблицей.
+ */
+let detailQuery = [];
+
+function setResultView(view) {
+  const tabs = $("result-tabs");
+  const grid = document.querySelector(".result-grid");
+  const detail = $("result-detail");
+  if (!tabs || !grid || !detail) return;
+
+  for (const btn of $$(".seg__btn", tabs)) btn.classList.toggle("is-on", btn.dataset.view === view);
+  grid.hidden = view !== "list";
+  detail.hidden = view !== "detail";
+  if (view === "detail") renderDetail();
+}
+
+/* Поиск принимает и один ID, и список: через пробел, запятую или строками. */
+function parseDetailQuery(raw) {
+  return String(raw || "")
+    .split(/[\s,;]+/)
+    .map((part) => part.trim().toLowerCase())
+    .filter(Boolean);
+}
+
+function matchesDetail(item) {
+  if (!detailQuery.length) return true;
+  const hay = `${item.posting} ${item.report?.number || ""}`.toLowerCase();
+  return detailQuery.some((needle) => hay.includes(needle));
+}
+
+function verdictOf(item) {
+  const kind = classify(item);
+  if (kind === "hit") return { className: "is-hit", text: "склад есть" };
+  if (kind === "miss") return { className: "is-miss", text: "склада нет" };
+  return { className: "is-issue", text: statusLabel(item) };
+}
+
+function el(tag, className, text) {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (text != null) node.textContent = text;
+  return node;
+}
+
+/* «Ячейка: A → B; Местоположение: C» — метки красим отдельно, как в Hub. */
+function paintChange(td, text) {
+  const parts = String(text).split("; ");
+  parts.forEach((part, index) => {
+    if (index) td.appendChild(document.createElement("br"));
+    const at = part.indexOf(": ");
+    if (at > 0 && at < 30) {
+      td.appendChild(el("span", "card__label", `${part.slice(0, at)}: `));
+      td.appendChild(document.createTextNode(part.slice(at + 2)));
+    } else {
+      td.appendChild(document.createTextNode(part));
+    }
+  });
+}
+
+function detailCard(item) {
+  const report = item.report || {};
+  const card = el("article", "card");
+
+  const head = el("div", "card__head");
+  head.appendChild(el("span", "card__number", report.number || "номер не прочитан"));
+  if (report.status) head.appendChild(el("span", "card__badge", report.status));
+
+  const id = el("a", "card__id", `ID ${item.posting}`);
+  id.href = hubUrl(item.posting);
+  id.target = "_blank";
+  id.rel = "noopener noreferrer";
+  head.appendChild(id);
+
+  const verdict = verdictOf(item);
+  head.appendChild(el("span", `card__verdict ${verdict.className}`, verdict.text));
+  card.appendChild(head);
+
+  const facts = el("div", "card__facts");
+  const addFact = (label, value) => {
+    if (!value) return;
+    const fact = el("div", "card__fact");
+    fact.appendChild(el("b", null, label));
+    fact.appendChild(el("span", null, value));
+    facts.appendChild(fact);
+  };
+  addFact("Корзинка", bucketOf(report.warehouseAt, Date.now()));
+  addFact("Когда", report.warehouseAt);
+  addFact("Последняя ячейка", report.warehouseCell);
+  addFact("Проверка", CHECK_STATUS[item.status] || item.status || "");
+  addFact("Строк", item.expected ? `${item.loaded || 0} из ${item.expected}` : "");
+  if (facts.childElementCount) card.appendChild(facts);
+
+  const rows = report.lastRows || [];
+  if (!rows.length) {
+    card.appendChild(el("p", "card__none", "Строки истории не прочитались."));
+    return card;
+  }
+
+  const columns = report.columns?.length
+    ? report.columns
+    : Array.from({ length: rows[0].length }, (_, i) => `Колонка ${i + 1}`);
+
+  const box = el("div", "card__table");
+  const table = document.createElement("table");
+  const thead = document.createElement("thead");
+  const headRow = document.createElement("tr");
+  for (const title of columns) headRow.appendChild(el("th", null, title));
+  thead.appendChild(headRow);
+  table.appendChild(thead);
+
+  const tbody = document.createElement("tbody");
+  for (const row of rows) {
+    const tr = document.createElement("tr");
+    columns.forEach((_, index) => {
+      const value = row[index] == null ? "" : String(row[index]);
+      const td = document.createElement("td");
+      /* Первая колонка Hub — плашка типа, вторая — дата моноширинным. */
+      if (index === 0 && value) td.appendChild(el("span", "card__type", value));
+      else if (index === 1 && value) td.appendChild(el("span", "card__when", value));
+      else if (value.includes(": ")) paintChange(td, value);
+      else td.textContent = value;
+      tr.appendChild(td);
+    });
+    tbody.appendChild(tr);
+  }
+  table.appendChild(tbody);
+  box.appendChild(table);
+  card.appendChild(box);
+  return card;
+}
+
+function renderDetailChips() {
+  const box = $("detail-chips");
+  if (!box) return;
+  box.innerHTML = "";
+  if (detailQuery.length < 2) return;
+  for (const value of detailQuery) {
+    const chip = el("span", "detail__chip", value);
+    const drop = el("button", null, "×");
+    drop.type = "button";
+    drop.title = "Убрать из поиска";
+    drop.addEventListener("click", () => {
+      detailQuery = detailQuery.filter((entry) => entry !== value);
+      $("detail-search").value = detailQuery.join(" ");
+      renderDetail();
+    });
+    chip.appendChild(drop);
+    box.appendChild(chip);
+  }
+}
+
+function renderDetail() {
+  const list = $("detail-list");
+  if (!list) return;
+
+  const all = (ui.finished?.results || []).filter(Boolean);
+  const shown = all.filter(matchesDetail);
+
+  const count = $("detail-count");
+  if (count) {
+    count.textContent = detailQuery.length
+      ? `${shown.length} из ${all.length}`
+      : `${all.length} ${plural(all.length, ["отправление", "отправления", "отправлений"])}`;
+  }
+  renderDetailChips();
+
+  list.innerHTML = "";
+  if (!shown.length) {
+    const empty = el("div", "detail__empty");
+    empty.appendChild(el("b", null, all.length ? "Ничего не нашлось" : "Пока пусто"));
+    empty.appendChild(
+      el("span", null, all.length ? "Проверьте ID или очистите поиск." : "Запустите проверку — детали появятся здесь.")
+    );
+    list.appendChild(empty);
+    return;
+  }
+
+  /* Больших прогонов это касается напрямую: рисовать тысячи карточек
+     незачем, до них никто не долистает. */
+  const LIMIT = 300;
+  for (const item of shown.slice(0, LIMIT)) list.appendChild(detailCard(item));
+  if (shown.length > LIMIT) {
+    const more = el("div", "detail__empty");
+    more.appendChild(el("b", null, `Показаны первые ${LIMIT}`));
+    more.appendChild(el("span", null, "Сузьте поиск по ID, чтобы увидеть остальные."));
+    list.appendChild(more);
+  }
+}
+
+function mountDetail() {
+  const tabs = $("result-tabs");
+  if (tabs) {
+    tabs.addEventListener("click", (event) => {
+      const btn = event.target.closest("[data-view]");
+      if (btn) setResultView(btn.dataset.view);
+    });
+  }
+
+  const search = $("detail-search");
+  if (search) {
+    let timer = null;
+    search.addEventListener("input", () => {
+      window.clearTimeout(timer);
+      timer = window.setTimeout(() => {
+        detailQuery = parseDetailQuery(search.value);
+        renderDetail();
+      }, 160);
+    });
+  }
+}
+
+mountDetail();
 
 /*
  * Подпись автора.
