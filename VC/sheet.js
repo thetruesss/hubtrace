@@ -1,6 +1,5 @@
-// Достаём из файла только ID. Признак у Hub жёсткий: 10+ цифр подряд,
-// последние три — нули. Если видны столбцы, берём тот, где таких значений
-// больше всего: иначе к отправлениям примешаются ID ячеек и контейнеров.
+// Достаём из файла только ID. Признак у Hub жёсткий: 10+ цифр подряд, последние три — нули.
+// Со столбцами берём тот, где таких значений больше: иначе примешаются ID ячеек и контейнеров.
 (function () {
   "use strict";
 
@@ -66,8 +65,8 @@
     return new Uint8Array(await new Response(stream).arrayBuffer());
   }
 
-  // Идём по локальным заголовкам от начала файла. Центральный каталог не нужен:
-  // имена и данные есть и тут, а пропустить запись можно по её compressedSize.
+  // Идём по локальным заголовкам от начала файла: имена и данные есть и тут, а пропустить
+  // запись можно по её compressedSize.
   async function unzip(buffer, wanted) {
     const view = new DataView(buffer);
     const bytes = new Uint8Array(buffer);
@@ -94,7 +93,6 @@
           const raw = method === 0 ? chunk : await inflateRaw(chunk);
           out.set(name, new TextDecoder("utf-8").decode(raw));
         } catch (_err) {
-          // битую запись пропускаем, остальные ещё могут прочитаться
         }
       }
 
@@ -158,8 +156,8 @@
     }
     if (cells.length) return idsFromCells(cells);
 
-    // разметка не разобралась — ищем ID прямо в тексте, пробелы между тегами
-    // не дают соседним числам склеиться
+    // разметка не разобралась — ищем ID прямо в тексте, пробелы между тегами не дают
+    // соседним числам склеиться
     return { ids: extractIds([...parts.values()].join(" ").replace(/></g, "> <")), columns: 0 };
   }
 
@@ -178,7 +176,6 @@
         cells.push({ key: "c0", value: line });
       }
     }
-    // разделителей нет, значит просто список
     if (!split) return { ids: extractIds(text), columns: 0 };
     return idsFromCells(cells);
   }

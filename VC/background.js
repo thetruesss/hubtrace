@@ -1,15 +1,14 @@
-// Движок. Гоняет номера по вкладкам Hub, читает историю быстрым путём
-// (повтор запроса, см. netprobe.js) и обходом DOM как страховкой.
+// Движок: гоняет номера по вкладкам Hub, читает историю повтором запроса
+// (см. netprobe.js), обход DOM — страховка и эталон при сверке.
 
 const APP_PATH = "app.html";
 const STORAGE_RUNTIME = "hubTraceRuntime";
 const STORAGE_FINISHED = "hubTraceFinished";
-// сводки прошлых прогонов в одном ключе, итоги — по ключу на прогон
 const STORAGE_RUNS = "hubTraceRuns";
 const RUN_PREFIX = "hubTraceRun:";
 const MAX_RUNS = 5;
-// Бюджет архива. chrome.storage.local без unlimitedStorage даёт около
-// десяти мегабайт, а прогон на тысячу номеров весит примерно мегабайт.
+// chrome.storage.local без unlimitedStorage даёт около десяти мегабайт,
+// а прогон на тысячу номеров весит примерно мегабайт
 const RUNS_BUDGET_BYTES = 6 * 1024 * 1024;
 const STORAGE_SETTINGS = "hubTraceSettings";
 
@@ -39,8 +38,7 @@ const MODES = {
   deep: {
     label: "Глубокий",
     threads: 3,
-    // «глубокий» — это не «без API», а самые щедрые повторы; совсем без
-    // быстрого пути отключается тумблером
+    // «глубокий» — это не «без API», а самые щедрые повторы
     api: true,
     retryPartial: 3,
     retryFail: 2,
@@ -98,27 +96,21 @@ const state = {
 
   appVersion: "",
   placeId: "",
-  // известные ручки отвечают; сбросится, если Hub их переименует
   nativeApi: true,
-  // вариант запроса, который принял сервер: подбираем раз за прогон
   apiTune: null,
-  // отдаётся ли карточка без склада оператора
   cardPlaceless: null,
-  // Тип изменения приходит кодом (Flow, DestinationPlace), а по-русски он
-  // написан только на странице. Список кодов нам неизвестен, поэтому
-  // подписи учим там, где номер прошёл обоими путями.
+  // Тип изменения приходит кодом (Flow, DestinationPlace), по-русски он
+  // написан только на странице, а список кодов нам неизвестен.
   changeLabels: {},
   lessonDone: false,
   lessonTries: 0,
   lessonBusy: false,
   autoThreads: false,
-  // типы, которые показывает открываемая вкладка
   auditTypes: null,
   apiProbe: [],
   retryRound: 0,
   retryIndexes: new Set(),
   retryPending: new Set(),
-  // повторять было нечем: ручек нет, запрос ещё не подсмотрен
   apiNotReady: false,
 
   workers: new Map(),
@@ -160,7 +152,7 @@ function storageRemove(keys) {
   return new Promise((resolve) => chrome.storage.local.remove(keys, resolve));
 }
 
-// storageSet, который говорит, легло ли: переполнение приходит через lastError
+// переполнение хранилища приходит через lastError, а не исключением
 function storageSetChecked(payload) {
   return new Promise((resolve) => {
     try {
@@ -282,7 +274,6 @@ function snapshot() {
     useApi: state.useApi,
     apiState: state.apiState,
     apiNote: state.apiNote,
-    // иначе «быстрый путь недоступен» ничего не объясняет
     apiProbe: state.apiProbe,
     apiTune: state.apiTune,
     apiLastReason: state.apiLastReason,
@@ -292,7 +283,6 @@ function snapshot() {
     elapsedMs: elapsedMs(),
     rate: ratePerMin(),
     etaMs: etaMs(),
-    // круг добора — тоже работа, снаружи её должно быть видно
     retryRound: state.retryRound,
     retryTotal: state.retryIndexes.size,
     retryLeft: state.retryPending.size,
@@ -319,7 +309,6 @@ function notice(level, text) {
   emit({ action: "scanNotice", level, text, at: Date.now() });
 }
 
-// номер закрывается за десятки миллисекунд, запись надо придержать
 let runtimeWriteAt = 0;
 let runtimeWriteTimer = null;
 
@@ -443,9 +432,7 @@ function getWindow(windowId) {
   });
 }
 
-// Рабочие вкладки живут в своём окне: рядом с приложением они
-// перехватывают фокус. Стартуем свёрнутым, разворачиваем только если
-// человек сам попросил.
+// рабочие вкладки живут в своём окне: рядом с приложением они перехватывают фокус
 let workerWindowPromise = null;
 
 async function ensureWorkerWindow() {
@@ -453,8 +440,7 @@ async function ensureWorkerWindow() {
   if (workerWindowPromise) return workerWindowPromise;
 
   workerWindowPromise = (async () => {
-    // Chrome отвергает state:"maximized" вместе с focused:false, поэтому
-    // разворачиваем вторым вызовом
+    // Chrome отвергает state:"maximized" вместе с focused:false
     let win = await createWindow({ url: "about:blank", focused: false, type: "normal" });
     if (!win?.id) win = await createWindow({ url: "about:blank", type: "normal" });
     if (!win?.id) return null;
@@ -483,7 +469,6 @@ function closeWorkerWindow() {
   state.ownsWorkerWindow = false;
   state.anchorTabId = null;
 
-  // сначала вкладки: за нами не должно остаться ни одной вкладки Hub
   for (const tabId of [...state.workerTabIds]) removeTab(tabId);
   state.workerTabIds.clear();
 
@@ -567,8 +552,7 @@ async function spawnWorkerInner(id) {
 
   state.workerTabIds.add(tab.id);
 
-  // проверяем по факту, а не по ответу create: рабочая вкладка не должна
-  // оказаться в окне пользователя
+  // проверяем по факту, а не по ответу create
   let placed = tab.windowId != null ? tab : await getTab(tab.id);
   if (placed && placed.windowId !== windowId) {
     await moveWorkerTabsTo(windowId, [tab.id]);
@@ -653,13 +637,11 @@ function cleanPosting(posting) {
   return String(posting || "").trim().replace(/^Lozon:/i, "");
 }
 
-// Вкладка истории. Внутри «Истории» Hub держит три фишки фильтра, нам
-// нужны «Перемещения» — tab=transitionHistory.
+// tab=transitionHistory — фишка «Перемещения» внутри «Истории»
 const HISTORY_TAB = "transitionHistory";
 
 function buildHistoryUrl(posting) {
   const id = encodeURIComponent(cleanPosting(posting));
-  // склад оператора Hub допишет и сам, но уже после загрузки
   const place = state.placeId ? `warehouse=${encodeURIComponent(state.placeId)}&` : "";
   return `https://hub.o3t.ru/management/stock/item/Lozon:${id}?${place}tab=${HISTORY_TAB}`;
 }
@@ -686,7 +668,6 @@ async function domScan(worker, posting) {
 
   pendingByTab.set(tabId, {
     taskId,
-    // content script достаёт номер из адреса, префикса Lozon: там уже нет
     posting: cleanPosting(posting),
     claimed: false,
     resolve: settle,
@@ -707,15 +688,13 @@ async function domScan(worker, posting) {
     if (!moved) return failItem(posting, "tab_error");
     if (state.focusMode) activateTab(tabId);
 
-    // страховка: content script мог не подняться (например, после обновления)
     const rescue = setTimeout(() => {
       const pending = pendingByTab.get(tabId);
       if (!pending || pending.taskId !== taskId || pending.claimed) return;
       injectScanner(tabId);
     }, Math.min(7000, conf.navTimeoutMs));
 
-    // задание никто не забрал — смотрим, куда нас увело; на странице логина
-    // ждать полный таймаут незачем
+    // на странице логина ждать полный таймаут незачем
     const strayCheck = await Promise.race([
       answer.then((value) => ({ answered: value })),
       sleep(conf.navTimeoutMs).then(() => ({ answered: null })),
@@ -794,7 +773,6 @@ async function apiScan(worker, posting) {
       emitState(true);
     }
     if (reply?.nativeMissing && state.nativeApi) {
-      // Hub переехал на другие пути: дальше только подсмотренный запрос
       state.nativeApi = false;
       broadcastHints();
     }
@@ -830,7 +808,6 @@ function reportWeight(item) {
   );
 }
 
-// отчёт склеиваем из обеих попыток: у DOM номер и статус, у запроса строки
 function mergeReports(a, b) {
   if (!a?.report) return b?.report || null;
   if (!b?.report) return a.report;
@@ -903,8 +880,8 @@ function hintsMessage() {
 const CYRILLIC = /[А-Яа-яЁё]/;
 
 // строки обоих путей идут в одном порядке, значит код и подпись стоят в паре
-// Сводим по дате, а не по месту в списке: срезы у путей могут разойтись,
-// и тогда i-я строка у них уже про разные события.
+// Сводим по дате, а не по месту: срезы у путей могут разойтись, и тогда
+// i-я строка у них уже про разные события.
 function labelsByDate(rows) {
   const byDate = new Map();
   if (!Array.isArray(rows)) return byDate;
@@ -919,14 +896,12 @@ function labelsByDate(rows) {
   return byDate;
 }
 
-// пока полного сведения не было, урок повторяется на следующих номерах
 function learnChangeLabels(api, dom) {
   const codes = api?.report?.codes;
   const apiRows = api?.report?.lastRows;
   const domRows = dom?.report?.lastRows;
   if (!Array.isArray(codes) || !codes.length || !Array.isArray(domRows)) return false;
 
-  // длины совпали — сводим по месту, это точнее; разошлись — по дате
   const sameShape = codes.length === domRows.length;
   const byDate = sameShape ? null : labelsByDate(domRows);
   if (!sameShape && (!byDate.size || !Array.isArray(apiRows))) return false;
@@ -958,13 +933,10 @@ function broadcastHints() {
 }
 
 function apiAllowed(worker) {
-  // рецепт не обязателен: ручки известны, ID подставляется прямо в путь
   if (!state.useApi || !cfg().api || !worker.hubReady) return false;
   if (!state.nativeApi && !state.recipe) return false;
 
   if (state.recipeStale) {
-    // свежий захват так и не приехал — пробуем как есть, лучше 401, чем
-    // навсегда встать на DOM
     if (Date.now() - state.recipeStaleAt < RECIPE_REFRESH_TIMEOUT_MS) return false;
     state.recipeStale = false;
     state.recipeStaleAt = 0;
@@ -999,10 +971,8 @@ function watchDigest(item) {
 }
 
 // Урок: один номер за прогон гоняем обоими путями и смотрим строки рядом.
-// Заодно сверка — сходятся ли пути в ответе про склад.
 const LESSON_TRIES = 4;
 
-// пока урок в работе, остальные идут быстрым путём
 function lessonDue() {
   return !state.lessonDone && !state.lessonBusy && state.lessonTries < LESSON_TRIES;
 }
@@ -1013,15 +983,13 @@ function spotCheckDue() {
   return state.apiSinceCheck >= every;
 }
 
-// быстрый путь основной, возвращаемся к нему настойчиво
 const API_RETRY_BASE_MS = 20000;
 const API_MAX_RETRIES = 6;
 const API_FAIL_LIMIT = 5;
-// иначе прогон навсегда останется на медленном обходе
 const RECIPE_REFRESH_TIMEOUT_MS = 60000;
 const API_AUTH_STREAK_LIMIT = 6;
 
-// свежесть важнее «качества»: повторный захват даёт тот же score, но новый токен
+// свежесть важнее score: повторный захват даёт тот же score, но новый токен
 function acceptRecipe(next) {
   if (!state.recipe) return true;
   if (state.recipeStale) return true;
@@ -1031,7 +999,6 @@ function acceptRecipe(next) {
   return score >= current && (Number(next.capturedAt) || 0) > (Number(state.recipe.capturedAt) || 0);
 }
 
-// 401/403 — не повод хоронить быстрый путь, нужен свежий захват
 function markRecipeStale(status) {
   if (state.recipeStale) return;
   state.recipeStale = true;
@@ -1040,8 +1007,8 @@ function markRecipeStale(status) {
   emitState(true);
 }
 
-// Расхождение с DOM или одинаковые ответы — это про неверные данные,
-// возврата нет. Таймаут или разовый сбой сети — временно.
+// Расхождение с DOM или одинаковые ответы — это неверные данные, возврата
+// нет. Таймаут или разовый сбой сети — временно.
 function blockApi(reason, kind) {
   if (state.apiState === "blocked") return;
   state.apiState = "blocked";
@@ -1110,7 +1077,7 @@ function calibrate(api, dom, index) {
     return;
   }
 
-  // Сверять можно только с полным обходом. Если он сам не дочитал список,
+  // Сверять можно только с полным обходом: если он сам не дочитал список,
   // его «не нашёл» ничего не доказывает.
   const domTrusted = Boolean(dom?.ok) && dom?.status === "complete";
   if (!domTrusted) {
@@ -1151,7 +1118,6 @@ function calibrate(api, dom, index) {
     return;
   }
 
-  // оба пути смотрят на один срез, значит расхождение настоящее
   const back = requeueApiResults();
   blockApi(
     back
@@ -1161,8 +1127,7 @@ function calibrate(api, dom, index) {
   );
 }
 
-// Открыть вкладке Hub и дождаться content script. Повторить запрос можно
-// только оттуда: нужны её cookie и origin.
+// повторить запрос можно только из страницы Hub: нужны её cookie и origin
 async function primeTab(worker, posting) {
   if (worker.hubReady || worker.tabId == null) return worker.hubReady;
 
@@ -1185,7 +1150,6 @@ async function primeTab(worker, posting) {
   return worker.hubReady;
 }
 
-// добор: считаем обоими путями и берём тот, который вышел лучше
 async function retryBoth(worker, posting, index) {
   if (!worker.hubReady && state.useApi && cfg().api) await primeTab(worker, posting);
 
@@ -1211,7 +1175,6 @@ async function processOne(worker, posting, index) {
   if (apiAllowed(worker)) {
     if (state.apiState === "trusted" && !spotCheckDue() && !lessonDue()) {
       const api = await apiScan(worker, posting);
-      // ручки не оказалось, а рецепта ещё нет — ждём захвата, а не выключаем
       if (!api && state.apiNotReady) return domScanWithRetry(worker, posting);
       if (api) {
         state.apiFailStreak = 0;
@@ -1221,7 +1184,6 @@ async function processOne(worker, posting, index) {
         return api;
       }
       if (state.recipeStale) {
-        // протухший токен, а не поломка: загрузка страницы обновит рецепт
         if (state.apiAuthStreak >= API_AUTH_STREAK_LIMIT) {
           blockApi(`Токен не обновляется: ${state.apiLastReason || "ответ 401"}.`, "unavailable");
         }
@@ -1241,7 +1203,6 @@ async function processOne(worker, posting, index) {
         const api = await apiScan(worker, posting);
         if (state.stopping) return failItem(posting, "stopped");
         const dom = await domScanWithRetry(worker, posting);
-        // ранний урок видит у путей разные срезы, поэтому засчитываем только полный
         if (learnChangeLabels(api, dom) && lesson) state.lessonDone = true;
         calibrate(api, dom, index);
         const merged = mergeReports(dom, api);
@@ -1259,7 +1220,6 @@ function commit(index, item) {
   const prev = state.results[index];
   if (prev == null) state.processed += 1;
   state.retryPending.delete(index);
-  // и не должен ухудшаться: прошлый заход мог прочитать больше
   const best = betterOf(prev, item) || item;
   const merged = mergeReports(prev, item);
   item = merged ? { ...best, report: merged } : best;
@@ -1319,7 +1279,6 @@ async function workerLoop(worker) {
   }
 }
 
-// ошибка — это ровно то, что показывает лента: «не вышло»
 function isIssue(item) {
   if (!item) return true;
   if (item.found) return false;
@@ -1328,8 +1287,7 @@ function isIssue(item) {
   return !item.ok;
 }
 
-// Нашли склад — история просмотрена до нужного места. А «нет» стоит
-// чего-то, только если список прочитан почти весь.
+// «нет» стоит чего-то, только если список прочитан почти весь
 const COVERAGE_TARGET = 0.8;
 const MAX_RETRY_ROUNDS = 3;
 
@@ -1346,8 +1304,7 @@ function needsMore(item) {
   return isIssue(item) || coverageOf(item) < COVERAGE_TARGET;
 }
 
-// Круги добора: заход мог не выйти случайно. Больше трёх кругов не
-// крутим — честнее показать «не вышло».
+// больше трёх кругов не крутим — честнее показать «не вышло»
 function queueRetries() {
   if (state.stopping || state.retryRound >= MAX_RETRY_ROUNDS) return false;
 
@@ -1385,7 +1342,6 @@ function maybeFinalize() {
   void finalize();
 }
 
-// тот же разбор, что и в приложении
 function verdictKind(item) {
   if (item?.found) return "hit";
   return isIssue(item) ? "issue" : "miss";
@@ -1424,7 +1380,6 @@ function byteSize(value) {
   }
 }
 
-// сводка идёт в общий список, итог — отдельным ключом
 async function archiveRun(finished) {
   if (!finished?.jobId) return;
 
@@ -1452,7 +1407,7 @@ async function archiveRun(finished) {
   }
 
   // Сначала освобождаем место, потом пишем итог, и только если он лёг —
-  // обновляем список. Переполнение приходит через lastError, а не исключением.
+  // обновляем список: переполнение приходит через lastError.
   const gone = runs.filter((run) => !kept.includes(run)).map((run) => `${RUN_PREFIX}${run.jobId}`);
   if (gone.length) await storageRemove(gone);
 
@@ -1491,7 +1446,6 @@ async function finalize() {
     inputCount: state.postings.length,
     durationMs: elapsedMs(),
     results,
-    // подписи со страницы подставятся и в строки, собранные до того
     changeLabels: { ...state.changeLabels },
     finishedAt: Date.now()
   };
@@ -1541,7 +1495,6 @@ function normalizeSettings(raw) {
   return {
     mode,
     threads: Math.max(1, Math.min(MAX_THREADS, Number(raw?.threads) || MODES[mode].threads)),
-    // auto — пул подбирается сам; явное число оставляют настройки из тестов
     auto: raw?.auto === true,
     focusMode: raw?.focusMode !== false,
     useApi: raw?.useApi !== false,
@@ -1549,7 +1502,6 @@ function normalizeSettings(raw) {
   };
 }
 
-// на быстром пути вкладка — просто площадка для запроса, четырёх хватает
 function autoThreadCount() {
   const left = Math.max(1, state.postings.length - state.processed);
   const apiOk = state.useApi && state.apiState !== "blocked";
@@ -1599,8 +1551,8 @@ async function runScan(payload, postings, warehouse) {
   state.focusMode = settings.focusMode;
   state.useApi = settings.useApi;
   state.uncheckCurrentOnly = settings.uncheckCurrentOnly;
-  // Начинаем с доверия к быстрому пути. С "unknown" каждый номер до первой
-  // сверки шёл обоими путями, и прогон стартовал вдвое медленнее.
+  // с "unknown" каждый номер до первой сверки шёл обоими путями, и прогон
+  // стартовал вдвое медленнее
   state.apiState = "trusted";
   if (state.autoThreads) state.threads = autoThreadCount();
   state.apiNote = "";
@@ -1699,7 +1651,6 @@ async function applyLiveSettings(raw) {
   }
 
   if (state.running) {
-    // лишние воркеры уходят после текущего номера
     for (const worker of state.workers.values()) worker.retire = worker.id > state.threads;
 
     if (state.threads > before.threads && !state.paused) ensureWorkers();
@@ -1768,8 +1719,6 @@ chrome.runtime.onConnect.addListener((port) => {
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   const action = message?.action;
 
-  // --- из content script ---
-
   if (action === "ht:hello") {
     const tabId = sender?.tab?.id;
     const pending = tabId != null ? pendingByTab.get(tabId) : null;
@@ -1831,7 +1780,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return false;
   }
 
-  // версию и склад видит первая же вкладка, а нужны они всем
   if (action === "ht:hints") {
     let changed = false;
     if (message.appVersion && !state.appVersion) {
@@ -1846,8 +1794,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       state.apiTune = message.apiTune;
       changed = true;
     }
-    // каким запросом отдаётся карточка — общее знание, иначе каждая вкладка
-    // перебирает варианты заново и теряет цену на первых номерах
+    // иначе каждая вкладка перебирает варианты заново и теряет цену на первых номерах
     if (typeof message.cardPlaceless === "boolean" && state.cardPlaceless == null) {
       state.cardPlaceless = message.cardPlaceless;
       changed = true;

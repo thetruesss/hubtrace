@@ -134,8 +134,7 @@ body {
   overflow: hidden;
   background: var(--bg);
   color: var(--text);
-  /* Chrome ставит body { font-family } в UA-стилях страниц расширения,
-     и это перебивает наследование от :root */
+  /* Chrome ставит body { font-family } в UA-стилях страниц расширения и перебивает :root */
   font-family: var(--sans);
   font-size: 14px;
   font-weight: 450;
@@ -270,7 +269,6 @@ main {
   display: none !important;
 }
 
-/* уходящий экран гаснет, а не пропадает рывком */
 .screen.is-leaving {
   animation: view-out 0.16s var(--ease) both;
   pointer-events: none;
@@ -343,10 +341,9 @@ main {
   z-index: 1;
 }
 
-/* шаги: шапки в приложении нет, переход живёт пилюлей снизу */
+/* шаги */
 
-/* Колонки равной ширины. С flex:1 ширина упиралась в самое длинное слово,
-   а подсветка считается как треть — и уезжала мимо. */
+/* с flex:1 ширина упиралась в самое длинное слово, а подсветка считается как треть */
 .steps {
   position: fixed;
   left: 50%;
@@ -364,7 +361,6 @@ main {
   transition: opacity 0.32s var(--ease), transform 0.32s var(--sp);
 }
 
-/* пилюля уходит с глаз, пока читают результат */
 .steps.is-tucked {
   opacity: 0.34;
   transform: translateX(-50%) translateY(12px);
@@ -767,8 +763,7 @@ input[type="number"] {
   transform: none;
 }
 
-/* .btn--ghost:hover и .btn--primary:hover специфичнее, поэтому дублируем
-   зелёный явно — иначе нажатая кнопка сереет под курсором */
+/* .btn--ghost:hover специфичнее, поэтому зелёный дублируем — иначе нажатая кнопка сереет под курсором */
 .btn.is-copied,
 .btn.is-copied:hover:not(:disabled),
 .btn.is-copied:focus-visible {
@@ -867,7 +862,6 @@ input[type="number"] {
   background: rgba(255, 255, 255, 0.18);
 }
 
-/* флексом клавиши и подписи центрируются сами, без vertical-align */
 .brief li.is-hint > span {
   display: flex;
   flex-wrap: wrap;
@@ -1171,7 +1165,6 @@ input[type="number"] {
   font-size: 12.5px;
   font-weight: 550;
   color: var(--text-dim);
-  /* высота первой строки = высоте тумблера, тогда они совпадают */
   line-height: 20px;
 }
 
@@ -1516,13 +1509,11 @@ input[type="number"] {
   margin: 0;
   padding: 0;
   display: grid;
-  /* Строки держат свою высоту, лишнее уходит в прокрутку: сетка при
-     max-height раздавала высоту поровну и строки сплющивались. */
+  /* строки держат свою высоту: при max-height сетка раздавала её поровну и строки сплющивались */
   grid-auto-rows: max-content;
   gap: 6px;
   max-height: 232px;
   overflow-y: auto;
-  /* полоса прокрутки не должна наезжать на плашки справа */
   scrollbar-gutter: stable;
 }
 
@@ -1905,7 +1896,7 @@ input[type="number"] {
   border-left: 3px solid var(--ok);
 }
 
-/* детализация: то же, что уходит вторым листом в Excel, но с поиском */
+/* детализация */
 
 .seg--tabs {
   --seg-count: 3;
@@ -1964,8 +1955,7 @@ input[type="number"] {
   pointer-events: none;
 }
 
-/* Сетка, а не flex с переносом: вторая строка под фишки схлопывается ровно
-   в ноль. На flex промежуток между строками остаётся и панель подскакивает. */
+/* Сетка, а не flex с переносом: на flex промежуток между строками остаётся и панель подскакивает. */
 .detail__bar {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
@@ -1976,8 +1966,7 @@ input[type="number"] {
   padding: 12px 14px;
   border-radius: var(--r);
   transition: grid-template-rows 0.24s var(--ease);
-  /* поповер выходит за край панели, поэтому снимаем обрезку у .glass
-     и поднимаем строку над карточками */
+  /* поповер выходит за край панели — снимаем обрезку у .glass */
   overflow: visible;
   z-index: 20;
 }
@@ -2030,8 +2019,7 @@ input[type="number"] {
   align-items: baseline;
   gap: 7px;
   flex: 0 0 auto;
-  /* ширина фиксирована: «40 отправлений» → «10 отправлений из 40» иначе
-     раздвигает блок на каждой букве и поле поиска скачет */
+  /* ширина фиксирована: «40 отправлений» → «10 отправлений из 40» иначе раздвигает блок на каждой букве */
   min-width: 205px;
   height: 38px;
   padding: 0 14px;
@@ -2115,7 +2103,6 @@ input[type="number"] {
   padding: 18px;
   border-radius: var(--r);
   border: 1px solid var(--stroke);
-  /* сквозь поповер ничего просвечивать не должно */
   background: rgba(11, 16, 26, 0.985);
   backdrop-filter: blur(22px);
   box-shadow: 0 26px 60px rgba(0, 0, 0, 0.58);
@@ -2138,7 +2125,6 @@ input[type="number"] {
   transform: translate(var(--shift, 0px), 0);
 }
 
-/* заголовок и сброс на месте всегда, иначе поповер прыгает */
 .filterbox__head {
   display: flex;
   align-items: center;
@@ -2161,7 +2147,6 @@ input[type="number"] {
   gap: 12px;
 }
 
-/* фильтр — обычное поле: подпись сверху, контрол во всю ширину колонки */
 .filterbox__grid .pick {
   display: grid;
   gap: 6px;
@@ -2217,7 +2202,6 @@ input[type="number"] {
   color: #9dc2ff;
 }
 
-/* на синем поле серая стрелка теряется */
 .filterbox__grid .pick.is-set select {
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cpath d='M2.5 4.5 6 8l3.5-3.5' fill='none' stroke='%23a9c9ff' stroke-width='1.7' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
 }
@@ -2271,7 +2255,7 @@ input[type="number"] {
   grid-template-rows: auto 1fr;
 }
 
-/* отступ сверху на самих фишках, чтобы схлопывался вместе со строкой */
+/* отступ на самих фишках, чтобы схлопывался вместе со строкой */
 .detail__chips {
   grid-column: 1 / -1;
   min-height: 0;
@@ -2896,7 +2880,6 @@ input[type="number"] {
     margin-top: 12px;
     padding-top: 11px;
   }
-  /* на узких экранах пояснения съедают место и список вкладок уезжает под сгиб */
   .deck {
     gap: 11px;
   }
@@ -2982,8 +2965,7 @@ input[type="number"] {
 }
 
 /* аналитика */
-/* цвета графиков ступенью темнее интерфейсных: пара #c98500 / #199e70
-   проверена валидатором на тёмном фоне, включая цветослабость (ΔE 8.4) */
+/* цвета графиков ступенью темнее интерфейсных: #c98500 / #199e70 проверены на цветослабость (ΔE 8.4) */
 
 .stats {
   --viz-hit: #c98500;
@@ -3075,10 +3057,8 @@ input[type="number"] {
 .kpi--miss b { color: var(--miss-soft); }
 .kpi--issue b { color: #ffada2; }
 
-/* строки равной высоты, иначе гистограмма на десять строк рядом с
-   диаграммой на две растягивает ряд */
-/* Высота ряда постоянная. С 1fr она равнялась самой длинной панели, и пока
-   набираешь в поиске, полосы отсеиваются и вся страница прыгает. */
+/* Высота ряда постоянная. С 1fr она равнялась самой длинной панели, и пока набираешь
+   в поиске, полосы отсеиваются и вся страница прыгает. */
 .stats__grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -3228,7 +3208,6 @@ input[type="number"] {
   transition: color 0.2s var(--ease);
 }
 
-/* толщина полосы тянется за высотой строки, но не превращается в плиту */
 .hbar__track {
   display: block;
   height: min(100%, 24px);
@@ -3320,7 +3299,6 @@ input[type="number"] {
 .col {
   flex: 1 1 0;
   min-width: 0;
-  /* дней мало — колонка всё равно остаётся колонкой */
   max-width: 96px;
   display: flex;
   flex-direction: column;
@@ -3348,7 +3326,6 @@ input[type="number"] {
   font-variant-numeric: tabular-nums;
 }
 
-/* площадка столбика: сам столбик стоит на её дне и занимает свою долю */
 .col__plot {
   flex: 1 1 auto;
   min-height: 0;
@@ -3360,7 +3337,7 @@ input[type="number"] {
   width: 100%;
   display: flex;
   flex-direction: column;
-  gap: 2px; 
+  gap: 2px;
 }
 
 .col__seg {
@@ -3477,7 +3454,6 @@ input[type="number"] {
   white-space: nowrap;
 }
 
-/* ID сразу ссылка в Hub, отдельного столбца не нужно */
 a.t-id__code {
   font-family: var(--mono);
   font-size: 11.5px;
@@ -3611,7 +3587,6 @@ a.t-id__code:hover {
   flex: 1 1 auto;
   min-height: 120px;
   border-radius: var(--r-xs);
-  /* три тихие горизонтали — сетка ступенью от поверхности */
   background:
     linear-gradient(rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0.06)) 0 8% / 100% 1px no-repeat,
     linear-gradient(rgba(255, 255, 255, 0.045), rgba(255, 255, 255, 0.045)) 0 51.5% / 100% 1px no-repeat,
@@ -3653,7 +3628,6 @@ a.t-id__code:hover {
   width: 9px;
   height: 9px;
   border-radius: 50%;
-  /* кольцо цветом поверхности: точка читается и на пересечении линий */
   box-shadow: 0 0 0 2px #0a0e18;
   transform: translate(-50%, -50%);
   transition: opacity 0.2s var(--ease);
@@ -3868,7 +3842,6 @@ a.t-id__code:hover {
   filter: drop-shadow(0 20px 52px rgba(0, 62, 168, 0.55));
 }
 
-/* насечки по ободу едут — радар живой, а не картинка */
 .splash.is-on .splash__ticks {
   transform-origin: 100px 100px;
   animation: splash-rim 26s linear infinite;
@@ -3888,8 +3861,7 @@ a.t-id__code:hover {
   inset: 0;
   border-radius: 50%;
   opacity: 0;
-  /* Луч крутится по часовой, значит кромка это 360°, а послесвечение тянется
-     назад. Наоборот свет бежал впереди кромки, и отметка загоралась в пустоте.
+  /* Луч крутится по часовой, значит кромка это 360°, а послесвечение тянется назад.
      transparent тут — прозрачный чёрный, поэтому нулевая альфа синего. */
   background: conic-gradient(
     from 0deg,
@@ -3941,22 +3913,18 @@ a.t-id__code:hover {
   animation-delay: calc(var(--sweep-start) + var(--sweep-dur));
 }
 
-/* Обёртка на весь радар поворачивается на --a, точка внутри отъезжает на --r
-   и разворачивается обратно. Проценты в translate меряются по размеру самого
-   элемента, поэтому отметки сползались в центр. */
+/* Обёртка на весь радар поворачивается на --a, точка внутри отъезжает на --r и разворачивается
+   обратно. Проценты в translate меряются по самому элементу, поэтому отметки сползались в центр. */
 .splash__blip {
   position: absolute;
   inset: 0;
   opacity: 0;
-  /* угол и задержка выведены из одной доли оборота, порознь их не задать */
   --a: calc(var(--turn) * 360deg);
   --d: calc(var(--sweep-start) + var(--sweep-dur) * var(--turn));
   transform: rotate(var(--a));
 }
 
-/* Один заход луча — один цикл отметки: вспышка ровно в тот кадр, когда
-   кромка дошла, дальше послесвечение до следующего захода.
-   forwards, а не both: до своей задержки отметка должна быть невидимой. */
+/* forwards, а не both: до своей задержки отметка должна быть невидимой */
 .splash.is-on .splash__blip {
   animation: splash-contact var(--sweep-dur) linear var(--d) 2 forwards;
 }
@@ -4505,8 +4473,6 @@ a.t-id__code:hover {
   transition: color 0.2s var(--ease);
 }
 
-/* заголовок меняет то, что нарисовано ниже, значит должен читаться как
-   главное слово блока */
 .ptitle__btn h3 {
   margin: 0;
   min-width: 0;
@@ -4722,8 +4688,6 @@ a.t-id__code:hover {
   font-size: 19px;
   color: var(--cyan);
 }
-
-/* ничего не утаскивается мышью */
 
 img,
 svg,
