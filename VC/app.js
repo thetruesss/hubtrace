@@ -354,12 +354,40 @@ function syncSteps() {
   }
 }
 
+let stepSwapTimer = null;
+
+/*
+ * Смена экрана — такая же, как смена пространства результата: уходящий
+ * гаснет и слегка уезжает, приходящий проявляется. Раньше уходящий
+ * пропадал рывком, и переход between «Номера» и «Проверкой» выглядел
+ * дёрганым на фоне всего остального.
+ */
 function setStep(name) {
   if (!stepAvailable(name)) return;
+  const from = screens[ui.currentStep];
+  const to = screens[name];
+  const same = ui.currentStep === name;
   ui.currentStep = name;
-  for (const [key, el] of Object.entries(screens)) el.hidden = key !== name;
   syncSteps();
   renderFab();
+  if (!to) return;
+
+  window.clearTimeout(stepSwapTimer);
+  const show = () => {
+    for (const [key, el] of Object.entries(screens)) {
+      if (key === name) continue;
+      el.hidden = true;
+      el.classList.remove("is-leaving");
+    }
+    to.hidden = false;
+  };
+
+  if (same || !from || from === to || from.hidden || REDUCED_MOTION.matches) {
+    show();
+    return;
+  }
+  from.classList.add("is-leaving");
+  stepSwapTimer = window.setTimeout(show, 160);
 }
 
 /* ------------------------------------------------------------------ */
@@ -3600,6 +3628,21 @@ function mountCredit() {
 }
 
 mountCredit();
+
+/* ------------------------------------------------------------------ */
+/* перетаскивание                                                      */
+/*                                                                     */
+/* Из расширения ничего не утаскивается: ни картинки, ни иконки, ни     */
+/* ссылки, ни выделенный текст — случайный «отрыв» элемента мышью       */
+/* выглядит как поломка. Своё перетаскивание остаётся ровно там, где    */
+/* мы его завели сами: заголовки столбцов помечены draggable="true".    */
+/* Приём файлов это не трогает — там входящий drop, а не dragstart.     */
+/* ------------------------------------------------------------------ */
+
+document.addEventListener("dragstart", (event) => {
+  if (event.target?.closest?.('[draggable="true"]')) return;
+  event.preventDefault();
+});
 
 /* ------------------------------------------------------------------ */
 /* приветствие                                                         */
