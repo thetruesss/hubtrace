@@ -63,6 +63,10 @@ const ui = {
   rate: 0,
   etaMs: null,
   workers: [],
+  /* Круг добора: сколько номеров переспрашиваем и сколько осталось. */
+  retryRound: 0,
+  retryTotal: 0,
+  retryLeft: 0,
   lists: { hits: [], misses: [], issues: [] },
   finished: null,
   reportSaved: false,
@@ -116,6 +120,58 @@ function storageGet(keys) {
 function storageSet(payload) {
   return new Promise((resolve) => chrome.storage.local.set(payload, resolve));
 }
+
+/*
+ * Настройки сохраняет одно место.
+ *
+ * Раньше их писали семь разных, и каждое делало «прочитать — дописать
+ * своё — записать целиком». Два сохранения подряд затирали друг друга:
+ * набор столбцов таблицы пропадал при перезапуске, потому что раскладка
+ * панелей успевала записаться со снимком, сделанным до него.
+ *
+ * Теперь правки копятся в одной заплатке и уезжают одной записью, а
+ * записи выстроены в цепочку: следующая читает то, что записала
+ * предыдущая. Чтение перед записью оставлено — им подхватывается то, что
+ * пишет фон (склад и список номеров на старте прогона).
+ */
+const SETTINGS_IDLE_MS = 300;
+/* Набор длинного списка — это поток правок. Ждать тишины бесконечно
+   нельзя, поэтому раз в две секунды пишем в любом случае. */
+const SETTINGS_MAX_WAIT_MS = 2000;
+
+let settingsPatch = {};
+let settingsFlushTimer = null;
+let settingsPatchedAt = 0;
+let settingsChain = Promise.resolve();
+
+function flushSettings() {
+  window.clearTimeout(settingsFlushTimer);
+  settingsFlushTimer = null;
+  settingsPatchedAt = 0;
+  if (!Object.keys(settingsPatch).length) return settingsChain;
+  const patch = settingsPatch;
+  settingsPatch = {};
+  settingsChain = settingsChain.then(async () => {
+    const saved = await storageGet([STORAGE_SETTINGS]);
+    await storageSet({ [STORAGE_SETTINGS]: { ...(saved[STORAGE_SETTINGS] || {}), ...patch } });
+  });
+  return settingsChain;
+}
+
+function patchSettings(patch) {
+  Object.assign(settingsPatch, patch);
+  const now = Date.now();
+  if (!settingsPatchedAt) settingsPatchedAt = now;
+  window.clearTimeout(settingsFlushTimer);
+  const wait = Math.min(SETTINGS_IDLE_MS, Math.max(0, settingsPatchedAt + SETTINGS_MAX_WAIT_MS - now));
+  settingsFlushTimer = window.setTimeout(flushSettings, wait);
+}
+
+/* Вкладку могут закрыть между правкой и записью — дописываем на выходе. */
+window.addEventListener("pagehide", () => void flushSettings());
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) void flushSettings();
+});
 
 function send(message) {
   return new Promise((resolve) => {
@@ -289,7 +345,6 @@ function writeDecks() {
   renderBrief();
 }
 
-let settingsSaveTimer = null;
 /* Пока идёт наш собственный апдейт, не даём фону откатить переключатель. */
 let settingsDirtyUntil = 0;
 
@@ -299,11 +354,7 @@ async function setSetting(patch, { pushLive = true } = {}) {
   settings.threads = Math.max(1, Math.min(12, Number(settings.threads) || 5));
   writeDecks();
 
-  window.clearTimeout(settingsSaveTimer);
-  settingsSaveTimer = window.setTimeout(async () => {
-    const saved = await storageGet([STORAGE_SETTINGS]);
-    await storageSet({ [STORAGE_SETTINGS]: { ...(saved[STORAGE_SETTINGS] || {}), ...settings } });
-  }, 250);
+  patchSettings({ ...settings });
 
   if (pushLive && ui.running) {
     const reply = await send({ action: "updateSettings", settings: { ...settings } });
@@ -581,13 +632,35 @@ function dropItem(index) {
   ui.byIndex.delete(index);
 }
 
+/*
+ * Прогресс на радаре.
+ *
+ * Первый заход — это ещё не вся работа: номера, которые дочитались не до
+ * конца, движок прогоняет кругами добора. Раньше про это снаружи не было
+ * ни слова, и на экране висело «55 из 55 · 100 %», пока вкладки крутили
+ * добор. Теперь круг входит в знаменатель, а под процентом видно, сколько
+ * номеров переспрашиваем.
+ */
 function updateScanHud() {
   const total = ui.total;
   const processed = ui.byIndex.size;
-  const pct = total ? Math.round((processed / total) * 100) : 0;
+  const retryTotal = ui.running ? Math.max(0, ui.retryTotal) : 0;
+  const retryLeft = ui.running ? Math.max(0, Math.min(ui.retryLeft, retryTotal)) : 0;
+
+  const whole = total + retryTotal;
+  const done = processed + (retryTotal - retryLeft);
+  /* Пока идёт работа, честнее показать 99 %, чем ровную сотню. */
+  let pct = whole ? Math.round((done / whole) * 100) : 0;
+  if (pct >= 100 && ui.running && (retryLeft > 0 || processed < total)) pct = 99;
 
   $("progress-pct").textContent = `${pct}%`;
-  $("progress-label").textContent = `${processed} из ${total}`;
+  $("progress-label").textContent = retryLeft
+    ? `дочитываю ${retryLeft} из ${retryTotal}`
+    : `${processed} из ${total}`;
+
+  const radar = $("radar");
+  if (radar) radar.classList.toggle("is-retry", retryLeft > 0);
+
   $("scan-hits").textContent = String(ui.hits);
   $("scan-misses").textContent = String(ui.misses);
   $("scan-issues").textContent = String(ui.issues);
@@ -620,11 +693,19 @@ function renderRunState() {
   const radar = $("radar");
   if (radar) radar.classList.toggle("is-live", mode === "live");
 
+  const retrying = mode === "live" && ui.retryLeft > 0;
   const status = $("scan-status");
   status.classList.toggle("badge--live", mode === "live");
   status.classList.toggle("badge--paused", mode === "paused");
-  status.textContent =
-    mode === "live" ? "идёт" : mode === "paused" ? "пауза" : mode === "stopping" ? "стоп" : "ожидание";
+  status.textContent = retrying
+    ? `добор · круг ${ui.retryRound}`
+    : mode === "live"
+      ? "идёт"
+      : mode === "paused"
+        ? "пауза"
+        : mode === "stopping"
+          ? "стоп"
+          : "ожидание";
 
   const gauges = $("gauges");
   if (gauges) {
@@ -735,15 +816,38 @@ function renderGauges() {
   drawSpark("eta-line", "eta-fill", ui.etaLog, true);
 }
 
-/* Ровные засечки времени: каждая — минута прогона, последняя дышит. */
+/*
+ * Засечки времени: каждая — минута прогона. Прошедшие закрашены целиком,
+ * текущая наливается секундами, а подпись под ними прямо говорит, что это
+ * минуты. Раньше здесь стояли две одинаковые полоски без объяснений.
+ */
 function renderTicks(elapsed) {
   const host = $("gauge-ticks");
   if (!host) return;
-  const want = Math.max(1, Math.min(12, Math.floor(elapsed / 60000) + 1));
+  const minutes = Math.floor(elapsed / 60000);
+  const want = Math.max(1, Math.min(12, minutes + 1));
   while (host.children.length < want) host.appendChild(document.createElement("i"));
   while (host.children.length > want) host.lastElementChild.remove();
+
+  /* Больше двенадцати минут в блок не влезает — тогда показываем последние. */
+  const from = Math.max(0, minutes + 1 - want);
+  const part = ((elapsed % 60000) / 60000) * 100;
   for (let i = 0; i < host.children.length; i += 1) {
-    host.children[i].classList.toggle("is-now", i === host.children.length - 1);
+    const tick = host.children[i];
+    const last = i === host.children.length - 1;
+    tick.classList.toggle("is-now", last);
+    tick.style.setProperty("--fill", last ? `${Math.max(6, Math.round(part))}%` : "100%");
+    tick.title = `минута ${from + i + 1}`;
+  }
+
+  const note = $("gauge-elapsed-note");
+  if (note) {
+    setText(
+      note,
+      minutes >= 12
+        ? `минуты прогона · показаны последние ${want}`
+        : `${want} ${plural(want, ["минута", "минуты", "минут"])} прогона`
+    );
   }
 }
 
@@ -758,6 +862,9 @@ function resetScanHud(total) {
   ui.elapsedAt = Date.now();
   ui.rateLog = [];
   ui.etaLog = [];
+  ui.retryRound = 0;
+  ui.retryTotal = 0;
+  ui.retryLeft = 0;
   renderGauges();
   resetRadarBlips();
   $("feed").innerHTML = "";
@@ -820,7 +927,6 @@ function updateFormState() {
     const col = document.querySelector(`.result-col[data-col="${name}"]`);
     if (col) col.classList.toggle("is-empty", !filled);
   }
-  $("btn-copy").disabled = !$("hits").value.trim();
   renderFab();
 }
 
@@ -842,9 +948,13 @@ function renderFab() {
     note.textContent = "Скачано · нажмите ещё раз";
     return;
   }
-  const rows = (ui.finished?.results || []).filter(Boolean).length;
-  const details = (ui.finished?.results || []).filter((item) => item?.report?.lastRows?.length).length;
-  note.textContent = details ? `${rows} строк · детали по ${details}` : `${rows} строк`;
+  /* Отчёт забирает таблицу «Все ID» как есть — считаем по ней же, иначе
+     подпись обещала бы строки, которые фильтры уже отсекли. */
+  const shown = statsIndex.filter((entry) => passesStats(entry));
+  const details = shown.filter((entry) => entry.item?.report?.lastRows?.length).length;
+  note.textContent = statsFiltersActive()
+    ? `${shown.length} из ${statsIndex.length} · действия по ${details}`
+    : `${shown.length} строк · действия по ${details}`;
 }
 
 function showError(message) {
@@ -928,12 +1038,17 @@ function renderRuns() {
     const name = document.createElement("b");
     name.textContent = run.warehouse;
     const meta = document.createElement("em");
-    meta.textContent = `${run.hits} из ${run.total} · ${fmtAgo(run.at)}`;
-    btn.append(name, meta);
+    meta.textContent = `нашлось ${run.hits} из ${run.total} · ${fmtAgo(run.at)}`;
+    /* Действие подписано прямо на карточке: раньше было непонятно, что
+       вообще случится по клику — поле склада менялось молча. */
+    const act = document.createElement("i");
+    act.textContent = "подставить склад";
+    btn.append(name, meta, act);
     btn.addEventListener("click", () => {
       warehouseEl.value = run.warehouse;
       updateFormState();
       postingsEl.focus();
+      toast("ok", `Склад ${run.warehouse} подставлен — осталось вставить номера`);
     });
     li.appendChild(btn);
     list.appendChild(li);
@@ -951,9 +1066,7 @@ function logRun(payload, results) {
   };
   ui.runsLog = [entry, ...ui.runsLog].slice(0, 6);
   renderRuns();
-  void storageGet([STORAGE_SETTINGS]).then((saved) =>
-    storageSet({ [STORAGE_SETTINGS]: { ...(saved[STORAGE_SETTINGS] || {}), runsLog: ui.runsLog } })
-  );
+  patchSettings({ runsLog: ui.runsLog });
 }
 
 function renderResults(payload, fresh) {
@@ -1002,7 +1115,8 @@ function renderResults(payload, fresh) {
   buildStatsIndex(results);
   resetStatsFilters();
   fillStatsOptions();
-  setResultView("list");
+  /* Возвращаемся туда, где человек был в прошлый раз. */
+  setResultView(resultView);
   renderDetail();
 
   /* Плашка сверху после финиша должна показывать итог, а не последний
@@ -1020,28 +1134,12 @@ function renderResults(payload, fresh) {
   if (duration > 4000 && results.length >= 5 && !payload?.stopped) {
     const measured = (results.length / duration) * 60000;
     ui.rates = { ...ui.rates, auto: measured };
-    void storageGet([STORAGE_SETTINGS]).then((saved) =>
-      storageSet({ [STORAGE_SETTINGS]: { ...(saved[STORAGE_SETTINGS] || {}), rates: ui.rates } })
-    );
+    patchSettings({ rates: ui.rates });
   }
 }
 
-const REPORT_SHEET = "Отчёт";
-const DETAIL_SHEET = "Последние операции";
-
-const REPORT_COLUMNS = [
-  { title: "Номер отправления", width: 22 },
-  { title: "ID отправления", width: 22 },
-  { title: "Результат", width: 12 },
-  { title: "Статус", width: 26 },
-  { title: "Полнота проверки", width: 18 },
-  { title: "Корзинка", width: 12 },
-  /* Так эта сумма подписана на карточке Hub: «Цена, которую заплатил клиент». */
-  { title: "Цена реализации", width: 16 },
-  /* Путь ячейки Hub пишет через «/», а переезд — через «→»: строка длинная. */
-  { title: "Последняя ячейка", width: 52 },
-  { title: "Подробнее", width: 14 }
-];
+const REPORT_SHEET = "Все ID";
+const DETAIL_SHEET = "Последние действия";
 
 /* Дата в Hub приходит как «15.08.2026, 09:18:58»; с быстрого пути может
    прилететь ISO — принимаем оба. */
@@ -1068,6 +1166,18 @@ const BUCKETS = [
 
 /* Порядок корзинок для сортировки в фильтре. */
 const BUCKET_ORDER = [...BUCKETS.map((bucket) => bucket.label), "48 ч+"];
+
+/*
+ * Дата, от которой считается корзинка.
+ *
+ * Раньше это была только дата строки с искомым складом — и у половины
+ * отправлений («склада нет», «не вышло») корзинка оставалась пустой. Но
+ * возраст последней операции Hub знает всегда, поэтому при отсутствии
+ * склада берём дату верхней строки истории.
+ */
+function bucketDateOf(report) {
+  return String(report?.warehouseAt || "").trim() || topDateOf(report);
+}
 
 /* Возраст верхней строки с искомым складом. */
 function bucketOf(raw, now) {
@@ -1104,22 +1214,28 @@ const CHECK_STATUS = {
 };
 
 /*
- * Кнопки внутри xlsx не бывает: макросы требуют .xlsm, а Excel блокирует их
- * по умолчанию. Тот же переход одним кликом даёт внутренняя гиперссылка —
- * «смотреть» прыгает на второй лист к блоку этого отправления, а оттуда
- * ссылка возвращает обратно в ту же строку отчёта.
+ * Отчёт — это ровно та таблица «Все ID», что видна на экране: те же
+ * столбцы, тот же порядок, те же фильтры и та же сортировка. Плюс
+ * столбец «Детализация» и второй лист с тремя последними действиями по
+ * каждому ID.
+ *
+ * Кнопок внутри xlsx не бывает: макросы требуют .xlsm, а Excel блокирует
+ * их по умолчанию. Тот же переход одним кликом даёт внутренняя
+ * гиперссылка — «детализация →» прыгает на второй лист к блоку этого
+ * отправления, а оттуда ссылка возвращает обратно в ту же строку отчёта.
  */
 function buildXlsx() {
-  const results = (ui.finished?.results || []).filter(Boolean);
-  const now = Date.now();
+  const entries = statsRowsForExport();
+  const cols = statsCols.filter((key) => STATS_COLUMNS[key]);
 
   const detailRows = [];
   const anchors = new Map();
 
-  results.forEach((item, index) => {
-    const report = item.report;
+  entries.forEach((entry, index) => {
+    const report = entry.item.report;
     if (!report?.lastRows?.length) return;
 
+    /* Строка отчёта: +1 на шапку, +1 на нумерацию с единицы. */
     const reportRow = index + 2;
     anchors.set(index, `'${DETAIL_SHEET}'!A${detailRows.length + 1}`);
 
@@ -1128,35 +1244,41 @@ function buildXlsx() {
     detailRows.push([
       { text: report.number || "", style: xlsxStyles.STYLE_TITLE },
       /* Стиль не задаём: ячейка со ссылкой сама получает вид ссылки. */
-      { text: item.posting, link: hubUrl(item.posting) },
+      { text: entry.item.posting, link: hubUrl(entry.item.posting) },
+      { text: verdictOf(entry.item).text, style: xlsxStyles.STYLE_MUTED },
       { text: "← к отчёту", anchor: `'${REPORT_SHEET}'!A${reportRow}`, style: xlsxStyles.STYLE_BACK }
     ]);
 
     const columns = report.columns?.length
       ? report.columns
       : Array.from({ length: report.lastRows[0].length }, (_, i) => `Колонка ${i + 1}`);
-    detailRows.push(columns.map((title2) => ({ text: title2, style: xlsxStyles.STYLE_HEAD })));
+    detailRows.push(columns.map((title) => ({ text: title, style: xlsxStyles.STYLE_HEAD })));
 
     for (const row of withLabels(report)) detailRows.push(row.map((value) => ({ text: value })));
     detailRows.push([]);
   });
 
-  const reportRows = [REPORT_COLUMNS.map((col) => ({ text: col.title, style: xlsxStyles.STYLE_HEAD }))];
-  results.forEach((item, index) => {
-    const report = item.report || {};
+  const head = cols.map((key) => ({ text: STATS_COLUMNS[key].title, style: xlsxStyles.STYLE_HEAD }));
+  head.push({ text: "Детализация", style: xlsxStyles.STYLE_HEAD });
+  const reportRows = [head];
+
+  entries.forEach((entry, index) => {
+    const row = cols.map((key) => {
+      const column = STATS_COLUMNS[key];
+      const cell = { text: column.text(entry) };
+      if (column.link) cell.link = column.link(entry);
+      return cell;
+    });
     const anchor = anchors.get(index);
-    reportRows.push([
-      { text: report.number || "" },
-      { text: item.posting, link: hubUrl(item.posting) },
-      { text: item.found ? "есть" : "нет" },
-      { text: report.status || "" },
-      { text: CHECK_STATUS[item.status] || item.status || "" },
-      { text: bucketOf(report.warehouseAt, now) },
-      { text: report.price || "" },
-      { text: report.warehouseCell || "" },
-      anchor ? { text: "смотреть →", anchor, style: xlsxStyles.STYLE_JUMP } : { text: "" }
-    ]);
+    row.push(anchor ? { text: "детализация →", anchor, style: xlsxStyles.STYLE_JUMP } : { text: "" });
+    reportRows.push(row);
   });
+
+  const reportColumns = cols.map((key) => ({
+    title: STATS_COLUMNS[key].title,
+    width: STATS_COLUMNS[key].width
+  }));
+  reportColumns.push({ title: "Детализация", width: 16 });
 
   /* Колонки листа деталей идут в порядке таблицы Hub: тип изменения, дата,
      пользователь, изменения (самая длинная), описание. */
@@ -1169,7 +1291,7 @@ function buildXlsx() {
     sheets: [
       {
         name: REPORT_SHEET,
-        columns: REPORT_COLUMNS,
+        columns: reportColumns,
         rows: reportRows,
         headRow: 0,
         freeze: 1,
@@ -1207,15 +1329,12 @@ function exportName(extension) {
 /* запуск / пауза / стоп                                               */
 /* ------------------------------------------------------------------ */
 
-async function rememberWarehouse(value) {
+function rememberWarehouse(value) {
   const clean = String(value || "").trim();
   if (!clean) return;
   ui.recentWarehouses = [clean, ...ui.recentWarehouses.filter((item) => item !== clean)].slice(0, 8);
   renderRecentWarehouses();
-  const saved = await storageGet([STORAGE_SETTINGS]);
-  await storageSet({
-    [STORAGE_SETTINGS]: { ...(saved[STORAGE_SETTINGS] || {}), recentWarehouses: ui.recentWarehouses }
-  });
+  patchSettings({ recentWarehouses: ui.recentWarehouses, warehouse: clean });
 }
 
 function renderRecentWarehouses() {
@@ -1248,16 +1367,10 @@ async function startScan() {
   ui.apiState = "unknown";
   ui.apiNote = "";
 
-  const saved = await storageGet([STORAGE_SETTINGS]);
-  await storageSet({
-    [STORAGE_SETTINGS]: {
-      ...(saved[STORAGE_SETTINGS] || {}),
-      ...settings,
-      warehouse,
-      lastPostings: postingsEl.value
-    }
-  });
-  void rememberWarehouse(warehouse);
+  rememberWarehouse(warehouse);
+  patchSettings({ ...settings, warehouse, lastPostings: postingsEl.value });
+  /* Дожидаемся записи: фон следом дописывает в тот же ключ. */
+  await flushSettings();
 
   ensureKeepAlive();
   resetScanHud(postings.length);
@@ -1309,13 +1422,25 @@ function requestStop() {
 /* события                                                             */
 /* ------------------------------------------------------------------ */
 
-postingsEl.addEventListener("input", updateCount);
-warehouseEl.addEventListener("input", updateFormState);
-warehouseEl.addEventListener("change", () => void rememberWarehouse(warehouseEl.value));
+/*
+ * Склад и список номеров сохранялись только на старте прогона — набранное
+ * и не запущенное пропадало при перезапуске. Пишем по мере набора: очередь
+ * настроек всё равно копит правки и уезжает одной записью.
+ */
+postingsEl.addEventListener("input", () => {
+  updateCount();
+  patchSettings({ lastPostings: postingsEl.value });
+});
+warehouseEl.addEventListener("input", () => {
+  updateFormState();
+  patchSettings({ warehouse: warehouseEl.value.trim() });
+});
+warehouseEl.addEventListener("change", () => rememberWarehouse(warehouseEl.value));
 
 $("btn-clear").addEventListener("click", () => {
   postingsEl.value = "";
   updateCount();
+  patchSettings({ lastPostings: "" });
 });
 
 $("btn-file").addEventListener("click", () => $("file-input").click());
@@ -1329,6 +1454,7 @@ function appendToField(text) {
   const current = postingsEl.value.trim();
   postingsEl.value = current ? `${current}\n${text}` : text;
   updateCount();
+  patchSettings({ lastPostings: postingsEl.value });
 }
 
 /*
@@ -1437,7 +1563,6 @@ async function copyField(name, button) {
 for (const button of $$("[data-copy]")) {
   button.addEventListener("click", (event) => void copyField(button.dataset.copy, event.currentTarget));
 }
-$("btn-copy").addEventListener("click", (event) => void copyField("hits", event.currentTarget));
 
 $("btn-xlsx").addEventListener("click", () => {
   if (!ui.finished) return;
@@ -1484,6 +1609,9 @@ function absorbState(next) {
   ui.apiTune = next.apiTune || null;
   ui.apiLastReason = next.apiLastReason || "";
   ui.workers = Array.isArray(next.workers) ? next.workers : [];
+  ui.retryRound = Number(next.retryRound) || 0;
+  ui.retryTotal = Number(next.retryTotal) || 0;
+  ui.retryLeft = Number(next.retryLeft) || 0;
   ui.elapsedMs = Number(next.elapsedMs) || 0;
   ui.elapsedAt = Date.now();
   if (next.total) ui.total = next.total;
@@ -1497,11 +1625,18 @@ function absorbState(next) {
 chrome.runtime.onMessage.addListener((message) => {
   if (message?.action === "scanProgress") {
     if (message.total) ui.total = message.total;
+    if (typeof message.retryTotal === "number") {
+      ui.retryRound = Number(message.retryRound) || 0;
+      ui.retryTotal = message.retryTotal;
+      ui.retryLeft = Number(message.retryLeft) || 0;
+    }
     if (message.item && typeof message.index === "number" && message.index >= 0) {
       applyItem(message.index, message.item);
       renderFeed(message.item);
       if (ui.running && !ui.stopping) addRadarBlip(classify(message.item));
-      $("scan-current").textContent = `${message.item.posting} · ${statusLabel(message.item)}`;
+      $("scan-current").textContent = ui.retryLeft
+        ? `Добор: ${message.item.posting} · ${statusLabel(message.item)}`
+        : `${message.item.posting} · ${statusLabel(message.item)}`;
       ui.hasResults = true;
       syncSteps();
     }
@@ -1562,6 +1697,10 @@ function applySavedSettings(saved) {
     const cols = saved.statsCols.filter((key) => STATS_COLUMNS[key]);
     if (cols.length) statsCols = [...new Set(cols)];
   }
+  if (saved.statsSort && STATS_COLUMNS[saved.statsSort.key]) {
+    statsSort = { key: saved.statsSort.key, dir: saved.statsSort.dir < 0 ? -1 : 1 };
+  }
+  if (RESULT_VIEWS.includes(saved.resultView)) resultView = saved.resultView;
   if (Array.isArray(saved.statsPanels)) {
     const panels = saved.statsPanels
       .filter((panel) => STATS_DIMS[panel?.dim] && STATS_VIZ[panel?.viz])
@@ -1643,9 +1782,10 @@ function haystackOf(item) {
     report.status,
     report.warehouseAt,
     report.warehouseCell,
+    report.lastPlace,
     ...priceNeedles(report.price),
     ...priceNeedles(report.fairPrice),
-    bucketOf(report.warehouseAt, Date.now()),
+    bucketOf(bucketDateOf(report), Date.now()),
     kind === "hit" ? "есть склад" : kind === "miss" ? "нет склада" : "не вышло",
     CHECK_STATUS[item.status] || item.status,
     ...(report.columns || []),
@@ -1665,7 +1805,7 @@ function fillFilterOptions() {
   const buckets = [];
   const statuses = [];
   for (const { item } of detailIndex) {
-    const bucket = bucketOf(item.report?.warehouseAt, Date.now());
+    const bucket = bucketOf(bucketDateOf(item.report), Date.now());
     if (bucket && !buckets.includes(bucket)) buckets.push(bucket);
     const status = item.report?.status;
     if (status && !statuses.includes(status)) statuses.push(status);
@@ -1697,7 +1837,7 @@ function fillFilterOptions() {
 function passesFilters(item) {
   if (detailFilters.verdict && classify(item) !== detailFilters.verdict) return false;
   if (detailFilters.status && item.report?.status !== detailFilters.status) return false;
-  if (detailFilters.bucket && bucketOf(item.report?.warehouseAt, Date.now()) !== detailFilters.bucket) return false;
+  if (detailFilters.bucket && bucketOf(bucketDateOf(item.report), Date.now()) !== detailFilters.bucket) return false;
   return true;
 }
 
@@ -1705,6 +1845,9 @@ function filtersActive() {
   return Object.values(detailFilters).some(Boolean) || detailQuery.length > 0;
 }
 
+/* Три пространства экрана результата — они же допустимые значения
+   сохранённой вкладки. */
+const RESULT_VIEWS = ["list", "detail", "stats"];
 let resultView = "list";
 let viewSwapTimer = null;
 
@@ -1735,6 +1878,7 @@ function setResultView(view, animate) {
   const from = panes[resultView];
   const same = resultView === view;
   resultView = view;
+  patchSettings({ resultView: view });
 
   window.clearTimeout(viewSwapTimer);
   const show = () => {
@@ -1832,11 +1976,13 @@ function detailCard(item) {
     fact.appendChild(el("span", null, value));
     facts.appendChild(fact);
   };
-  addFact("Корзинка", bucketOf(report.warehouseAt, Date.now()));
-  addFact("Когда", report.warehouseAt);
+  addFact("Корзинка", bucketOf(bucketDateOf(report), Date.now()));
+  addFact("Когда", report.warehouseAt || topDateOf(report));
   addFact("Цена реализации", report.price);
   addFact("Цена", report.fairPrice);
   addFact("Последняя ячейка", report.warehouseCell);
+  /* Для «склада нет» полезнее знать, где предмет застрял. */
+  if (classify(item) !== "hit") addFact("Предыдущий склад", report.lastPlace || topPlaceOf(withLabels(report)));
   if (facts.childElementCount) card.appendChild(facts);
 
   const rows = withLabels(report);
@@ -1878,6 +2024,92 @@ function detailCard(item) {
   return card;
 }
 
+/*
+ * Счётчик среза слева от поиска: крупное число и подпись. Когда фильтры
+ * что-то отсекли, рядом встаёт «из N» и блок подсвечивается — иначе не
+ * видно, что цифра уже не про весь прогон.
+ */
+function renderTally(id, shown, all) {
+  const box = $(id);
+  if (!box) return;
+  const filtered = shown !== all;
+  box.innerHTML = "";
+  box.classList.toggle("is-filtered", filtered);
+  box.appendChild(el("b", null, String(shown)));
+  box.appendChild(el("em", null, plural(shown, ["отправление", "отправления", "отправлений"])));
+  if (filtered) box.appendChild(el("em", null, `из ${all}`));
+}
+
+/*
+ * Фильтры живут под кнопкой.
+ *
+ * Раньше селекты стояли в строке и занимали половину панели. Теперь это
+ * поповер: кнопка показывает, сколько фильтров стоит, и открывает список.
+ */
+const filterBoxes = new Map();
+
+function countActive(values) {
+  return values.filter(Boolean).length;
+}
+
+function closeFilterBox(name) {
+  const box = filterBoxes.get(name);
+  if (!box || !box.open) return;
+  box.open = false;
+  box.pop.classList.remove("is-open");
+  box.btn.classList.remove("is-on");
+  box.btn.setAttribute("aria-expanded", "false");
+  window.clearTimeout(box.timer);
+  box.timer = window.setTimeout(() => {
+    if (!box.open) box.pop.hidden = true;
+  }, 200);
+}
+
+function openFilterBox(name) {
+  for (const other of filterBoxes.keys()) if (other !== name) closeFilterBox(other);
+  const box = filterBoxes.get(name);
+  if (!box || box.open) return;
+  box.open = true;
+  window.clearTimeout(box.timer);
+  box.pop.hidden = false;
+  box.btn.classList.add("is-on");
+  box.btn.setAttribute("aria-expanded", "true");
+  /* Кадр на раскладку, потом класс — иначе перехода не будет. */
+  requestAnimationFrame(() => box.pop.classList.add("is-open"));
+}
+
+function mountFilterBox(name, btnId, popId, countId) {
+  const btn = $(btnId);
+  const pop = $(popId);
+  if (!btn || !pop) return;
+  const box = { btn, pop, count: $(countId), open: false, timer: null };
+  filterBoxes.set(name, box);
+
+  btn.addEventListener("click", (event) => {
+    event.stopPropagation();
+    if (box.open) closeFilterBox(name);
+    else openFilterBox(name);
+  });
+  /* Клик внутри поповера не должен его закрывать. */
+  pop.addEventListener("click", (event) => event.stopPropagation());
+}
+
+function renderFilterCount(name, active) {
+  const box = filterBoxes.get(name);
+  if (!box?.count) return;
+  box.count.hidden = !active;
+  box.count.textContent = String(active);
+  box.btn.classList.toggle("has-filters", active > 0);
+}
+
+document.addEventListener("click", () => {
+  for (const name of filterBoxes.keys()) closeFilterBox(name);
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape") return;
+  for (const [name, box] of filterBoxes) if (box.open) closeFilterBox(name);
+});
+
 function renderDetailChips() {
   const box = $("detail-chips");
   if (!box) return;
@@ -1905,12 +2137,8 @@ function renderDetail() {
   const shown = detailIndex.filter(matchesDetail);
   const all = detailIndex.length;
 
-  const count = $("detail-count");
-  if (count) {
-    count.textContent = filtersActive()
-      ? `${shown.length} из ${all}`
-      : `${all} ${plural(all, ["отправление", "отправления", "отправлений"])}`;
-  }
+  renderTally("detail-count", shown.length, all);
+  renderFilterCount("detail", countActive(Object.values(detailFilters)));
   const reset = $("filter-reset");
   if (reset) reset.hidden = !filtersActive();
   renderDetailChips();
@@ -1939,6 +2167,7 @@ function renderDetail() {
 }
 
 function mountDetail() {
+  mountFilterBox("detail", "detail-filters-btn", "detail-filters-pop", "detail-filters-count");
   const tabs = $("result-tabs");
   if (tabs) {
     tabs.addEventListener("click", (event) => {
@@ -2037,9 +2266,7 @@ const MAX_PANELS = 8;
 let statsPanels = DEFAULT_PANELS.map((panel) => ({ ...panel }));
 
 function persistStatsPanels() {
-  void storageGet([STORAGE_SETTINGS]).then((saved) =>
-    storageSet({ [STORAGE_SETTINGS]: { ...(saved[STORAGE_SETTINGS] || {}), statsPanels } })
-  );
+  patchSettings({ statsPanels });
 }
 
 const STATS_SELECTS = {
@@ -2110,7 +2337,13 @@ function blameOf(item) {
     return { kind: "cell", value: lastCellOf(report.warehouseCell), at: report.warehouseAt || topDateOf(report) };
   }
   if (kind === "miss") {
-    return { kind: "place", value: topPlaceOf(withLabels(report)), at: topDateOf(report) };
+    /*
+     * Верхний склад считает сканер по всем прочитанным строкам — там видно
+     * куда больше, чем в трёх строках отчёта. Разбор текста остаётся
+     * откатом: обход страницы своего поля не заполняет.
+     */
+    const place = report.lastPlace || topPlaceOf(withLabels(report));
+    return { kind: "place", value: place, at: topDateOf(report) };
   }
   return { kind: "none", value: "", at: "" };
 }
@@ -2203,7 +2436,7 @@ function buildStatsIndex(results) {
       hour,
       price,
       priceBand: priceBandOf(price),
-      bucket: bucketOf(item.report?.warehouseAt, now),
+      bucket: bucketOf(bucketDateOf(item.report), now),
       day: stamp ? `${pad(stamp.getDate())}.${pad(stamp.getMonth() + 1)}` : "",
       dayTs: stamp ? new Date(stamp.getFullYear(), stamp.getMonth(), stamp.getDate()).getTime() : 0,
       hay: [haystackOf(item), blame.value, BLAME_TAGS[blame.kind] || "", user, hour, ...priceNeedles(price)]
@@ -2342,9 +2575,7 @@ function renderStatsKpis(shown) {
     }
   }
 
-  const filtered = statsFiltersActive();
   const tiles = [
-    { label: "Отправлений", value: shown.length, sub: filtered ? `из ${statsIndex.length}` : "" },
     { label: "Склад есть", value: hits, mod: "hit" },
     { label: "Склада нет", value: misses, mod: "miss" },
     { label: "Не вышло", value: issues, mod: "issue" },
@@ -2374,6 +2605,101 @@ function renderStatsKpis(shown) {
 
 function chartEmpty(host, text) {
   host.appendChild(el("p", "bars__none", text));
+}
+
+/* ------------------------------------------------------------------ */
+/* подсказки на графиках                                               */
+/*                                                                     */
+/* Полоса, столбик, точка и доля должны отвечать на наведение цифрами, */
+/* а не одним лишь подсвечиванием: сколько ID, какая доля среза и что  */
+/* будет по клику. Подсказка одна на все графики и ходит за курсором.  */
+/* ------------------------------------------------------------------ */
+
+let vizTipEl = null;
+let vizTipRaf = 0;
+
+function vizTip() {
+  if (vizTipEl?.isConnected) return vizTipEl;
+  vizTipEl = el("div", "viztip");
+  vizTipEl.hidden = true;
+  document.body.appendChild(vizTipEl);
+  return vizTipEl;
+}
+
+function placeVizTip(x, y) {
+  const tip = vizTip();
+  const box = tip.getBoundingClientRect();
+  const pad = 14;
+  let left = x + 16;
+  let top = y + 18;
+  if (left + box.width > window.innerWidth - pad) left = x - box.width - 16;
+  if (top + box.height > window.innerHeight - pad) top = y - box.height - 14;
+  tip.style.left = `${Math.max(pad, left)}px`;
+  tip.style.top = `${Math.max(pad, top)}px`;
+}
+
+function hideVizTip() {
+  if (!vizTipEl) return;
+  vizTipEl.classList.remove("is-on");
+  vizTipEl.hidden = true;
+}
+
+/*
+ * content: { title, color, rows: [[подпись, значение]], foot }.
+ * Считается на месте, а не при отрисовке: панель может нарисовать сотню
+ * полос, а подсказка нужна одной.
+ */
+function showVizTip(event, content) {
+  const data = typeof content === "function" ? content() : content;
+  if (!data) return;
+  const tip = vizTip();
+  tip.innerHTML = "";
+
+  const head = el("div", "viztip__head");
+  if (data.color) {
+    const mark = el("i");
+    mark.style.background = data.color;
+    head.appendChild(mark);
+  }
+  head.appendChild(el("span", null, data.title));
+  tip.appendChild(head);
+
+  for (const [label, value] of data.rows || []) {
+    const row = el("div", "viztip__row");
+    row.appendChild(el("span", null, label));
+    row.appendChild(el("b", null, String(value)));
+    tip.appendChild(row);
+  }
+  if (data.foot) tip.appendChild(el("p", "viztip__foot", data.foot));
+
+  tip.hidden = false;
+  tip.classList.add("is-on");
+  placeVizTip(event.clientX, event.clientY);
+}
+
+function bindVizTip(node, content) {
+  node.addEventListener("pointerenter", (event) => showVizTip(event, content));
+  node.addEventListener("pointermove", (event) => {
+    if (vizTipRaf) return;
+    const { clientX, clientY } = event;
+    vizTipRaf = requestAnimationFrame(() => {
+      vizTipRaf = 0;
+      if (vizTipEl && !vizTipEl.hidden) placeVizTip(clientX, clientY);
+    });
+  });
+  node.addEventListener("pointerleave", hideVizTip);
+  node.addEventListener("click", hideVizTip);
+}
+
+/* Доля значения в срезе — её и хочется видеть рядом со счётом. */
+function shareText(count, total) {
+  if (!total) return "—";
+  const share = (count / total) * 100;
+  return share >= 10 ? `${Math.round(share)}%` : `${share.toFixed(1)}%`;
+}
+
+function pickFoot(active, value) {
+  return active === value ? "Клик — снять фильтр" : "Клик — оставить только эти ID";
 }
 
 /*
@@ -2566,6 +2892,7 @@ function legendChip(label, total, color, state, pick) {
   chip.type = "button";
   chip.className = `lchip${state}`;
   chip.title = state === " is-on" ? "Снять фильтр" : "Показать все ID с этим значением";
+  bindVizTip(chip, { title: label, color, rows: [["ID", total]] });
   const mark = el("i");
   mark.style.background = color;
   chip.append(mark, el("span", null, label), el("b", null, String(total)));
@@ -2588,20 +2915,31 @@ function renderBarChart(host, rows, options) {
 
   const top = rows.slice(0, 10);
   const max = Math.max(...top.map(([, count]) => count)) || 1;
+  const total = rows.reduce((sum, [, count]) => sum + count, 0);
   for (const [value, count] of top) {
     const active = options.active;
     const row = document.createElement("button");
     row.type = "button";
     row.className = `hbar${chipState(active, value)}`;
-    row.title = active === value ? "Снять фильтр" : "Показать все ID с этим значением";
     row.addEventListener("click", () => options.pick(value));
 
+    const hue = options.colorPerValue ? options.colorPerValue(value) : options.color;
+    bindVizTip(row, {
+      title: options.labelOf(value),
+      color: hue,
+      rows: [
+        ["ID", count],
+        ["доля среза", shareText(count, total)],
+        ["место", `${rows.findIndex(([name]) => name === value) + 1} из ${rows.length}`]
+      ],
+      foot: pickFoot(active, value)
+    });
+
     const label = el("span", "hbar__label", options.labelOf(value));
-    label.title = options.labelOf(value);
     const track = el("span", "hbar__track");
     const fill = el("i", "hbar__fill");
     fill.style.width = `${Math.max(3, (count / max) * 100)}%`;
-    fill.style.background = options.colorPerValue ? options.colorPerValue(value) : options.color;
+    fill.style.background = hue;
     track.appendChild(fill);
     const num = el("span", "hbar__value", String(count));
 
@@ -2671,8 +3009,20 @@ function renderColsChart(host, slice, dimKey, options) {
     const col = document.createElement("button");
     col.type = "button";
     col.className = `col${chipState(active, value)}`;
-    col.title = active === value ? "Снять фильтр" : `Показать все ID: ${labelOf(value)}`;
     col.addEventListener("click", () => options.pick(value));
+
+    const grand = totals.hit + totals.miss + totals.issue;
+    const tipRows = [["всего ID", total]];
+    if (counts.hit) tipRows.push(["склад есть", counts.hit]);
+    if (counts.miss) tipRows.push(["склада нет", counts.miss]);
+    if (counts.issue) tipRows.push(["не вышло", counts.issue]);
+    tipRows.push(["доля среза", shareText(total, grand)]);
+    bindVizTip(col, {
+      title: labelOf(value),
+      color: counts.hit >= counts.miss ? VERDICT_COLORS.hit : VERDICT_COLORS.miss,
+      rows: tipRows,
+      foot: pickFoot(active, value)
+    });
 
     col.appendChild(el("span", "col__cap", String(total)));
     const stack = el("span", "col__stack");
@@ -2736,7 +3086,15 @@ function renderLineChart(host, data, options) {
       dot.style.left = `${xOf(index)}%`;
       dot.style.top = `${yOf(value)}%`;
       dot.style.background = line.color;
-      dot.title = `${line.label} · ${days[index].day}: ${value}`;
+      bindVizTip(dot, {
+        title: `${line.label} · ${days[index].day}`,
+        color: line.color,
+        rows: [
+          ["ID за день", value],
+          ["всего по линии", line.total],
+          ["доля дня", shareText(value, line.total)]
+        ]
+      });
       plot.appendChild(dot);
     });
   }
@@ -2803,9 +3161,15 @@ function renderDonutChart(host, rows, options) {
     circle.setAttribute("stroke-dasharray", `${Math.max(0.5, share - GAP)} ${LEN - Math.max(0.5, share - GAP)}`);
     circle.setAttribute("stroke-dashoffset", String(-offset));
     circle.setAttribute("transform", "rotate(-90 60 60)");
-    const title = document.createElementNS("http://www.w3.org/2000/svg", "title");
-    title.textContent = `${seg.label}: ${seg.count}`;
-    circle.appendChild(title);
+    bindVizTip(circle, {
+      title: seg.label,
+      color: seg.color,
+      rows: [
+        ["ID", seg.count],
+        ["доля", shareText(seg.count, total)]
+      ],
+      foot: seg.pickable ? pickFoot(options.active, seg.name) : ""
+    });
     if (seg.pickable) circle.addEventListener("click", () => options.pick(seg.name));
     svg.appendChild(circle);
     offset += share;
@@ -3203,10 +3567,9 @@ const STATS_COLUMNS = {
 const DEFAULT_STATS_COLS = ["id", "number", "verdict", "blame", "at", "bucket", "price", "status", "op"];
 let statsCols = DEFAULT_STATS_COLS.slice();
 
+/* Набор столбцов, их порядок и сортировка — одна настройка таблицы. */
 function persistStatsCols() {
-  void storageGet([STORAGE_SETTINGS]).then((saved) =>
-    storageSet({ [STORAGE_SETTINGS]: { ...(saved[STORAGE_SETTINGS] || {}), statsCols } })
-  );
+  patchSettings({ statsCols, statsSort });
 }
 
 function sortStats(entries) {
@@ -3361,39 +3724,12 @@ function renderStatsTable(shown) {
   }
 }
 
-/* ---- выгрузка ровно того, что на экране ---- */
-
+/*
+ * Строки для отчёта: ровно то, что на экране, — те же фильтры и та же
+ * сортировка. Отчёт собирает buildXlsx, кнопка одна и живёт внизу справа.
+ */
 function statsRowsForExport() {
   return sortStats(statsIndex.filter((entry) => passesStats(entry)));
-}
-
-function buildStatsXlsx() {
-  const cols = statsCols.filter((key) => STATS_COLUMNS[key]);
-  const rows = [cols.map((key) => ({ text: STATS_COLUMNS[key].title, style: xlsxStyles.STYLE_HEAD }))];
-
-  for (const entry of statsRowsForExport()) {
-    rows.push(
-      cols.map((key) => {
-        const column = STATS_COLUMNS[key];
-        const cell = { text: column.text(entry) };
-        if (column.link) cell.link = column.link(entry);
-        return cell;
-      })
-    );
-  }
-
-  return buildXlsxBlob({
-    sheets: [
-      {
-        name: "Аналитика",
-        columns: cols.map((key) => ({ title: STATS_COLUMNS[key].title, width: STATS_COLUMNS[key].width })),
-        rows,
-        headRow: 0,
-        freeze: 1,
-        autoFilter: true
-      }
-    ]
-  });
 }
 
 /* ---- фишки активных фильтров ---- */
@@ -3430,15 +3766,14 @@ function renderStats() {
   const host = $("result-stats");
   if (!host) return;
 
+  /* Панели сейчас пересоберутся — элемент под курсором исчезнет, и
+     pointerleave по нему уже не придёт. Убираем подсказку сами. */
+  hideVizTip();
   syncStatsControls();
   const shown = statsIndex.filter((entry) => passesStats(entry));
 
-  const count = $("stats-count");
-  if (count) {
-    count.textContent = statsFiltersActive()
-      ? `${shown.length} из ${statsIndex.length}`
-      : `${statsIndex.length} ${plural(statsIndex.length, ["отправление", "отправления", "отправлений"])}`;
-  }
+  renderTally("stats-count", shown.length, statsIndex.length);
+  renderFilterCount("stats", countActive(Object.values(statsFilters)));
   const reset = $("stats-reset");
   if (reset) reset.hidden = !statsFiltersActive();
 
@@ -3446,12 +3781,17 @@ function renderStats() {
   renderStatsPanels();
   renderStatsTable(shown);
   renderStatsChips();
+  /* Подпись кнопки отчёта считает по этому же срезу — обновляем вместе. */
+  renderFab();
 }
 
+/*
+ * Сортировка сюда не входит: это настройка таблицы, как набор столбцов, а
+ * не фильтр. Раньше её сбрасывал и «Сбросить всё», и каждый новый прогон.
+ */
 function resetStatsFilters() {
   statsQuery = [];
   for (const key of Object.keys(statsFilters)) statsFilters[key] = "";
-  statsSort = { key: "at", dir: -1 };
   const search = $("stats-search");
   if (search) search.value = "";
   for (const id of Object.values(STATS_SELECTS)) {
@@ -3471,6 +3811,7 @@ function jumpToDetail(posting) {
 }
 
 function mountStats() {
+  mountFilterBox("stats", "stats-filters-btn", "stats-filters-pop", "stats-filters-count");
   const search = $("stats-search");
   if (search) {
     let timer = null;
@@ -3510,16 +3851,6 @@ function mountStats() {
     if (!open) window.setTimeout(() => { box.hidden = true; }, 240);
   });
 
-  $("stats-xlsx")?.addEventListener("click", (event) => {
-    if (!statsIndex.length) return;
-    try {
-      saveBlob(buildStatsXlsx(), exportName("xlsx"));
-      flashCopied(event.currentTarget);
-    } catch (error) {
-      toast("error", `Не получилось собрать файл: ${String(error?.message || error)}`);
-    }
-  });
-
   $("stats-add")?.addEventListener("click", () => {
     if (statsPanels.length >= MAX_PANELS) return;
     /* Новая панель — первое измерение, которого ещё нет на экране. */
@@ -3554,6 +3885,7 @@ function mountStats() {
         const key = th.dataset.sort;
         if (statsSort.key === key) statsSort.dir = -statsSort.dir;
         else statsSort = { key, dir: key === "at" ? -1 : 1 };
+        persistStatsCols();
         /* Плавность здесь даёт сама таблица: строки въезжают своей
            анимацией. Переход всей страницы тут только тормозил бы отклик. */
         renderStats();
@@ -3652,7 +3984,7 @@ document.addEventListener("dragstart", (event) => {
 /* приветствие живёт поверх, а загрузка идёт своим чередом.            */
 /* ------------------------------------------------------------------ */
 
-const SPLASH_MS = 2600;
+const SPLASH_MS = 3050;
 
 function playSplash() {
   const splash = $("splash");

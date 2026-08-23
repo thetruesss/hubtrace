@@ -113,6 +113,8 @@ const state = {
   /* Вариант запроса, который принял сервер: подбирается один раз за прогон
      и раздаётся всем вкладкам. */
   apiTune: null,
+  /* Отдаётся ли карточка предмета без склада оператора. */
+  cardPlaceless: null,
   /*
    * Подписи типов изменения, подсмотренные на самой странице.
    *
@@ -136,6 +138,8 @@ const state = {
   /* Круги добора: номера, которые не вышли или дочитались не полностью. */
   retryRound: 0,
   retryIndexes: new Set(),
+  /* Из них ещё не пересчитанные — по ним считается честный прогресс. */
+  retryPending: new Set(),
   /* Последняя попытка сорвалась не из-за поломки, а потому что повторять
      было нечем: ручек нет, запрос ещё не подсмотрен. */
   apiNotReady: false,
@@ -309,6 +313,15 @@ function snapshot() {
     elapsedMs: elapsedMs(),
     rate: ratePerMin(),
     etaMs: etaMs(),
+    /*
+     * Круг добора — тоже работа, и интерфейс обязан её показывать. Раньше
+     * снаружи было видно только «processed из total»: на последнем номере
+     * счётчик упирался в 100 %, а вкладки продолжали крутиться, потому что
+     * шёл добор. Выглядело это как поломка.
+     */
+    retryRound: state.retryRound,
+    retryTotal: state.retryIndexes.size,
+    retryLeft: state.retryPending.size,
     workers: workerSnapshot()
   };
 }
@@ -886,6 +899,8 @@ function reportWeight(item) {
     (report.number ? 4 : 0) +
     (report.status ? 3 : 0) +
     (report.warehouseAt ? 2 : 0) +
+    (report.warehouseCell ? 2 : 0) +
+    (report.price ? 2 : 0) +
     (report.lastRows?.length ? 1 : 0)
   );
 }
@@ -902,6 +917,7 @@ function mergeReports(a, b) {
     status: strong.status || weak.status || "",
     warehouseAt: strong.warehouseAt || weak.warehouseAt || "",
     warehouseCell: strong.warehouseCell || weak.warehouseCell || "",
+    lastPlace: strong.lastPlace || weak.lastPlace || "",
     price: strong.price || weak.price || "",
     fairPrice: strong.fairPrice || weak.fairPrice || "",
     columns: strong.columns?.length ? strong.columns : weak.columns || [],
@@ -955,6 +971,7 @@ function hintsMessage() {
     placeId: state.placeId,
     nativeApi: state.nativeApi,
     apiTune: state.apiTune,
+    cardPlaceless: state.cardPlaceless,
     labels: state.changeLabels,
     auditTypes: state.auditTypes
   };
@@ -1397,6 +1414,7 @@ function commit(index, item) {
   /* На круге добора номер приходит второй раз — счётчик не должен расти. */
   const prev = state.results[index];
   if (prev == null) state.processed += 1;
+  state.retryPending.delete(index);
   /* И не должен ухудшаться: если прошлый заход прочитал больше, оставляем
      его, а отчёт собираем из обоих. */
   const best = betterOf(prev, item) || item;
@@ -1412,7 +1430,10 @@ function commit(index, item) {
     total: state.postings.length,
     elapsedMs: elapsedMs(),
     rate: ratePerMin(),
-    etaMs: etaMs()
+    etaMs: etaMs(),
+    retryRound: state.retryRound,
+    retryTotal: state.retryIndexes.size,
+    retryLeft: state.retryPending.size
   });
   persistRuntimeSoon();
 }
@@ -1509,12 +1530,14 @@ function queueRetries() {
 
   state.retryRound += 1;
   state.retryIndexes = new Set(again);
+  state.retryPending = new Set(again);
   state.requeue.push(...again);
   notice(
     "api",
     `Дочитываю ${again.length} номер(ов) — круг ${state.retryRound} из ${MAX_RETRY_ROUNDS}, ` +
       "запросом и страницей."
   );
+  emitState(true);
   return true;
 }
 
@@ -1704,6 +1727,7 @@ async function runScan(payload, postings, warehouse) {
   state.apiNotReady = false;
   state.retryRound = 0;
   state.retryIndexes = new Set();
+  state.retryPending = new Set();
   state.apiFailStreak = 0;
   state.apiSinceCheck = 0;
   state.apiIndexes = new Set();
@@ -1945,6 +1969,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
     if (message.apiTune && !state.apiTune) {
       state.apiTune = message.apiTune;
+      changed = true;
+    }
+    /* Каким запросом отдаётся карточка — общее знание: иначе каждая новая
+       вкладка заново перебирает варианты и теряет цену на первых номерах. */
+    if (typeof message.cardPlaceless === "boolean" && state.cardPlaceless == null) {
+      state.cardPlaceless = message.cardPlaceless;
       changed = true;
     }
     if (Array.isArray(message.auditTypes) && message.auditTypes.length) {
