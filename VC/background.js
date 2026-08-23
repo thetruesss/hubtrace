@@ -127,6 +127,7 @@ const state = {
   lessonDone: false,
   lessonTries: 0,
   lessonBusy: false,
+  autoThreads: false,
   /* Типы изменений, которые показывает открываемая вкладка. Список берётся
      с запроса самой страницы, если он подсмотрен. */
   auditTypes: null,
@@ -1162,6 +1163,7 @@ function blockApi(reason, kind) {
   }
 
   notice("api", text);
+  retuneThreads();
   emitState(true);
 }
 
@@ -1232,6 +1234,7 @@ function calibrate(api, dom, index) {
       state.apiState = "trusted";
       state.apiRetries = 0;
       state.apiBlockKind = "";
+      retuneThreads();
       notice(
         "api",
         "Обход DOM не дочитывает список, сверять не с чем. Доверяю быстрому пути: он берёт итог из ответа сервера."
@@ -1253,6 +1256,7 @@ function calibrate(api, dom, index) {
       state.apiState = "trusted";
       state.apiRetries = 0;
       state.apiBlockKind = "";
+      retuneThreads();
       notice("api", "Быстрый путь включён: история читается напрямую.");
       emitState(true);
     }
@@ -1610,10 +1614,36 @@ function normalizeSettings(raw) {
   return {
     mode,
     threads: Math.max(1, Math.min(MAX_THREADS, Number(raw?.threads) || MODES[mode].threads)),
+    /* auto — пул вкладок подбирается сам: приложение всегда шлёт true,
+       явные настройки (например, из тестов) оставляют ручное число. */
+    auto: raw?.auto === true,
     focusMode: raw?.focusMode !== false,
     useApi: raw?.useApi !== false,
     uncheckCurrentOnly: raw?.uncheckCurrentOnly === true
   };
+}
+
+/*
+ * Сколько вкладок нужно сейчас. Пока работает быстрый путь, вкладки —
+ * лишь площадки для запросов, и четырёх хватает с запасом; ушли на обход
+ * страницы — пул расширяется. Меньше очереди не открываем.
+ */
+function autoThreadCount() {
+  const left = Math.max(1, state.postings.length - state.processed);
+  const apiOk = state.useApi && state.apiState !== "blocked";
+  const base = apiOk ? 4 : 8;
+  return Math.max(1, Math.min(base, left, MAX_THREADS));
+}
+
+function retuneThreads() {
+  if (!state.autoThreads || !state.running) return;
+  const next = autoThreadCount();
+  if (next === state.threads) return;
+  const before = state.threads;
+  state.threads = next;
+  for (const worker of state.workers.values()) worker.retire = worker.id > state.threads;
+  if (next > before && !state.paused) ensureWorkers();
+  emitState();
 }
 
 function validateScan(payload) {
@@ -1643,6 +1673,7 @@ async function runScan(payload, postings, warehouse) {
   state.processed = 0;
   state.mode = settings.mode;
   state.threads = settings.threads;
+  state.autoThreads = settings.auto;
   state.focusMode = settings.focusMode;
   state.useApi = settings.useApi;
   state.uncheckCurrentOnly = settings.uncheckCurrentOnly;
@@ -1657,6 +1688,7 @@ async function runScan(payload, postings, warehouse) {
    * (spotCheckEvery) и защита от одинаковых ответов.
    */
   state.apiState = "trusted";
+  if (state.autoThreads) state.threads = autoThreadCount();
   state.apiNote = "";
   /* Новый прогон — снова пробуем известные ручки: Hub мог и вернуться. */
   state.nativeApi = true;

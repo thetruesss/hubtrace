@@ -28,33 +28,36 @@
       >
     </aside>
 
+    <div class="splash" id="splash">
+      <div class="splash__stage">
+        <div class="splash__radar" aria-hidden="true">
+          <svg class="splash__dish" viewBox="0 0 64 64">
+            <defs>
+              <radialGradient id="splash-dish" cx="50%" cy="42%" r="58%">
+                <stop offset="0%" stop-color="#12356e" />
+                <stop offset="100%" stop-color="#07101f" />
+              </radialGradient>
+            </defs>
+            <circle cx="32" cy="32" r="31" fill="#080e1c" />
+            <circle cx="32" cy="32" r="30" fill="url(#splash-dish)" stroke="#1d4fb8" stroke-width="1.15" />
+            <circle cx="32" cy="32" r="22.5" fill="none" stroke="#4d8dff" stroke-opacity=".42" />
+            <circle cx="32" cy="32" r="15" fill="none" stroke="#7ad0ff" stroke-opacity=".36" />
+            <circle cx="32" cy="32" r="7.5" fill="none" stroke="#9ec4ff" stroke-opacity=".4" />
+            <path d="M32 2 V62 M2 32 H62" stroke="#9ec4ff" stroke-opacity=".22" stroke-width=".7" />
+            <circle cx="32" cy="32" r="2.4" fill="#005BFF" />
+            <circle cx="32" cy="32" r="1.1" fill="#E8EEF8" />
+          </svg>
+          <div class="splash__beam"><span class="splash__arm"></span></div>
+          <span class="splash__blip"><i></i></span>
+        </div>
+        <div class="splash__word">
+          <h1>Hub Trace</h1>
+          <p>Разбор OnTime</p>
+        </div>
+      </div>
+    </div>
+
     <div class="shell">
-      <header class="top glass">
-        <div class="brand">
-          <img class="brand__icon" src="icons/radar.svg" width="34" height="34" alt="" />
-          <div class="brand__text">
-            <h1>Hub Trace</h1>
-            <p>Корректировщик расстановки ответственности OnTime<span class="brand__version" id="app-version"></span></p>
-          </div>
-        </div>
-
-        <nav class="steps glass glass--inset" aria-label="Этапы">
-          <span class="steps__pill" aria-hidden="true"></span>
-          <button class="step is-active" data-step="input" type="button">Номера</button>
-          <button class="step" data-step="scan" type="button">Проверка</button>
-          <button class="step" data-step="result" type="button" disabled>Результат</button>
-        </nav>
-
-        <div class="live glass glass--inset" id="live" hidden>
-          <span class="live__dot" id="live-dot"></span>
-          <span class="live__state" id="live-state">ожидание</span>
-          <span class="live__sep"></span>
-          <span class="live__metric"><em>прошло</em><b id="live-elapsed">0:00</b></span>
-          <span class="live__metric"><em>скорость</em><b id="live-rate">—</b></span>
-          <span class="live__metric"><em>осталось</em><b id="live-eta">—</b></span>
-        </div>
-      </header>
-
       <main>
         <!-- ---------------------------------------------------------- -->
         <section id="screen-input" class="screen">
@@ -92,12 +95,12 @@
                 <p class="hint hint--tight">Как в Hub: целиком или кусок названия.</p>
               </section>
 
-              <section class="panel glass panel--deck">
+              <section class="panel glass panel--runs">
                 <div class="panel__head">
-                  <h2>Режим работы</h2>
-                  <span class="badge glass glass--inset" id="api-badge" hidden>быстрый</span>
+                  <h2>Недавние проверки</h2>
                 </div>
-                <div class="deck" data-deck="input"></div>
+                <ul class="runs" id="runs"></ul>
+                <p class="runs__empty" id="runs-empty">Здесь появятся прошлые проверки — склад и итог одним кликом.</p>
               </section>
 
               <section class="panel glass panel--brief">
@@ -181,10 +184,38 @@
 
             <section class="panel glass panel--live">
               <div class="panel__head">
-                <h2>Управление на ходу</h2>
-                <span class="badge glass glass--inset" id="live-mode-badge">Баланс</span>
+                <h2>Сейчас в работе</h2>
               </div>
-              <div class="deck" data-deck="scan"></div>
+
+                <div class="gauges" id="gauges">
+                  <div class="gauge" data-gauge="rate">
+                    <div class="gauge__head">
+                      <em>скорость</em>
+                      <b id="gauge-rate">—</b>
+                    </div>
+                    <svg class="gauge__chart" viewBox="0 0 100 26" preserveAspectRatio="none" aria-hidden="true">
+                      <polygon class="gauge__fill" id="rate-fill" points=""></polygon>
+                      <polyline class="gauge__line" id="rate-line" points=""></polyline>
+                    </svg>
+                  </div>
+                  <div class="gauge" data-gauge="eta">
+                    <div class="gauge__head">
+                      <em>осталось</em>
+                      <b id="gauge-eta">—</b>
+                    </div>
+                    <svg class="gauge__chart" viewBox="0 0 100 26" preserveAspectRatio="none" aria-hidden="true">
+                      <polygon class="gauge__fill" id="eta-fill" points=""></polygon>
+                      <polyline class="gauge__line" id="eta-line" points=""></polyline>
+                    </svg>
+                  </div>
+                  <div class="gauge gauge--plain" data-gauge="elapsed">
+                    <div class="gauge__head">
+                      <em>прошло</em>
+                      <b id="gauge-elapsed">0:00</b>
+                    </div>
+                    <div class="gauge__ticks" id="gauge-ticks" aria-hidden="true"></div>
+                  </div>
+                </div>
 
               <div class="lanes">
                 <div class="lanes__head">
@@ -324,14 +355,6 @@
                     <option value="">любой</option>
                   </select>
                 </label>
-                <label class="pick">
-                  <span>Путь</span>
-                  <select id="filter-via">
-                    <option value="">любой</option>
-                    <option value="api">запрос</option>
-                    <option value="dom">страница</option>
-                  </select>
-                </label>
                 <button id="filter-reset" class="btn btn--ghost btn--sm" type="button" hidden>Сбросить</button>
               </div>
               <div class="detail__chips" id="detail-chips"></div>
@@ -415,22 +438,17 @@
               <section class="panel glass spanel spanel--table">
                 <div class="spanel__head">
                   <h3>Все ID</h3>
-                  <span class="spanel__sub" id="stats-table-count"></span>
+                  <div class="spanel__tools">
+                    <span class="spanel__sub" id="stats-table-count"></span>
+                    <button id="stats-cols" class="btn btn--ghost btn--sm" type="button">Столбцы</button>
+                    <button id="stats-xlsx" class="btn btn--ghost btn--sm" type="button">В Excel</button>
+                  </div>
                 </div>
+                <div class="colmenu" id="stats-colmenu" hidden></div>
                 <div class="stats__wrap">
                   <table class="stats__table" id="stats-table">
                     <thead>
-                      <tr>
-                        <th data-sort="id">ID</th>
-                        <th data-sort="number">Номер</th>
-                        <th data-sort="verdict">Результат</th>
-                        <th data-sort="blame">Ячейка / склад</th>
-                        <th data-sort="at">Когда</th>
-                        <th data-sort="bucket">Корзинка</th>
-                        <th data-sort="status">Статус</th>
-                        <th data-sort="op">Операция</th>
-                        <th></th>
-                      </tr>
+                      <tr id="stats-head"></tr>
                     </thead>
                     <tbody id="stats-rows"></tbody>
                   </table>
@@ -440,6 +458,13 @@
           </div>
         </section>
       </main>
+
+      <nav class="steps glass" id="steps" aria-label="Этапы">
+        <span class="steps__pill" aria-hidden="true"></span>
+        <button class="step is-active" data-step="input" type="button">Номера</button>
+        <button class="step" data-step="scan" type="button">Проверка</button>
+        <button class="step" data-step="result" type="button" disabled>Результат</button>
+      </nav>
     </div>
 
     <button id="btn-xlsx" class="fab" type="button" hidden>
@@ -458,43 +483,6 @@
 
     <div class="toasts" id="toasts" aria-live="polite"></div>
 
-    <template id="tpl-deck">
-      <div class="deck__block">
-        <div class="deck__row">
-          <span class="deck__label">Режим</span>
-        </div>
-        <div class="seg" data-ctl="mode" role="group" aria-label="Режим работы">
-          <span class="seg__pill" aria-hidden="true"></span>
-          <button class="seg__btn" type="button" data-mode="turbo">Турбо</button>
-          <button class="seg__btn" type="button" data-mode="balance">Баланс</button>
-          <button class="seg__btn" type="button" data-mode="deep">Глубокий</button>
-        </div>
-        <p class="deck__hint" data-mode-hint></p>
-      </div>
-
-      <div class="deck__block">
-        <div class="deck__row">
-          <span class="deck__label">Вкладок сразу</span>
-          <span class="deck__value" data-threads-value>5</span>
-        </div>
-        <input class="range" type="range" min="1" max="12" step="1" data-ctl="threads" aria-label="Вкладок сразу" />
-      </div>
-
-      <div class="deck__block deck__block--switches">
-        <label class="switch">
-          <input type="checkbox" data-ctl="api" />
-          <span class="switch__track"></span>
-          <span class="switch__text">Быстрый путь<em>читать историю запросом, без перерисовки страницы</em></span>
-        </label>
-        <p class="deck__state" data-api-state hidden></p>
-        <div class="probe" id="api-probe" hidden></div>
-        <label class="switch">
-          <input type="checkbox" data-ctl="focus" />
-          <span class="switch__track"></span>
-          <span class="switch__text">Агрессивный режим<em>дёргать вкладки, пока идёт обход DOM</em></span>
-        </label>
-      </div>
-    </template>
 
     <script src="xlsx.js"></script>
     <script src="sheet.js"></script>

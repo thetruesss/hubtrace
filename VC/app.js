@@ -26,9 +26,14 @@ const screens = {
   result: $("screen-result")
 };
 
+/*
+ * Настроек скорости в интерфейсе больше нет: движок сам решает, как
+ * проверять и сколько вкладок открыть. auto — тот самый флаг.
+ */
 const settings = {
   mode: "balance",
-  threads: 5,
+  threads: 4,
+  auto: true,
   focusMode: true,
   useApi: true
 };
@@ -62,8 +67,43 @@ const ui = {
   finished: null,
   reportSaved: false,
   recentWarehouses: [],
-  rates: {}
+  rates: {},
+  runsLog: [],
+  /* Замеры для живых графиков на экране прогона. */
+  rateLog: [],
+  etaLog: []
 };
+
+/* Плавность: там, где страница умеет, перерисовка идёт мягким переходом. */
+const REDUCED_MOTION = window.matchMedia("(prefers-reduced-motion: reduce)");
+
+function smooth(render) {
+  if (typeof document.startViewTransition === "function" && !REDUCED_MOTION.matches) {
+    document.startViewTransition(render);
+    return;
+  }
+  render();
+}
+
+/* Числа не прыгают, а докручиваются. */
+function animateNumber(node, to) {
+  const next = Number(to) || 0;
+  const from = Number(node.dataset.v);
+  node.dataset.v = String(next);
+  if (!Number.isFinite(from) || from === next || REDUCED_MOTION.matches || Math.abs(next - from) > 4000) {
+    node.textContent = String(next);
+    return;
+  }
+  const started = performance.now();
+  const DURATION = 260;
+  const step = (now) => {
+    const k = Math.min(1, (now - started) / DURATION);
+    const eased = 1 - Math.pow(1 - k, 3);
+    node.textContent = String(Math.round(from + (next - from) * eased));
+    if (k < 1 && node.isConnected) requestAnimationFrame(step);
+  };
+  requestAnimationFrame(step);
+}
 
 /* ------------------------------------------------------------------ */
 /* служебное                                                           */
@@ -208,6 +248,7 @@ function parsePostings(raw) {
 
 function mountDecks() {
   const template = $("tpl-deck");
+  if (!template) return;
   for (const mount of $$("[data-deck]")) {
     mount.innerHTML = "";
     mount.appendChild(template.content.cloneNode(true));
@@ -245,9 +286,6 @@ function writeDecks() {
     if (focus) focus.checked = settings.focusMode;
   }
 
-  const badge = $("live-mode-badge");
-  if (badge) badge.textContent = MODE_LABELS[settings.mode] || settings.mode;
-  renderApiBadge();
   renderBrief();
 }
 
@@ -277,27 +315,7 @@ async function setSetting(patch, { pushLive = true } = {}) {
   }
 }
 
-document.addEventListener("click", (event) => {
-  const btn = event.target.closest(".seg__btn[data-mode]");
-  if (!btn) return;
-  const mode = btn.dataset.mode;
-  if (mode === settings.mode) return;
-  void setSetting({ mode, threads: MODE_THREADS[mode] || settings.threads });
-  toast("ok", `Режим: ${MODE_LABELS[mode]}${ui.running ? " — применён на ходу" : ""}`);
-});
 
-document.addEventListener("input", (event) => {
-  const target = event.target;
-  if (target.matches('[data-ctl="threads"]')) {
-    void setSetting({ threads: Number(target.value) });
-  }
-});
-
-document.addEventListener("change", (event) => {
-  const target = event.target;
-  if (target.matches('[data-ctl="api"]')) void setSetting({ useApi: target.checked });
-  else if (target.matches('[data-ctl="focus"]')) void setSetting({ focusMode: target.checked });
-});
 
 /* ------------------------------------------------------------------ */
 /* тосты                                                               */
@@ -462,15 +480,7 @@ function renderFeed(item) {
   const code = document.createElement("code");
   code.textContent = item.posting;
 
-  const via = document.createElement("span");
-  via.className = `feed__via${item.via === "api" ? " feed__via--api" : ""}`;
-  via.textContent = item.via === "api" ? "api" : "dom";
-
-  const count = document.createElement("span");
-  count.className = "feed__count";
-  count.textContent = `${item.loaded || 0}/${item.expected || 0}`;
-
-  li.append(tag, code, via, count);
+  li.append(tag, code);
 
   const feed = $("feed");
   feed.prepend(li);
@@ -478,12 +488,13 @@ function renderFeed(item) {
   $("feed-empty").hidden = true;
 }
 
+/* Никаких внутренних терминов: вкладка либо открывает, либо проверяет. */
 const PHASE_LABELS = {
   idle: "ждёт",
   open: "открывает",
-  history: "история",
-  rows: "строки",
-  api: "запрос"
+  history: "проверяет",
+  rows: "проверяет",
+  api: "проверяет"
 };
 
 function renderLanes() {
@@ -499,7 +510,7 @@ function renderLanes() {
   for (const worker of ui.workers) {
     const li = document.createElement("li");
     const busy = worker.phase && worker.phase !== "idle";
-    li.className = `lane${busy ? " is-busy" : ""}${worker.via === "api" ? " is-api" : worker.via === "dom" ? " is-dom" : ""}`;
+    li.className = `lane${busy ? " is-busy" : ""}`;
 
     const id = document.createElement("span");
     id.className = "lane__id";
@@ -511,7 +522,7 @@ function renderLanes() {
 
     const phase = document.createElement("span");
     phase.className = "lane__phase";
-    phase.textContent = PHASE_LABELS[worker.phase] || worker.phase || "ждёт";
+    phase.textContent = PHASE_LABELS[worker.phase] || "проверяет";
 
     li.append(id, posting, phase);
     list.appendChild(li);
@@ -564,72 +575,11 @@ function scanMode() {
   return "idle";
 }
 
-function renderApiBadge() {
-  const badge = $("api-badge");
-  if (badge) {
-    const on = settings.useApi && ui.apiState === "trusted";
-    badge.hidden = !on;
-    badge.textContent = "быстрый путь";
-  }
-
-  /* Всплывашка живёт пять секунд, а знать состояние надо всё время. */
-  let text = "";
-  let tone = "";
-  if (!settings.useApi) {
-    text = "выключен вручную";
-  } else if (ui.apiState === "trusted") {
-    text = "включён — история читается запросом";
-    tone = "is-on";
-  } else if (ui.apiState === "blocked") {
-    text = ui.apiNote || ui.apiLastReason || "отключён, работаю через DOM";
-    tone = "is-off";
-  } else if (ui.running) {
-    text = "пробую первый запрос";
-  }
-
-  for (const el of $$("[data-api-state]")) {
-    el.hidden = !text;
-    el.textContent = text;
-    el.classList.toggle("is-on", tone === "is-on");
-    el.classList.toggle("is-off", tone === "is-off");
-  }
-
-  renderApiProbe();
-}
-
 /*
- * Что именно ответил Hub на каждый вариант запроса. Пока быстрый путь
- * работает, это лишний шум — показываем только когда он не завёлся или
- * когда пользователь сам раскрыл подробности.
+ * Состояние быстрого пути живёт в ui и в фоне, но на экран не выходит:
+ * человеку не нужно знать, каким путём прочитана история.
  */
-function renderApiProbe() {
-  const box = $("api-probe");
-  if (!box) return;
-
-  const lines = ui.apiProbe || [];
-  const failed = ui.apiState === "blocked" || (settings.useApi && !ui.apiTune && lines.length > 0);
-  const show = lines.length > 0 && failed;
-
-  box.hidden = !show;
-  if (!show) return;
-
-  box.innerHTML = "";
-  const title = document.createElement("b");
-  title.textContent = "Ответы Hub на быстрый путь";
-  box.appendChild(title);
-
-  const list = document.createElement("ul");
-  for (const line of lines.slice(0, 12)) {
-    const item = document.createElement("li");
-    item.textContent = line;
-    list.appendChild(item);
-  }
-  box.appendChild(list);
-
-  const hint = document.createElement("em");
-  hint.textContent = "Пришлите это разработчику — по строкам видно, что именно не принял сервер.";
-  box.appendChild(hint);
-}
+function renderApiBadge() {}
 
 function renderRunState() {
   const mode = scanMode();
@@ -648,13 +598,11 @@ function renderRunState() {
   status.textContent =
     mode === "live" ? "идёт" : mode === "paused" ? "пауза" : mode === "stopping" ? "стоп" : "ожидание";
 
-  const live = $("live");
-  live.hidden = !ui.running && !ui.hasResults;
-  live.classList.toggle("is-live", mode === "live");
-  live.classList.toggle("is-paused", mode === "paused");
-  live.classList.toggle("is-stopping", mode === "stopping");
-  $("live-state").textContent =
-    mode === "live" ? "проверяю" : mode === "paused" ? "на паузе" : mode === "stopping" ? "останавливаю" : "готово";
+  const gauges = $("gauges");
+  if (gauges) {
+    gauges.classList.toggle("is-live", mode === "live");
+    gauges.classList.toggle("is-paused", mode === "paused");
+  }
 
   const pause = $("btn-pause");
   pause.disabled = !ui.running || ui.stopping;
@@ -679,7 +627,7 @@ function renderRunState() {
   if (mode === "idle" && !ui.running) {
     $("scan-current").textContent = hasItems ? "Проверка не идёт" : "Сейчас ничего не проверяется";
   } else if (mode === "paused") {
-    $("scan-current").textContent = "Пауза — текущие вкладки дорабатывают";
+    $("scan-current").textContent = "Пауза — начатое доработается";
   }
 
   updateFormState();
@@ -690,17 +638,86 @@ function tickLive() {
   if (!ui.running) return;
   const drift = ui.paused ? 0 : Date.now() - ui.elapsedAt;
   const elapsed = ui.elapsedMs + drift;
-  $("live-elapsed").textContent = fmtDuration(elapsed);
+  setText($("gauge-elapsed"), fmtDuration(elapsed));
 
   const processed = ui.byIndex.size;
   const rate = elapsed > 1500 && processed ? (processed / elapsed) * 60000 : 0;
-  $("live-rate").textContent = fmtRate(rate);
-
   const left = ui.total - processed;
-  $("live-eta").textContent = ui.paused ? "пауза" : rate && left > 0 ? fmtDuration((left / rate) * 60000) : left <= 0 ? "0:00" : "—";
+  const etaMs = rate && left > 0 ? (left / rate) * 60000 : left <= 0 ? 0 : null;
+
+  setText($("gauge-rate"), rate ? fmtRate(rate) : "—");
+  setText($("gauge-eta"), ui.paused ? "пауза" : etaMs == null ? "—" : fmtDuration(etaMs));
+
+  if (!ui.paused && rate > 0) {
+    pushSample(ui.rateLog, rate);
+    if (etaMs != null) pushSample(ui.etaLog, etaMs);
+    renderGauges();
+  }
+  renderTicks(elapsed);
+}
+
+const SAMPLE_LIMIT = 96;
+
+function pushSample(log, value) {
+  log.push(value);
+  if (log.length > SAMPLE_LIMIT) log.shift();
+}
+
+/* Текст меняем только когда он правда изменился — иначе каждые полсекунды
+   дёргается вся строка и ломается плавность. */
+function setText(node, text) {
+  if (node && node.textContent !== text) node.textContent = text;
 }
 
 window.setInterval(tickLive, 500);
+
+/*
+ * Живые графики на экране прогона. Скорость и остаток времени рисуются
+ * своими линиями: цифра говорит «сколько сейчас», линия — «куда идёт».
+ */
+function drawSpark(lineId, fillId, samples, invert) {
+  const line = $(lineId);
+  const fill = $(fillId);
+  if (!line || !fill) return;
+
+  if (samples.length < 2) {
+    line.setAttribute("points", "");
+    fill.setAttribute("points", "");
+    return;
+  }
+
+  const max = Math.max(...samples) || 1;
+  const min = Math.min(...samples);
+  const span = Math.max(max - min, max * 0.08, 0.0001);
+  const points = samples
+    .map((value, index) => {
+      const x = (index / (samples.length - 1)) * 100;
+      const norm = (value - min) / span;
+      /* Остаток времени падает к нулю — рисуем его тем же «вниз хорошо». */
+      const y = 23 - (invert ? 1 - norm : norm) * 19;
+      return `${x.toFixed(2)},${y.toFixed(2)}`;
+    })
+    .join(" ");
+  line.setAttribute("points", points);
+  fill.setAttribute("points", `0,26 ${points} 100,26`);
+}
+
+function renderGauges() {
+  drawSpark("rate-line", "rate-fill", ui.rateLog, false);
+  drawSpark("eta-line", "eta-fill", ui.etaLog, true);
+}
+
+/* Ровные засечки времени: каждая — минута прогона, последняя дышит. */
+function renderTicks(elapsed) {
+  const host = $("gauge-ticks");
+  if (!host) return;
+  const want = Math.max(1, Math.min(12, Math.floor(elapsed / 60000) + 1));
+  while (host.children.length < want) host.appendChild(document.createElement("i"));
+  while (host.children.length > want) host.lastElementChild.remove();
+  for (let i = 0; i < host.children.length; i += 1) {
+    host.children[i].classList.toggle("is-now", i === host.children.length - 1);
+  }
+}
 
 function resetScanHud(total) {
   ui.byIndex = new Map();
@@ -711,6 +728,9 @@ function resetScanHud(total) {
   ui.workers = [];
   ui.elapsedMs = 0;
   ui.elapsedAt = Date.now();
+  ui.rateLog = [];
+  ui.etaLog = [];
+  renderGauges();
   resetRadarBlips();
   $("feed").innerHTML = "";
   $("scan-current").textContent = "Открываю историю…";
@@ -727,14 +747,11 @@ function renderBrief() {
   const list = $("brief");
   if (!list) return;
   const count = parsePostings(postingsEl.value).length;
-  const rate = Number(ui.rates[settings.mode]) || 0;
+  const rate = Number(ui.rates.auto) || Number(ui.rates[settings.mode]) || 0;
 
-  const rows = [
-    ["", `<b>${count}</b> ${plural(count, ["номер", "номера", "номеров"])} в очереди`],
-    ["", `<b>${settings.threads}</b> ${plural(settings.threads, ["вкладка", "вкладки", "вкладок"])} сразу`],
-    ["", `Режим <b>${MODE_LABELS[settings.mode]}</b>`]
-  ];
+  const rows = [["", `<b>${count}</b> ${plural(count, ["номер", "номера", "номеров"])} в очереди`]];
   if (count && rate) rows.push(["", `Примерно <b>${fmtDuration((count / rate) * 60000)}</b> по прошлым запускам`]);
+  rows.push(["", "Итог придёт списком, детализацией и аналитикой"]);
   rows.push([
     "is-hint",
     "<kbd>Ctrl</kbd><kbd>↵</kbd><i>старт</i><kbd>Space</kbd><i>пауза</i><kbd>Esc</kbd><i>стоп</i>"
@@ -854,7 +871,64 @@ function withLabels(report) {
   });
 }
 
-function renderResults(payload) {
+/* «Недавние проверки»: склад, итог и когда это было — одним кликом назад. */
+function fmtAgo(at) {
+  const diff = Date.now() - Number(at || 0);
+  if (!Number.isFinite(diff) || diff < 0) return "";
+  if (diff < 90000) return "только что";
+  if (diff < 3600000) return `${Math.round(diff / 60000)} мин назад`;
+  if (diff < 86400000) return `${Math.round(diff / 3600000)} ч назад`;
+  if (diff < 172800000) return "вчера";
+  const date = new Date(at);
+  return `${pad(date.getDate())}.${pad(date.getMonth() + 1)}`;
+}
+
+function renderRuns() {
+  const list = $("runs");
+  const empty = $("runs-empty");
+  if (!list) return;
+  list.innerHTML = "";
+  if (empty) empty.hidden = ui.runsLog.length > 0;
+  /* Пустая панель не должна раздуваться во всю колонку. */
+  list.closest(".panel")?.classList.toggle("is-empty", ui.runsLog.length === 0);
+  for (const run of ui.runsLog) {
+    const li = document.createElement("li");
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "run";
+    btn.title = "Подставить этот склад";
+    const name = document.createElement("b");
+    name.textContent = run.warehouse;
+    const meta = document.createElement("em");
+    meta.textContent = `${run.hits} из ${run.total} · ${fmtAgo(run.at)}`;
+    btn.append(name, meta);
+    btn.addEventListener("click", () => {
+      warehouseEl.value = run.warehouse;
+      updateFormState();
+      postingsEl.focus();
+    });
+    li.appendChild(btn);
+    list.appendChild(li);
+  }
+}
+
+function logRun(payload, results) {
+  const warehouse = String(payload?.warehouse || "").trim();
+  if (!warehouse || !results.length) return;
+  const entry = {
+    warehouse,
+    hits: ui.lists.hits.length,
+    total: payload?.inputCount || results.length,
+    at: Date.now()
+  };
+  ui.runsLog = [entry, ...ui.runsLog].slice(0, 6);
+  renderRuns();
+  void storageGet([STORAGE_SETTINGS]).then((saved) =>
+    storageSet({ [STORAGE_SETTINGS]: { ...(saved[STORAGE_SETTINGS] || {}), runsLog: ui.runsLog } })
+  );
+}
+
+function renderResults(payload, fresh) {
   const results = (payload?.results || []).filter(Boolean);
   changeLabels = payload?.changeLabels || {};
   ui.finished = payload || null;
@@ -877,9 +951,6 @@ function renderResults(payload) {
   if (payload?.durationMs && results.length) {
     chips.push(["Скорость", fmtRate((results.length / payload.durationMs) * 60000)]);
   }
-  if (payload?.mode) chips.push(["Режим", MODE_LABELS[payload.mode] || payload.mode]);
-  const apiCount = results.filter((item) => item?.via === "api").length;
-  if (apiCount) chips.push(["Быстрым путём", `${apiCount} из ${results.length}`]);
   if (payload?.stopped) chips.push(["Статус", "остановлено"]);
   for (const [label, value] of chips) {
     const chip = document.createElement("span");
@@ -909,17 +980,18 @@ function renderResults(payload) {
   /* Плашка сверху после финиша должна показывать итог, а не последний
      тик живого таймера. */
   const duration = Number(payload?.durationMs) || 0;
-  $("live-elapsed").textContent = duration ? fmtDuration(duration) : "—";
-  $("live-rate").textContent = fmtRate(duration && results.length ? (results.length / duration) * 60000 : 0);
-  $("live-eta").textContent = payload?.stopped ? "остановлено" : "—";
+  setText($("gauge-elapsed"), duration ? fmtDuration(duration) : "—");
+  setText($("gauge-rate"), fmtRate(duration && results.length ? (results.length / duration) * 60000 : 0));
+  setText($("gauge-eta"), payload?.stopped ? "стоп" : "0:00");
 
   ui.hasResults = true;
+  if (fresh) logRun(payload, results);
   updateFormState();
   setStep("result");
 
-  if (duration > 4000 && results.length >= 5 && payload?.mode && !payload?.stopped) {
+  if (duration > 4000 && results.length >= 5 && !payload?.stopped) {
     const measured = (results.length / duration) * 60000;
-    ui.rates = { ...ui.rates, [payload.mode]: measured };
+    ui.rates = { ...ui.rates, auto: measured };
     void storageGet([STORAGE_SETTINGS]).then((saved) =>
       storageSet({ [STORAGE_SETTINGS]: { ...(saved[STORAGE_SETTINGS] || {}), rates: ui.rates } })
     );
@@ -1396,22 +1468,6 @@ function absorbState(next) {
   ui.elapsedAt = Date.now();
   if (next.total) ui.total = next.total;
 
-  const changed =
-    settings.mode !== next.mode ||
-    settings.threads !== next.threads ||
-    settings.focusMode !== next.focusMode ||
-    settings.useApi !== next.useApi;
-
-  if (changed && next.mode && Date.now() > settingsDirtyUntil) {
-    Object.assign(settings, {
-      mode: next.mode,
-      threads: next.threads,
-      focusMode: next.focusMode,
-      useApi: next.useApi
-    });
-    writeDecks();
-  }
-
   renderLanes();
   renderRunState();
   updateScanHud();
@@ -1439,18 +1495,18 @@ chrome.runtime.onMessage.addListener((message) => {
   }
 
   if (message?.action === "scanNotice") {
-    toast(message.level === "error" ? "error" : message.level === "api" ? "api" : "ok", message.text);
+    /* Служебные сообщения про пути и токены — внутренняя кухня движка. */
     if (message.level === "api") {
       ui.apiNote = message.text;
-      renderApiBadge();
+      return;
     }
+    toast(message.level === "error" ? "error" : "ok", message.text);
     return;
   }
 
   if (message?.action === "scanRevalidate") {
     for (const index of message.indexes || []) dropItem(index);
     updateScanHud();
-    toast("api", `Переснимаю ${message.indexes?.length || 0} номер(ов) обходом страницы`);
     return;
   }
 
@@ -1460,12 +1516,12 @@ chrome.runtime.onMessage.addListener((message) => {
     ui.stopping = false;
     renderRunState();
     if (message.finished?.results?.length) {
-      renderResults(message.finished);
+      renderResults(message.finished, true);
       return;
     }
     void storageGet([STORAGE_FINISHED]).then((saved) => {
       const finished = saved[STORAGE_FINISHED];
-      if (finished?.results?.length) renderResults(finished);
+      if (finished?.results?.length) renderResults(finished, true);
       else {
         $("scan-current").textContent = "Сейчас ничего не проверяется";
         syncSteps();
@@ -1480,12 +1536,12 @@ chrome.runtime.onMessage.addListener((message) => {
 
 function applySavedSettings(saved) {
   if (!saved) return;
-  Object.assign(settings, {
-    mode: MODE_LABELS[saved.mode] ? saved.mode : settings.mode,
-    threads: Math.max(1, Math.min(12, Number(saved.threads) || settings.threads)),
-    focusMode: saved.focusMode !== false,
-    useApi: saved.useApi !== false
-  });
+  /* Режим и вкладки движок выбирает сам — из хранилища их не читаем. */
+  if (Array.isArray(saved.runsLog)) ui.runsLog = saved.runsLog.slice(0, 6);
+  if (Array.isArray(saved.statsCols)) {
+    const cols = saved.statsCols.filter((key) => STATS_COLUMNS[key]);
+    if (cols.length) statsCols = [...new Set(cols)];
+  }
   if (Array.isArray(saved.statsPanels)) {
     const panels = saved.statsPanels
       .filter((panel) => STATS_DIMS[panel?.dim] && STATS_VIZ[panel?.viz])
@@ -1503,13 +1559,11 @@ async function boot() {
   mountDecks();
   ensureKeepAlive();
 
-  const version = chrome.runtime.getManifest?.()?.version;
-  if (version) $("app-version").textContent = `v${version}`;
-
   const saved = await storageGet([STORAGE_SETTINGS, STORAGE_FINISHED]);
   applySavedSettings(saved[STORAGE_SETTINGS]);
   writeDecks();
   renderRecentWarehouses();
+  renderRuns();
   updateCount();
 
   const live = await send({ action: "getScanState" });
@@ -1558,9 +1612,7 @@ let detailQuery = [];
 /* {item, hay} — строку для поиска собираем один раз на результат, а не на
    каждое нажатие клавиши. */
 let detailIndex = [];
-const detailFilters = { verdict: "", bucket: "", status: "", via: "" };
-
-const VIA_LABELS = { api: "запрос", dom: "страница" };
+const detailFilters = { verdict: "", bucket: "", status: "" };
 
 function haystackOf(item) {
   const report = item.report || {};
@@ -1574,7 +1626,6 @@ function haystackOf(item) {
     bucketOf(report.warehouseAt, Date.now()),
     kind === "hit" ? "есть склад" : kind === "miss" ? "нет склада" : "не вышло",
     CHECK_STATUS[item.status] || item.status,
-    VIA_LABELS[item.via] || item.via,
     ...(report.columns || []),
     ...withLabels(report).flat()
   ]
@@ -1623,7 +1674,6 @@ function fillFilterOptions() {
 
 function passesFilters(item) {
   if (detailFilters.verdict && classify(item) !== detailFilters.verdict) return false;
-  if (detailFilters.via && item.via !== detailFilters.via) return false;
   if (detailFilters.status && item.report?.status !== detailFilters.status) return false;
   if (detailFilters.bucket && bucketOf(item.report?.warehouseAt, Date.now()) !== detailFilters.bucket) return false;
   return true;
@@ -1890,7 +1940,6 @@ function mountDetail() {
   bind("filter-verdict", "verdict");
   bind("filter-bucket", "bucket");
   bind("filter-status", "status");
-  bind("filter-via", "via");
 
   $("filter-reset")?.addEventListener("click", () => {
     resetDetailFilters();
@@ -1903,7 +1952,7 @@ function resetDetailFilters() {
   for (const key of Object.keys(detailFilters)) detailFilters[key] = "";
   const search = $("detail-search");
   if (search) search.value = "";
-  for (const id of ["filter-verdict", "filter-bucket", "filter-status", "filter-via"]) {
+  for (const id of ["filter-verdict", "filter-bucket", "filter-status"]) {
     const select = $(id);
     if (select) select.value = "";
   }
@@ -2670,6 +2719,50 @@ function renderDonutChart(host, rows, options) {
 
 /* ---- сами панели ---- */
 
+/*
+ * Заголовок панели — он же выбор измерения: стрелка вниз показывает, что
+ * название можно сменить. Раньше рядом с заголовком стоял селект с тем же
+ * словом, и название дублировалось.
+ */
+function panelTitle(value, entries, onChange) {
+  const box = el("div", "ptitle");
+  const button = el("button", "ptitle__btn");
+  button.type = "button";
+  button.title = "Выбрать, что показывать";
+  const label = entries.find(([key]) => key === value)?.[1] || value;
+  button.appendChild(el("h3", null, label));
+  const caret = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  caret.setAttribute("viewBox", "0 0 12 12");
+  caret.setAttribute("class", "ptitle__caret");
+  caret.setAttribute("aria-hidden", "true");
+  const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+  path.setAttribute("d", "M2.5 4.5 6 8l3.5-3.5");
+  path.setAttribute("fill", "none");
+  path.setAttribute("stroke", "currentColor");
+  path.setAttribute("stroke-width", "1.6");
+  path.setAttribute("stroke-linecap", "round");
+  path.setAttribute("stroke-linejoin", "round");
+  caret.appendChild(path);
+  button.appendChild(caret);
+
+  /* Настоящий select лежит поверх кнопки прозрачным слоем: так работают и
+     клавиатура, и родное меню системы, а рисуем мы своё. */
+  const select = document.createElement("select");
+  select.className = "ptitle__select";
+  select.setAttribute("aria-label", "Что показывать");
+  for (const [key, title] of entries) {
+    const option = document.createElement("option");
+    option.value = key;
+    option.textContent = title;
+    select.appendChild(option);
+  }
+  select.value = value;
+  select.addEventListener("change", () => onChange(select.value));
+
+  box.append(button, select);
+  return box;
+}
+
 function panelSelect(value, entries, onChange) {
   const pick = el("label", "pick pick--panel");
   const select = document.createElement("select");
@@ -2703,13 +2796,12 @@ function renderStatsPanel(panel, index) {
   section.dataset.viz = panel.viz;
 
   const head = el("div", "spanel__head");
-  head.appendChild(el("h3", null, dim.title));
-  const tools = el("div", "spanel__tools");
-  tools.appendChild(
-    panelSelect(panel.dim, Object.entries(STATS_DIMS).map(([key, entry]) => [key, entry.title]), (next) =>
+  head.appendChild(
+    panelTitle(panel.dim, Object.entries(STATS_DIMS).map(([key, entry]) => [key, entry.title]), (next) =>
       updatePanel(index, { dim: next })
     )
   );
+  const tools = el("div", "spanel__tools");
   tools.appendChild(
     panelSelect(panel.viz, Object.entries(STATS_VIZ), (next) => updatePanel(index, { viz: next }))
   );
@@ -2810,32 +2902,179 @@ function renderStatsPanels() {
 
 /* ---- таблица ---- */
 
-const STATS_SORT_VALUES = {
-  id: (entry) => entry.item.posting,
-  number: (entry) => entry.item.report?.number || "",
-  verdict: (entry) => {
-    const kind = classify(entry.item);
-    return kind === "hit" ? 0 : kind === "miss" ? 1 : 2;
+/*
+ * Столбцы таблицы — набор, который собирает пользователь: какие показать и
+ * в каком порядке. Каждый умеет три вещи: значение для сортировки, текст
+ * для выгрузки и разметку для страницы. Excel забирает ровно то же, что
+ * видно на экране, — те же столбцы, тот же порядок, те же фильтры.
+ */
+const STATS_COLUMNS = {
+  id: {
+    title: "ID",
+    width: 26,
+    sort: (entry) => entry.item.posting,
+    text: (entry) => entry.item.posting,
+    link: (entry) => hubUrl(entry.item.posting),
+    cell: (entry, td) => {
+      td.className = "t-id";
+      td.appendChild(el("span", "t-id__code", entry.item.posting));
+      const open = el("button", "t-open", "детализация");
+      open.type = "button";
+      open.title = "Открыть этот ID в детализации";
+      open.dataset.posting = entry.item.posting;
+      td.appendChild(open);
+    }
   },
-  blame: (entry) => entry.blame.value || "",
-  at: (entry) => {
-    const date = parseHubDate(entry.blame.at);
-    return date ? date.getTime() : 0;
+  number: {
+    title: "Номер",
+    width: 22,
+    sort: (entry) => entry.item.report?.number || "",
+    text: (entry) => entry.item.report?.number || "",
+    cell: (entry, td) => {
+      td.className = "t-number";
+      td.textContent = entry.item.report?.number || "—";
+    }
   },
-  bucket: (entry) => {
-    const at = BUCKET_ORDER.indexOf(entry.bucket);
-    return at < 0 ? BUCKET_ORDER.length : at;
+  verdict: {
+    title: "Результат",
+    width: 14,
+    sort: (entry) => {
+      const kind = classify(entry.item);
+      return kind === "hit" ? 0 : kind === "miss" ? 1 : 2;
+    },
+    text: (entry) => verdictOf(entry.item).text,
+    cell: (entry, td) => {
+      const verdict = verdictOf(entry.item);
+      td.appendChild(el("span", `card__verdict ${verdict.className}`, verdict.text));
+    }
   },
-  status: (entry) => entry.item.report?.status || "",
-  op: (entry) => entry.op || ""
+  blame: {
+    title: "Ячейка / склад",
+    width: 34,
+    sort: (entry) => entry.blame.value || "",
+    text: (entry) => entry.blame.value || "",
+    cell: (entry, td) => {
+      if (entry.blame.kind === "none") {
+        td.appendChild(el("span", "t-none", "—"));
+        return;
+      }
+      if (!entry.blame.value) {
+        td.appendChild(el("span", "t-none", `${BLAME_TAGS[entry.blame.kind]} не прочиталась`));
+        return;
+      }
+      const chip = el("button", `t-blame t-blame--${entry.blame.kind}`);
+      chip.type = "button";
+      chip.title = "Показать все ID с этим значением";
+      chip.dataset.kind = entry.blame.kind;
+      chip.dataset.value = entry.blame.value;
+      chip.appendChild(el("i", null, BLAME_TAGS[entry.blame.kind]));
+      chip.appendChild(el("span", null, entry.blame.value));
+      td.appendChild(chip);
+    }
+  },
+  kind: {
+    title: "Что это",
+    width: 14,
+    sort: (entry) => BLAME_TAGS[entry.blame.kind] || "",
+    text: (entry) => BLAME_TAGS[entry.blame.kind] || "",
+    cell: (entry, td) => {
+      td.textContent = BLAME_TAGS[entry.blame.kind] || "—";
+    }
+  },
+  at: {
+    title: "Когда",
+    width: 22,
+    sort: (entry) => {
+      const date = parseHubDate(entry.blame.at);
+      return date ? date.getTime() : 0;
+    },
+    text: (entry) => entry.blame.at || "",
+    cell: (entry, td) => {
+      td.className = "t-when";
+      td.textContent = entry.blame.at || "—";
+    }
+  },
+  bucket: {
+    title: "Корзинка",
+    width: 13,
+    sort: (entry) => {
+      const at = BUCKET_ORDER.indexOf(entry.bucket);
+      return at < 0 ? BUCKET_ORDER.length : at;
+    },
+    text: (entry) => entry.bucket || "",
+    cell: (entry, td) => {
+      td.textContent = entry.bucket || "—";
+    }
+  },
+  status: {
+    title: "Статус",
+    width: 26,
+    sort: (entry) => entry.item.report?.status || "",
+    text: (entry) => entry.item.report?.status || "",
+    cell: (entry, td) => {
+      td.textContent = entry.item.report?.status || "—";
+    }
+  },
+  op: {
+    title: "Операция",
+    width: 20,
+    sort: (entry) => entry.op || "",
+    text: (entry) => entry.op || "",
+    cell: (entry, td) => {
+      td.textContent = entry.op || "—";
+    }
+  },
+  user: {
+    title: "Кто делал",
+    width: 32,
+    sort: (entry) => entry.user || "",
+    text: (entry) => entry.user || "",
+    cell: (entry, td) => {
+      td.textContent = entry.user || "—";
+    }
+  },
+  hour: {
+    title: "Час",
+    width: 10,
+    sort: (entry) => Number(String(entry.hour).slice(0, 2)) || 0,
+    text: (entry) => entry.hour || "",
+    cell: (entry, td) => {
+      td.className = "t-when";
+      td.textContent = entry.hour || "—";
+    }
+  },
+  hub: {
+    title: "Hub",
+    width: 12,
+    sort: (entry) => entry.item.posting,
+    text: (entry) => hubUrl(entry.item.posting),
+    link: (entry) => hubUrl(entry.item.posting),
+    cell: (entry, td) => {
+      td.className = "t-hub";
+      const link = el("a", null, "Hub ↗");
+      link.href = hubUrl(entry.item.posting);
+      link.target = "_blank";
+      link.rel = "noopener noreferrer";
+      td.appendChild(link);
+    }
+  }
 };
 
+const DEFAULT_STATS_COLS = ["id", "number", "verdict", "blame", "at", "bucket", "status", "op", "hub"];
+let statsCols = DEFAULT_STATS_COLS.slice();
+
+function persistStatsCols() {
+  void storageGet([STORAGE_SETTINGS]).then((saved) =>
+    storageSet({ [STORAGE_SETTINGS]: { ...(saved[STORAGE_SETTINGS] || {}), statsCols } })
+  );
+}
+
 function sortStats(entries) {
-  const value = STATS_SORT_VALUES[statsSort.key] || STATS_SORT_VALUES.at;
+  const column = STATS_COLUMNS[statsSort.key] || STATS_COLUMNS.at;
   const dir = statsSort.dir;
   return [...entries].sort((a, b) => {
-    const left = value(a);
-    const right = value(b);
+    const left = column.sort(a);
+    const right = column.sort(b);
     const cmp =
       typeof left === "number" && typeof right === "number"
         ? left - right
@@ -2846,86 +3085,175 @@ function sortStats(entries) {
 
 const STATS_ROW_LIMIT = 500;
 
+/* ---- шапка: заголовки, сортировка, перетаскивание ---- */
+
+let dragCol = "";
+
+function renderStatsHead() {
+  const head = $("stats-head");
+  if (!head) return;
+  head.innerHTML = "";
+
+  statsCols.forEach((key) => {
+    const column = STATS_COLUMNS[key];
+    if (!column) return;
+    const th = document.createElement("th");
+    th.dataset.sort = key;
+    th.draggable = true;
+    th.textContent = column.title;
+    th.title = "Клик — сортировка, перетаскиванием — порядок столбцов";
+    th.classList.toggle("is-sorted", key === statsSort.key);
+    th.classList.toggle("is-desc", key === statsSort.key && statsSort.dir < 0);
+
+    th.addEventListener("dragstart", (event) => {
+      dragCol = key;
+      th.classList.add("is-dragging");
+      event.dataTransfer.effectAllowed = "move";
+      /* Firefox не начинает перетаскивание без данных. */
+      event.dataTransfer.setData("text/plain", key);
+    });
+    th.addEventListener("dragend", () => {
+      dragCol = "";
+      for (const cell of $$("#stats-head th")) cell.classList.remove("is-dragging", "is-over");
+    });
+    th.addEventListener("dragover", (event) => {
+      if (!dragCol || dragCol === key) return;
+      event.preventDefault();
+      th.classList.add("is-over");
+    });
+    th.addEventListener("dragleave", () => th.classList.remove("is-over"));
+    th.addEventListener("drop", (event) => {
+      event.preventDefault();
+      th.classList.remove("is-over");
+      if (!dragCol || dragCol === key) return;
+      const from = statsCols.indexOf(dragCol);
+      const to = statsCols.indexOf(key);
+      if (from < 0 || to < 0) return;
+      statsCols.splice(to, 0, ...statsCols.splice(from, 1));
+      persistStatsCols();
+      smooth(renderStats);
+    });
+
+    head.appendChild(th);
+  });
+}
+
+/* ---- меню столбцов ---- */
+
+function renderColMenu() {
+  const box = $("stats-colmenu");
+  if (!box) return;
+  box.innerHTML = "";
+
+  const hint = el("p", "colmenu__hint", "Отметьте столбцы; порядок меняется перетаскиванием заголовков.");
+  box.appendChild(hint);
+
+  const list = el("div", "colmenu__list");
+  for (const [key, column] of Object.entries(STATS_COLUMNS)) {
+    const on = statsCols.includes(key);
+    const row = el("label", `colmenu__row${on ? " is-on" : ""}`);
+    const box2 = document.createElement("input");
+    box2.type = "checkbox";
+    box2.checked = on;
+    box2.addEventListener("change", () => {
+      if (box2.checked) {
+        if (!statsCols.includes(key)) statsCols.push(key);
+      } else {
+        if (statsCols.length <= 1) {
+          box2.checked = true;
+          return;
+        }
+        statsCols = statsCols.filter((name) => name !== key);
+        if (statsSort.key === key) statsSort = { key: statsCols[0], dir: 1 };
+      }
+      persistStatsCols();
+      smooth(renderStats);
+    });
+    row.append(box2, el("span", null, column.title));
+    list.appendChild(row);
+  }
+  box.appendChild(list);
+
+  const reset = el("button", "btn btn--ghost btn--sm", "Стандартные столбцы");
+  reset.type = "button";
+  reset.addEventListener("click", () => {
+    statsCols = DEFAULT_STATS_COLS.slice();
+    statsSort = { key: "at", dir: -1 };
+    persistStatsCols();
+    smooth(renderStats);
+  });
+  box.appendChild(reset);
+}
+
 function renderStatsTable(shown) {
   const body = $("stats-rows");
   if (!body) return;
   body.innerHTML = "";
 
-  for (const th of $$("#stats-table th[data-sort]")) {
-    th.classList.toggle("is-sorted", th.dataset.sort === statsSort.key);
-    th.classList.toggle("is-desc", th.dataset.sort === statsSort.key && statsSort.dir < 0);
-  }
+  renderStatsHead();
 
   const rows = sortStats(shown);
   const count = $("stats-table-count");
   if (count) {
     count.textContent =
-      rows.length > STATS_ROW_LIMIT ? `показаны первые ${STATS_ROW_LIMIT} из ${rows.length}` : `${rows.length} строк`;
+      rows.length > STATS_ROW_LIMIT ? `первые ${STATS_ROW_LIMIT} из ${rows.length}` : `${rows.length} строк`;
   }
 
   if (!rows.length) {
     const tr = document.createElement("tr");
     const td = el("td", "t-none", "Под фильтры ничего не попало — смягчите их или очистите поиск.");
-    td.colSpan = 9;
+    td.colSpan = Math.max(1, statsCols.length);
     tr.appendChild(td);
     body.appendChild(tr);
     return;
   }
 
   for (const entry of rows.slice(0, STATS_ROW_LIMIT)) {
-    const item = entry.item;
-    const report = item.report || {};
     const tr = document.createElement("tr");
-
-    /* Кнопка перехода в детализацию живёт прямо около ID. */
-    const idCell = el("td", "t-id");
-    idCell.appendChild(el("span", "t-id__code", item.posting));
-    const open = el("button", "t-open", "детализация");
-    open.type = "button";
-    open.title = "Открыть этот ID в детализации";
-    open.dataset.posting = item.posting;
-    idCell.appendChild(open);
-    tr.appendChild(idCell);
-
-    tr.appendChild(el("td", "t-number", report.number || "—"));
-
-    const verdictCell = document.createElement("td");
-    const verdict = verdictOf(item);
-    verdictCell.appendChild(el("span", `card__verdict ${verdict.className}`, verdict.text));
-    tr.appendChild(verdictCell);
-
-    const blameCell = document.createElement("td");
-    if (entry.blame.kind === "none") {
-      blameCell.appendChild(el("span", "t-none", "—"));
-    } else if (!entry.blame.value) {
-      blameCell.appendChild(el("span", "t-none", `${BLAME_TAGS[entry.blame.kind]} не прочиталась`));
-    } else {
-      const chip = el("button", `t-blame t-blame--${entry.blame.kind}`);
-      chip.type = "button";
-      chip.title = "Показать все ID с этим значением";
-      chip.dataset.kind = entry.blame.kind;
-      chip.dataset.value = entry.blame.value;
-      chip.appendChild(el("i", null, BLAME_TAGS[entry.blame.kind]));
-      chip.appendChild(el("span", null, entry.blame.value));
-      blameCell.appendChild(chip);
+    for (const key of statsCols) {
+      const column = STATS_COLUMNS[key];
+      if (!column) continue;
+      const td = document.createElement("td");
+      column.cell(entry, td);
+      tr.appendChild(td);
     }
-    tr.appendChild(blameCell);
-
-    tr.appendChild(el("td", "t-when", entry.blame.at || "—"));
-    tr.appendChild(el("td", null, entry.bucket || "—"));
-    tr.appendChild(el("td", null, report.status || "—"));
-    tr.appendChild(el("td", null, entry.op || "—"));
-
-    const hubCell = el("td", "t-hub");
-    const link = el("a", null, "Hub ↗");
-    link.href = hubUrl(item.posting);
-    link.target = "_blank";
-    link.rel = "noopener noreferrer";
-    hubCell.appendChild(link);
-    tr.appendChild(hubCell);
-
     body.appendChild(tr);
   }
+}
+
+/* ---- выгрузка ровно того, что на экране ---- */
+
+function statsRowsForExport() {
+  return sortStats(statsIndex.filter((entry) => passesStats(entry)));
+}
+
+function buildStatsXlsx() {
+  const cols = statsCols.filter((key) => STATS_COLUMNS[key]);
+  const rows = [cols.map((key) => ({ text: STATS_COLUMNS[key].title, style: xlsxStyles.STYLE_HEAD }))];
+
+  for (const entry of statsRowsForExport()) {
+    rows.push(
+      cols.map((key) => {
+        const column = STATS_COLUMNS[key];
+        const cell = { text: column.text(entry) };
+        if (column.link) cell.link = column.link(entry);
+        return cell;
+      })
+    );
+  }
+
+  return buildXlsxBlob({
+    sheets: [
+      {
+        name: "Аналитика",
+        columns: cols.map((key) => ({ title: STATS_COLUMNS[key].title, width: STATS_COLUMNS[key].width })),
+        rows,
+        headRow: 0,
+        freeze: 1,
+        autoFilter: true
+      }
+    ]
+  });
 }
 
 /* ---- фишки активных фильтров ---- */
@@ -3027,6 +3355,29 @@ function mountStats() {
     renderStats();
   });
 
+  $("stats-cols")?.addEventListener("click", () => {
+    const box = $("stats-colmenu");
+    const btn = $("stats-cols");
+    if (!box) return;
+    const open = box.hidden;
+    if (open) renderColMenu();
+    box.hidden = false;
+    /* Кадр на раскладку, потом класс — иначе перехода не будет. */
+    requestAnimationFrame(() => box.classList.toggle("is-open", open));
+    btn?.classList.toggle("is-on", open);
+    if (!open) window.setTimeout(() => { box.hidden = true; }, 240);
+  });
+
+  $("stats-xlsx")?.addEventListener("click", (event) => {
+    if (!statsIndex.length) return;
+    try {
+      saveBlob(buildStatsXlsx(), exportName("xlsx"));
+      flashCopied(event.currentTarget);
+    } catch (error) {
+      toast("error", `Не получилось собрать файл: ${String(error?.message || error)}`);
+    }
+  });
+
   $("stats-add")?.addEventListener("click", () => {
     if (statsPanels.length >= MAX_PANELS) return;
     /* Новая панель — первое измерение, которого ещё нет на экране. */
@@ -3061,6 +3412,8 @@ function mountStats() {
         const key = th.dataset.sort;
         if (statsSort.key === key) statsSort.dir = -statsSort.dir;
         else statsSort = { key, dir: key === "at" ? -1 : 1 };
+        /* Плавность здесь даёт сама таблица: строки въезжают своей
+           анимацией. Переход всей страницы тут только тормозил бы отклик. */
         renderStats();
       }
     });
@@ -3133,5 +3486,31 @@ function mountCredit() {
 }
 
 mountCredit();
+
+/* ------------------------------------------------------------------ */
+/* приветствие                                                         */
+/*                                                                     */
+/* Один оборот луча, одна найденная отметка, подпись — и приложение.   */
+/* Показываем раз за открытие вкладки и никогда не задерживаем работу: */
+/* приветствие живёт поверх, а загрузка идёт своим чередом.            */
+/* ------------------------------------------------------------------ */
+
+const SPLASH_MS = 2600;
+
+function playSplash() {
+  const splash = $("splash");
+  if (!splash) return;
+  if (REDUCED_MOTION.matches) {
+    splash.remove();
+    return;
+  }
+  splash.classList.add("is-on");
+  window.setTimeout(() => {
+    splash.classList.add("is-out");
+    window.setTimeout(() => splash.remove(), 700);
+  }, SPLASH_MS);
+}
+
+playSplash();
 
 void boot();
