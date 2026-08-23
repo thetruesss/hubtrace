@@ -1,20 +1,4 @@
-/*
- * Hub Trace · сканер страницы (ISOLATED world, document_start).
- *
- * Два пути получения истории:
- *   1) api  — повтор пойманного пробником запроса. Один round-trip, без
- *             рендера страницы. Именно он даёт основной прирост скорости.
- *   2) dom  — обход таблицы. Работает всегда, используется как страховка
- *             и как эталон при калибровке быстрого пути.
- *
- * Ключевые отличия DOM-обхода от прошлой версии:
- *   · textContent вместо innerText — innerText синхронно считает лейаут,
- *     на тысячах строк это были секунды чистого reflow;
- *   · инкрементальный сбор строк вместо полного пересчёта на каждом проходе
- *     (было O(n²) по тексту таблицы);
- *   · прыжок сразу в конец списка вместо шагов по 0.8 экрана;
- *   · ожидание по MutationObserver вместо фиксированных sleep(90).
- */
+// Сканер страницы. Два пути: повтор запроса истории и обход таблицы в DOM как страховка.
 (() => {
   if (globalThis.__hubTraceScannerReady) return;
   globalThis.__hubTraceScannerReady = true;
@@ -33,15 +17,11 @@
   let abortFlag = false;
   let currentPhase = "idle";
 
-  /* ------------------------------------------------------------------ */
-  /* мелочи                                                              */
-  /* ------------------------------------------------------------------ */
-
   function norm(value) {
     return String(value || "").replace(/\s+/g, " ").trim();
   }
 
-  /* textContent, а не innerText: innerText форсирует reflow. */
+  // textContent, а не innerText: innerText форсирует reflow
   function textOf(el) {
     return norm(el ? el.textContent : "");
   }
@@ -74,10 +54,6 @@
     currentPhase = phase;
     void toBackground({ action: "ht:phase", phase, detail: detail || "", posting: itemIdFromHref(location.href) });
   }
-
-  /* ------------------------------------------------------------------ */
-  /* канал с пробником (MAIN world)                                      */
-  /* ------------------------------------------------------------------ */
 
   const replayWaiters = new Map();
   let ticketSeq = 0;
@@ -117,25 +93,7 @@
     }
   });
 
-  /*
-   * Раньше здесь стояло score <= recipeScore -> выходим. Повторный захват
-   * того же эндпоинта даёт ровно такой же score, поэтому свежий рецепт
-   * всегда отвергался, а вместе с ним отвергался и свежий токен. Через
-   * какое-то время сервер начинал отвечать 401, и починить это мог только
-   * перезапуск расширения — там рецепта ещё нет и первый захват проходит.
-   *
-   * Теперь при равном качестве побеждает более свежий рецепт.
-   */
-  /*
-   * Подставить номер можно только туда, где он есть.
-   *
-   * Рецепт — это чужой запрос, в котором мы меняем ID предмета на свой.
-   * Если ID не встречается ни в адресе, ни в теле (страница могла
-   * передать его заголовком или вообще держать в сессии), подстановка
-   * молча не сработает — и на все номера приедет одна и та же история.
-   * Это худший из возможных исходов: данные перепутаны, а внешне всё
-   * хорошо. Такой рецепт не берём вовсе.
-   */
+  // Без ID предмета в рецепте подставлять номер некуда — на все номера приедет одна история.
   function carriesId(recipe) {
     const id = String(recipe?.itemId || "");
     if (!id) return false;
@@ -178,17 +136,8 @@
     if (share) void toBackground({ action: "ht:cardRecipe", recipe: next });
   }
 
-  /* ------------------------------------------------------------------ */
-  /* данные для отчёта                                                   */
-  /* ------------------------------------------------------------------ */
-
   const POSTING_NUMBER_RE = /\d{6,}-\d{2,}-\d{1,3}/;
   const ROW_DATE_RE = /\d{2}\.\d{2}\.\d{4}[,\s]+\d{2}:\d{2}(?::\d{2})?/;
-  /*
-   * Метки, которыми Hub подписывает значения внутри одной ячейки таблицы.
-   * Список нужен только для текстового отката: в разметке метка лежит в
-   * отдельном span (см. HUB.changeLabel) и читается точно.
-   */
   const ROW_LABELS = [
     "Лог. контейнер",
     "Ячейка",
@@ -241,9 +190,7 @@
   function askProbeForRecipe() {
     try {
       window.postMessage({ channel: CHANNEL, type: "askRecipe" }, ORIGIN);
-    } catch (_err) {
-      /* ignore */
-    }
+    } catch {}
   }
 
   function replay(request, timeoutMs) {
@@ -269,57 +216,14 @@
     });
   }
 
-  /* ------------------------------------------------------------------ */
-  /* известные ручки Hub                                                 */
-  /* ------------------------------------------------------------------ */
-
-  /*
-   * Раньше быстрый путь целиком строился на подсмотренном запросе: пока
-   * страница сама не сходит за историей, повторять было нечего — первые
-   * номера всегда шли обходом DOM, а после смены вёрстки или протухания
-   * заголовков всё сваливалось туда же.
-   *
-   * Обе ручки известны и стабильны, ID отправления подставляется прямо в
-   * путь, авторизация — по cookie сессии Hub:
-   *
-   *   POST /p-api/scms-article-gateway/v1/articles/{id}/auditV3
-   *        {filters:{…}, pagination:{pageNumber, pageSize}}
-   *        → {totalCount, records:[…]}
-   *
-   *   POST /p-api/scms-article-gateway/v3/boxes/getBoxesFromTopologyAndContent
-   *        {placeId, boxes:[{boxId, boxSource:"Lozon"}]}
-   *        → {items:[{postingInfo:{postingName, stateName, …}, cellInfo:{…}}]}
-   *
-   * Подсмотренный запрос остаётся запасным вариантом: если Hub переедет на
-   * другой путь, рецепт всё ещё сработает.
-   */
   const AUDIT_PATH = "/p-api/scms-article-gateway/v1/articles/{id}/auditV3";
 
-  /*
-   * Фильтр «Перемещений».
-   *
-   * Вкладка «История» и её фишка «Перемещения» ходят в одну и ту же ручку —
-   * различаются только списком типов в теле запроса. С пустым списком
-   * приходит вся история: смены статуса, тайм-слоты, свойства. Именно
-   * поэтому в отчёт и детализацию уезжали строки, которых на «Перемещениях»
-   * не видно.
-   *
-   * Список снят с запроса самой страницы. Если Hub его поменяет, мы это
-   * увидим: подсмотренный запрос несёт актуальный список, и он побеждает.
-   */
+  // Пустой список типов = вся история, поэтому «Перемещения» фильтруем телом запроса.
   const TRANSITION_TYPES = ["InnerWarehouse", "OnWarehouse", "InTripContainer", "InContainer", "OnCell"];
   let auditTypes = TRANSITION_TYPES.slice();
-  /* Хоть одна запись за прогон совпала со списком типов — значит он живой. */
   let typesConfirmed = false;
 
-  /*
-   * Рецепт снимается с любой открытой вкладки Hub — в том числе со
-   * «Свойств». Её список типов (Flow, USK, CustomsState…) не пересекается
-   * с перемещениями, и принять его значило бы запрашивать чужой срез, а
-   * потом выбросить всё, что пришло: ровно так из отчёта и пропадали
-   * строки. Принимаем список, только если в нём есть хоть одно
-   * перемещение.
-   */
+  // Рецепт мог сняться со «Свойств»: их типы с перемещениями не пересекаются, и мы запросим чужой срез.
   function adoptAuditTypes(next) {
     if (!Array.isArray(next) || !next.length) return false;
     const clean = next.map((value) => String(value || "")).filter(Boolean);
@@ -330,8 +234,6 @@
     return true;
   }
 
-  /* Список типов из тела подсмотренного запроса — он и есть текущий фильтр
-     той вкладки, которую мы открываем. */
   function typesFromBody(body) {
     if (typeof body !== "string" || !body.includes("changeType")) return null;
     try {
@@ -344,18 +246,7 @@
   }
   const BOXES_PATH = "/p-api/scms-article-gateway/v3/boxes/getBoxesFromTopologyAndContent";
 
-  /*
-   * Заголовки x-o3-app-name / x-o3-app-version Hub шлёт со всеми своими
-   * запросами, и без них сервер может не ответить. Их значения лежат прямо
-   * в странице:
-   *
-   *   window.__FE_VARS__.envs.config.O3_SERVICE_NAME → "scms"
-   *   window.__FE_VARS__.envs.config.GIT_BRANCH      → "release/LSACC-2105"
-   *
-   * Раньше версию ждали от перехваченного запроса Hub — и вкладка, которая
-   * поднялась раньше первого такого запроса, уходила в отказ по заголовку,
-   * а номер сваливался на обход страницы.
-   */
+  // Без x-o3-app-name/version сервер может не ответить; значения лежат в __FE_VARS__ страницы.
   let appVersion = "";
   let appName = "scms";
   let varsRead = false;
@@ -374,7 +265,6 @@
       return;
     }
   }
-  /* Склад оператора: нужен только карточке предмета. */
   let placeId = "";
 
   function rememberHints(source) {
@@ -401,35 +291,20 @@
     try {
       const value = new URLSearchParams(location.search).get("warehouse");
       if (value && /^\d{6,}$/.test(value)) placeId = value;
-    } catch (_err) {
-      /* ignore */
-    }
+    } catch {}
   }
 
-  /*
-   * Подобранный под сервер вариант запроса.
-   *
-   * Ровно один ответ Hub у нас есть — из него видно и путь, и тело. Но
-   * сервер может не принять всё, что мы из этого вывели: страницу в 500
-   * строк, отсутствие заголовка версии, нумерацию страниц с единицы. На
-   * первом же запросе перебираем варианты и запоминаем тот, что прошёл,
-   * — дальше ходим только им.
-   *
-   * Без этого одна такая мелочь выключала быстрый путь целиком: три
-   * неудачных ответа подряд, и весь прогон уходил на обход страницы.
-   */
+  // Сервер может не принять страницу в 500 строк, нумерацию с единицы или запрос без версии —
+  // перебираем варианты на первом запросе и дальше ходим тем, что прошёл.
   const PAGE_SIZES = [500, 100, 20];
   const HEADER_SETS = ["full", "noVersion", "plain"];
 
   let apiTune = null;
-  /* Что именно ответил сервер на каждый вариант — это уходит в интерфейс,
-     иначе «быстрый путь недоступен» ничего не объясняет. */
   let apiProbeLog = [];
 
   function variants() {
     const out = [];
     for (const headers of HEADER_SETS) {
-      /* Без заголовков версии проверяем только самый безопасный размер. */
       const sizes = headers === "full" ? PAGE_SIZES : [20];
       for (const pageSize of sizes) {
         for (const base of [1, 0]) out.push({ pageSize, headers, base });
@@ -438,12 +313,7 @@
     return out;
   }
 
-  /*
-   * Версию кладём в сам вариант, а не берём из локальной переменной.
-   * Вкладка, поднявшаяся позже, могла ещё не увидеть ни одного запроса Hub
-   * — и, работая по общему варианту «с заголовками», уходила в 403 без
-   * версии, а номер сваливался на обход страницы.
-   */
+  // версию кладём в сам вариант: свежая вкладка могла не видеть ни одного запроса Hub
   function apiHeaders(tune) {
     const kind = typeof tune === "string" ? tune : tune?.headers;
     const version = (typeof tune === "object" && tune?.version) || appVersion;
@@ -479,8 +349,6 @@
     return `страница ${tune.pageSize}, заголовки ${tune.headers}, нумерация с ${tune.base}`;
   }
 
-  /* Короткая выжимка ответа: по ней видно, ругается сервер на тело, на
-     заголовки или отдаёт html вместо json. */
   function snippet(response) {
     if (!response) return "нет ответа";
     if (response.error) return `сеть: ${response.error}`;
@@ -500,16 +368,11 @@
     return json;
   }
 
-  /*
-   * Подбор варианта. Успехом считаем не просто 200, а ответ со списком:
-   * страница-заглушка и «ок, но пусто при непустом итоге» тоже мимо.
-   */
-  /* Одна попытка подбора не должна съесть весь бюджет номера. */
+  // успех — не просто 200, а ответ со списком
   const PROBE_ATTEMPT_MS = 4000;
 
   async function tuneApi(posting, budgetMs) {
     if (apiTune) return { tune: apiTune, json: null };
-    /* Версия и имя сервиса есть в самой странице — читаем до перебора. */
     readBuildVars();
     apiProbeLog = [];
     const until = Date.now() + Math.max(4000, budgetMs);
@@ -526,11 +389,11 @@
 
       if (!json) {
         apiProbeLog.push(`${describe(tune)} → ${snippet(response)}`);
-        /* 401 не про вариант запроса, а про сессию: перебор не поможет. */
+        // 401 не про вариант запроса, а про сессию
         if (response && (response.status === 401 || response.status === 403)) return null;
         continue;
       }
-      /* Пустая страница при непустом итоге — нумерация не та. */
+      // пустая страница при непустом итоге — нумерация не та
       if (!json.records.length && Number(json.totalCount) > 0) {
         apiProbeLog.push(`${describe(tune)} → 200, но список пуст при итоге ${json.totalCount}`);
         continue;
@@ -539,8 +402,6 @@
       apiTune = { ...tune, version: appVersion || "", appName };
       apiProbeLog.push(`${describe(tune)} → подошёл`);
       void toBackground({ ...hintPayload(), probe: apiProbeLog.slice() });
-      /* Ответ пригодится как первая страница выборки — второй раз за тем же
-         ходить незачем. */
       return { tune: apiTune, json, text: response.text, posting };
     }
     return null;
@@ -558,19 +419,7 @@
     };
   }
 
-  /* ------------------------------------------------------------------ */
-  /* разбор ответа истории                                               */
-  /* ------------------------------------------------------------------ */
-
-  /* Подписи Hub рисует на фронте, в ответе приходит только код. */
-  /*
-   * Подписи типов изменения. Первые семь сверены со страницей построчно.
-   * Дальше идут те, что называются так же, как поле в stateChanges, —
-   * его подпись видна на самой странице. Незнакомый код пишется как есть,
-   * но и он не остаётся навсегда: рядом работает обучение по странице
-   * (см. ht:labels), и как только тот же номер пройдёт обходом, подпись
-   * подставится настоящая.
-   */
+  // Незнакомый код пишем как есть и доучиваем по странице.
   const CHANGE_TYPES = {
     InnerWarehouse: "Внутрискладское",
     OnWarehouse: "На склад",
@@ -580,13 +429,6 @@
     TimeSlot: "Тайм-слот",
     Status: "Статус предмета",
 
-    /*
-     * Ниже — коды из самого Hub: его сборка делит их на два списка,
-     * «Перемещения» и «Свойства», и оба перечислены в бандле страницы.
-     * Часть моих прежних догадок по написанию оказалась неверной: у Hub
-     * USK, а не Usk; IsSuspiciousC2CPosting, а не SuspiciousFlag;
-     * CustomsState — про таможню, а не про «особое состояние».
-     */
     InCourier: "У курьера",
     InLoss: "В утере",
     InGut: "В ГУТ",
@@ -610,7 +452,6 @@
     CustomsState: "Состояние таможни"
   };
 
-  /* Подписи, подсмотренные на странице: они всегда вернее наших. */
   let learnedTypes = {};
 
   function changeTypeLabel(code) {
@@ -620,13 +461,7 @@
 
   const AUDIT_COLUMNS = ["Тип изменения", "Дата", "Пользователь", "Изменения", "Описание"];
 
-  /*
-   * Формат страницы: 20.08.2026, 23:47:54. Время в ответе — UTC
-   * (2026-08-20T20:47:54+00:00), а Hub показывает московское: свои же
-   * тайм-слоты он так и подписывает — «… MSK». Приводим к тому же поясу,
-   * иначе дата в отчёте разъезжается с датой на странице, а вместе с ней
-   * уезжает и корзинка.
-   */
+  // Ответ в UTC, Hub показывает московское. Без сдвига дата в отчёте разъедется со страницей.
   let hubClock = null;
 
   function formatEventTime(raw) {
@@ -656,16 +491,13 @@
     if (!side) return "—";
     const cells = side.nhlCell?.cells;
     if (Array.isArray(cells) && cells.length) {
-      /* Пустое имя уровня Hub рисует прочерком, а не пропуском. */
       return cells.map((cell) => String(cell?.name || "—")).join(" / ");
     }
     const person = side.personCell;
     if (person) return String(person.name || person.id || "—");
-    /* Ячейка какого-то другого вида — не теряем её, показываем чем есть. */
     return anyText(side);
   }
 
-  /* Под названием места Hub подписывает его тип. */
   const PLACE_TYPES = { Warehouse: "Склад", Trip: "Рейс", Courier: "Курьер", Person: "Сотрудник" };
 
   function placeName(side) {
@@ -681,19 +513,8 @@
     return `${from} → ${to}`;
   }
 
-  /*
-   * Значение неизвестного вида. Hub описывает изменения объектами разной
-   * формы, и заранее известны не все: в разборе HAR из пятнадцати полей
-   * stateChanges непустыми были только пять. Чтобы остальные не пропадали
-   * из отчёта, любое значение приводим к тексту по общим правилам.
-   */
   const NAME_KEYS = ["stringRepresentation", "name", "markup", "title", "value", "containerId", "id"];
 
-  /*
-   * Поля, у которых нет ни имени, ни подписи — только признак. Голое
-   * «isReturn: false → isReturn: true» в отчёте не читается, поэтому
-   * известные признаки разворачиваем словами.
-   */
   const FLAG_WORDS = {
     isReturn: ["Прямой", "Возврат"],
     suspicious: ["нет", "да"],
@@ -728,7 +549,6 @@
       return parts.length ? parts.join(" / ") : "—";
     }
 
-    /* 1. Знакомое поле с подписью. */
     for (const key of NAME_KEYS) {
       const own = value[key];
       if (own == null) continue;
@@ -740,10 +560,6 @@
       if (String(own).trim()) return String(own);
     }
 
-    /*
-     * 2. Простые значения. Единственный признак разворачиваем словом без
-     * подписи: «Прямой → Возврат» вместо «isReturn: false → isReturn: true».
-     */
     const scalars = Object.keys(value).filter((key) => value[key] != null && typeof value[key] !== "object");
     if (scalars.length === 1 && FLAG_WORDS[scalars[0]]) {
       return scalarText(scalars[0], value[scalars[0]]);
@@ -757,7 +573,7 @@
     }
     if (parts.length) return parts.join(", ");
 
-    /* 3. Подпись лежит на уровень глубже: {type:{value:"Forward", name:"Прямой"}}. */
+    // подпись бывает уровнем глубже: {type:{value:"Forward", name:"Прямой"}}
     for (const key of Object.keys(value)) {
       const own = value[key];
       if (!own || typeof own !== "object") continue;
@@ -767,7 +583,6 @@
     return "—";
   }
 
-  /* Переход «откуда → куда» для значения любого вида. */
   function pairText(node, side) {
     if (node && typeof node === "object" && ("from" in node || "to" in node)) {
       const render = side || anyText;
@@ -776,15 +591,6 @@
     return anyText(node);
   }
 
-  /*
-   * Подписи изменений.
-   *
-   * Первые пять взяты со страницы Hub — они там и написаны словами.
-   * Остальные выведены из имени поля: в разобранном HAR эти изменения ни
-   * разу не встретились, проверить их подпись было не на чем. Если Hub
-   * называет что-то иначе — правится одной строкой, а значение и сейчас
-   * не теряется. Совсем незнакомое поле подписывается своим именем.
-   */
   const CHANGE_LABELS = {
     container: "Лог. контейнер",
     cell: "Ячейка",
@@ -804,13 +610,6 @@
     customState: "Состояние таможни"
   };
 
-  /*
-   * Коды состояния предмета. Сверены со страницей построчно: в разобранной
-   * истории было два изменения статуса — Forming → Banded показано как
-   * «Формируется → Сформирован», Banded → Taken как «Сформирован → Прибыл
-   * в место назначения». Остальные коды не встречались; незнакомый код
-   * пишется как есть, а не теряется.
-   */
   const ITEM_STATES = {
     Forming: "Формируется",
     Banded: "Сформирован",
@@ -823,10 +622,8 @@
     return ITEM_STATES[code] || code;
   }
 
-  /* Порядок, в котором изменения идут на странице. */
   const CHANGE_ORDER = ["container", "cell", "timeSlot", "status", "destinationPlace", "location"];
 
-  /* Поля со своей формой значения: остальные разбирает anyText. */
   const CHANGE_SIDES = {
     cell: cellPath,
     location: placeName,
@@ -839,7 +636,6 @@
     return CHANGE_LABELS[key] || key;
   }
 
-  /* Ячейка «Изменения» страницы: подписанные значения через «; ». */
   function changesText(record) {
     const state = record?.stateChanges || {};
     const parts = [];
@@ -852,11 +648,9 @@
     };
 
     for (const key of CHANGE_ORDER) push(key);
-    /* Всё, что Hub прислал сверх известного порядка. */
     for (const key of Object.keys(state)) push(key);
 
     if (!done.has("location") && record?.placeInfo?.name) {
-      /* Переезда не было — страница показывает место самой операции. */
       parts.push(`Местоположение: ${placeName(record.placeInfo)}`);
     }
 
@@ -891,28 +685,15 @@
     ];
   }
 
-  /* Ячейка строки — тем же текстом, что показывает страница: «откуда → куда».
-     Полный переезд полезнее конечной ячейки: видно, откуда предмет уехал. */
   function auditCell(record) {
     const cell = record?.stateChanges?.cell;
     if (cell) {
       const moved = transition(cellPath(cell.from), cellPath(cell.to));
-      /* Обе стороны пустые — Hub рисует прочерк. Такую «ячейку» в отчёт
-         пускать нельзя: она ничем не лучше пустоты, а строку с настоящей
-         ячейкой ниже мы бы уже не искали. */
       if (moved && moved !== "—") return moved;
     }
 
-    /*
-     * Переезда ячейки в этой строке не было. Но саму ячейку Hub всё равно
-     * знает: она приходит рядом с местом операции. Без этого «Последняя
-     * ячейка» пустовала у каждого второго отправления — верхняя строка о
-     * складе часто описывает не ячейку, а приход на склад.
-     *
-     * Форму приводим к той, что понимает cellPath, и берём только
-     * настоящие ячейки: общий разбор здесь опасен — он вернул бы «Warehouse»
-     * или другое соседнее поле, а это уже не ячейка.
-     */
+    // Переезда не было, но ячейку Hub всё равно отдаёт рядом с местом операции. Форму приводим
+    // к той, что понимает cellPath: общий разбор вернул бы «Warehouse» или соседнее поле.
     const sides = [];
     const cellInfo = record?.cellInfo;
     if (Array.isArray(cellInfo?.cells)) sides.push({ nhlCell: cellInfo });
@@ -928,17 +709,8 @@
     return "";
   }
 
-  /*
-   * Строки об искомом складе.
-   *
-   * Верхняя из них даёт дату, а ячейку берём из первой, где она вообще
-   * есть: раньше ячейка читалась строго из верхней строки, и стоило той
-   * оказаться, скажем, приходом на склад без переезда ячейки — в отчёт
-   * уходила пустота, хотя строкой ниже ячейка была написана.
-   *
-   * Смотрим только строки этого же склада: подставлять ячейку из чужой
-   * строки нельзя, это уже не те данные.
-   */
+  // Дата — из верхней строки о складе, ячейка — из первой, где она есть: приход на склад
+  // ячейку не показывает, а переезд по ячейкам — да.
   function pickCellRecord(records) {
     for (const record of records) {
       if (auditCell(record)) return record;
@@ -946,12 +718,8 @@
     return null;
   }
 
-  /*
-   * Совпадение ищем по всей записи целиком — ровно так же, как обход
-   * страницы ищет по тексту всей строки. Если сузить поиск до полей места,
-   * два пути начнут расходиться на пограничных номерах, сверка сочтёт это
-   * поломкой быстрого пути и выключит его.
-   */
+  // ищем по всей записи, как обход страницы ищет по тексту строки: сузишь до полей места —
+  // пути начнут расходиться на пограничных номерах
   function recordMatches(record, needle) {
     if (!record) return false;
     try {
@@ -961,14 +729,7 @@
     }
   }
 
-  /*
-   * Предыдущий склад: верхнее место по движениям.
-   *
-   * Интерфейс выводил его из текста трёх строк отчёта — и если в них
-   * переезда не было, «предыдущий склад» оставался пустым, хотя ниже по
-   * истории он написан. Считаем его здесь, где видно все прочитанные
-   * записи, и кладём в отчёт отдельным полем.
-   */
+  // верхнее место по всем движениям: интерфейс выводил его из трёх строк отчёта и промахивался
   function placeOfRecord(record) {
     const move = record?.stateChanges?.location;
     for (const side of [move?.to, move?.from, record?.placeInfo]) {
@@ -999,8 +760,6 @@
     return {
       columns: AUDIT_COLUMNS.slice(),
       lastRows: rows.map(auditRow),
-      /* Коды типов — чтобы подставить настоящую подпись, когда она станет
-         известна: строки уже собраны, а подпись может приехать позже. */
       codes: rows.map((record) => String(record?.changeType || "")),
       warehouseAt: top ? formatEventTime(top.eventTime) : "",
       warehouseCell: withCell ? auditCell(withCell) : "",
@@ -1008,21 +767,7 @@
     };
   }
 
-  /* ------------------------------------------------------------------ */
-  /* быстрый путь по известным ручкам                                    */
-  /* ------------------------------------------------------------------ */
-
-  /*
-   * Деньги карточки.
-   *
-   * Hub показывает на карточке предмета две суммы и подписывает их так:
-   *   «Цена реализации» — moneyPrice, подсказка «Цена, которую заплатил
-   *   клиент»; «Цена» — fairPrice. Формат числа у Hub один и тот же —
-   *   Intl.NumberFormat("ru-RU") с двумя знаками после запятой.
-   *
-   * Отдельно ходить за суммой не нужно: она приходит в том же ответе
-   * карточки, который мы и так спрашиваем ради номера и статуса.
-   */
+  // «Цена реализации» — это moneyPrice, «Цена» — fairPrice.
   function priceText(value, symbol) {
     const number = Number(value);
     if (!Number.isFinite(number)) return "";
@@ -1046,15 +791,8 @@
     };
   }
 
-  /*
-   * Карточка предмета в ответе.
-   *
-   * Раньше читалось строго items[0].postingInfo — и стоило Hub положить
-   * тот же объект чуть иначе (другой контейнер, другой порядок, пустой
-   * items при непустом ответе), как из отчёта пропадали и номер, и статус,
-   * и обе суммы. Поэтому ищем объект карточки по признакам, а не по пути:
-   * им считается тот, у кого есть номер отправления, статус или цена.
-   */
+  // Ищем карточку по признакам, а не по пути items[0].postingInfo: положат чуть иначе —
+  // и пропадут номер, статус и обе суммы.
   const CARD_KEYS = ["postingName", "stateName", "moneyPrice", "fairPrice", "postingNumber"];
 
   function findPostingInfo(json) {
@@ -1068,7 +806,6 @@
         continue;
       }
       const own = CARD_KEYS.filter((key) => node[key] != null && node[key] !== "");
-      /* Номер плюс что-то ещё — это точно карточка, а не обломок ответа. */
       if (own.length >= 2) return node;
       if (own.length === 1 && !loose) loose = node;
       for (const key of Object.keys(node)) queue.push({ node: node[key], depth: depth + 1 });
@@ -1083,7 +820,6 @@
       status: String(info.stateName || info.statusName || info.state || ""),
       ...cardMoney(info)
     };
-    /* Пустая карточка не отличается от неудачи — так её и считаем. */
     return out.number || out.status || out.price || out.fairPrice ? out : null;
   }
 
@@ -1104,40 +840,28 @@
     return Boolean(card && (card.number || card.status || card.price || card.fairPrice));
   }
 
-  /* Не затираем уже добытое: у путей разные сильные стороны. */
+  // не затираем уже добытое: у путей разные сильные стороны
   function fillCard(card, from) {
     if (!from) return card;
     for (const key of Object.keys(card)) card[key] = card[key] || from[key] || "";
     return card;
   }
 
-  /*
-   * Номер и статус Hub знает про любой предмет, а вот суммы бывают
-   * пустыми по-честному. Поэтому второй запрос делаем, когда не хватает
-   * именно их: гонять лишний round-trip за каждой отсутствующей ценой —
-   * это минуты на прогоне и ничего сверху.
-   */
   function cardComplete(card) {
     return Boolean(card.number && card.status);
   }
 
-  /*
-   * Каким запросом карточка отдаётся: со складом оператора или без него.
-   * Запоминаем удачный вариант, но не хороним второй — раньше одна
-   * неудача ставила placelessCard = false навсегда, и весь прогон уходил
-   * без цен.
-   */
+  // Карточка отдаётся со складом оператора или без. Удачный вариант запоминаем, но второй
+  // не хороним: раньше одна неудача снимала его навсегда и весь прогон шёл без цен.
   let cardPlaceless = null;
 
   async function nativeCard(posting, timeoutMs) {
     if (!placeId) {
-      /* Hub дописывает склад оператора в адрес уже после загрузки, поэтому
-         перечитываем перед самым запросом, а не один раз на старте. */
+      // склад оператора Hub дописывает в адрес уже после загрузки
       readPlaceFromLocation();
       if (placeId) void toBackground(hintPayload());
     }
 
-    /* Сначала тот вариант, что уже срабатывал в этой вкладке. */
     const order = [];
     if (cardPlaceless === true) order.push(0);
     else if (cardPlaceless === false && placeId) order.push(null);
@@ -1149,8 +873,6 @@
       const card = readCard(await replay(boxesRequest(posting, place), budget));
       if (!card) continue;
       const placeless = place === 0;
-      /* Удачный вариант — общее знание: пусть остальные вкладки не тратят
-         на перебор первый номер каждая. */
       if (cardPlaceless !== placeless) {
         cardPlaceless = placeless;
         void toBackground(hintPayload());
@@ -1160,18 +882,12 @@
     return emptyCard();
   }
 
-  /*
-   * Карточка любой ценой: известная ручка, затем подсмотренный запрос.
-   * Пустых полей в отчёте быть не должно — цену и статус Hub знает всегда,
-   * и если один путь промолчал, спрашиваем вторым.
-   */
   async function collectCard(posting, deadline, firstJson) {
     const left = () => Math.max(1500, Math.min(8000, deadline - Date.now()));
     const card = emptyCard();
 
     fillCard(card, await nativeCard(posting, left()));
     if (!cardComplete(card) && cardRecipe) fillCard(card, await fetchCard(posting, left()));
-    /* Совсем ничего не вышло — последняя попытка по самому ответу истории. */
     if (!cardFilled(card) && firstJson) fillCard(card, extractCardFrom(firstJson));
     return card;
   }
@@ -1184,10 +900,8 @@
     const deadline = Date.now() + Math.max(4000, Number(job.timeoutMs) || 20000);
     const left = () => Math.max(2000, deadline - Date.now());
 
-    /* Первый запрос прогона подбирает вариант, который принимает сервер. */
     let primed = null;
     if (!apiTune) {
-      /* Подбору — большая часть бюджета номера, остальное самой выборке. */
       const tuned = await tuneApi(posting, Math.floor((deadline - Date.now()) * 0.6));
       if (!tuned) {
         return {
@@ -1197,7 +911,6 @@
           probe: apiProbeLog.slice()
         };
       }
-      /* Удачный ответ подбора — это и есть первая страница этого номера. */
       if (tuned.json && tuned.posting === posting) primed = tuned;
     }
 
@@ -1207,19 +920,14 @@
     let sample = "";
     let digest = "";
     const head = [];
-    /* Все строки об искомом складе, сверху вниз: верхняя даёт дату, первая
-       с ячейкой — ячейку. Раньше запоминалась только верхняя. */
     const hits = [];
     let foundAt = -1;
-    /* Верхний склад по движениям — для разреза «предыдущий склад». */
     let lastPlace = "";
     let loosePlace = "";
     let size = apiTune.pageSize;
     let retuned = false;
-    /* Сервер не принял список типов и отдал лишнее — «Всего» из ответа
-       тогда не про наш срез. */
+    // сервер не принял список типов и отдал лишнее, «Всего» тогда не про наш срез
     let trimmed = false;
-    /* Прочитано с сервера: по нему листаем. loaded — что оставили себе. */
     let read = 0;
 
     for (let page = 0; page < MAX_API_PAGES; page += 1) {
@@ -1235,12 +943,7 @@
 
       if (!response) return { ok: false, reason: "нет ответа" };
       if (response.status === 401 || response.status === 403) {
-        /*
-         * 403 приходит и когда серверу не хватило заголовка, а не только
-         * когда не пустила сессия. Общий вариант мог быть подобран другой
-         * вкладкой при других подсказках — пробуем подобрать заново, и
-         * только если и это не вышло, отдаём отказ.
-         */
+        // 403 приходит и когда серверу не хватило заголовка; общий вариант мог подобрать другая вкладка
         if (!retuned) {
           retuned = true;
           apiTune = null;
@@ -1257,8 +960,6 @@
 
       const json = readAudit(response);
       if (!json) {
-        /* Вариант работал, а теперь нет — Hub мог поменяться на ходу.
-           Сбрасываем подбор, следующий номер подберёт заново. */
         apiTune = null;
         return { ok: false, missing: true, reason: snippet(response) };
       }
@@ -1269,14 +970,12 @@
       if (page === 0) {
         digest = digestOf(response.text);
         if (Number.isFinite(json.totalCount)) total = Number(json.totalCount);
-        /* Строк меньше, чем просили, а в списке их больше — сервер режет
-           страницу по своему пределу. Дальше идём его шагом. */
+        // сервер режет страницу по своему пределу, дальше идём его шагом
         if (raw.length && raw.length < size && total != null && total > raw.length) {
           size = raw.length;
         }
       }
 
-      /* В отчёт идут первые три строки, всю историю копить незачем. */
       for (const record of records) {
         if (head.length < 3) head.push(record);
         if (!lastPlace) {
@@ -1285,8 +984,6 @@
           else if (place && !loosePlace) loosePlace = place.name;
         }
         if (!recordMatches(record, needle)) continue;
-        /* Дочитываем строки этого склада, пока не встретится та, где
-           написана ячейка: дальше по истории уже другой склад. */
         if (hits.length < 12) hits.push(record);
       }
 
@@ -1298,19 +995,12 @@
         sample = JSON.stringify(hits[0]).slice(0, 280);
       }
 
-      /*
-       * Нашли склад — дальше листаем не больше одной страницы, и только
-       * пока ячейка не прочиталась. Гоняться за ней по всей истории
-       * нельзя: это минуты на каждый номер, а склад мы уже нашли.
-       */
+      // нашли склад — дальше не больше одной страницы: гоняться за ячейкой по всей истории
+      // это минуты на каждый номер
       if (found && (pickCellRecord(hits) || page > foundAt)) break;
-      /*
-       * Листаем по тому, что отдал сервер, а не по тому, что оставили себе:
-       * страница целиком из не-перемещений — не повод бросить чтение.
-       */
+      // листаем по тому, что отдал сервер: страница целиком из не-перемещений не повод бросить чтение
       if (!raw.length) break;
       if (total != null && read >= total) break;
-      /* Итог неизвестен: неполная страница — значит список кончился. */
       if (total == null && raw.length < size) break;
     }
 
@@ -1334,10 +1024,6 @@
       report
     };
   }
-
-  /* ------------------------------------------------------------------ */
-  /* быстрый путь: повтор запроса истории                                */
-  /* ------------------------------------------------------------------ */
 
   function swapId(text, fromId, toId) {
     if (!text || !fromId || fromId === toId) return text;
@@ -1402,7 +1088,6 @@
     return touched;
   }
 
-  /* Заголовки, в которых обычно и лежит протухающий токен. */
   const AUTH_HEADER_RE = /^(authorization|x-[\w-]*(token|auth)[\w-]*|[\w-]*-jwt)$/i;
 
   function withoutAuthHeaders(headers) {
@@ -1418,11 +1103,7 @@
     return stripped ? out : null;
   }
 
-  /*
-   * Один раз на 401 пробуем тот же запрос без токена: если сессия Hub
-   * держится на cookie, токен вообще не нужен — и тогда протухать нечему.
-   * Не сработало — возвращаем исходный 401, дальше фон обновит рецепт.
-   */
+  // Раз на 401 пробуем тот же запрос без токена: если сессия держится на cookie, протухать нечему.
   async function replayPage(request, timeoutMs) {
     const response = await replay(request, timeoutMs);
     if (!response || (response.status !== 401 && response.status !== 403)) return response;
@@ -1440,14 +1121,7 @@
     return retry;
   }
 
-  /*
-   * Подставляем в подсмотренное тело наш список типов.
-   *
-   * Рецепт снимается с любой вкладки Hub, какая окажется открытой, — в том
-   * числе с «Все». Раньше тело повторялось как есть, и такой рецепт тянул
-   * всю историю: в «Последние операции» уезжали смены статуса и тайм-слота,
-   * хотя вкладку мы открываем на «Перемещениях».
-   */
+  // свой список типов в подсмотренное тело: рецепт мог сняться со вкладки «Все»
   function forceTypes(node, depth) {
     if (!node || typeof node !== "object" || depth > 4) return false;
     let touched = false;
@@ -1476,7 +1150,6 @@
       try {
         const parsed = JSON.parse(body);
         bodyTouched = tuneJson(parsed, pageIndex, pageSize, 0);
-        /* Список типов ставим свой независимо от того, что было в рецепте. */
         forceTypes(parsed, 0);
         body = JSON.stringify(parsed);
       } catch (_err) {
@@ -1496,7 +1169,7 @@
     };
   }
 
-  /* Ищем в ответе самый крупный массив объектов — это и есть строки истории. */
+  // самый крупный массив объектов в ответе — это и есть строки истории
   function findRows(json) {
     let best = null;
     let bestLen = -1;
@@ -1518,8 +1191,7 @@
     return best;
   }
 
-  /* Дешёвый отпечаток ответа: по нему фон замечает, что сервер отдаёт одно и
-     то же на разные номера (значит подстановка номера не сработала). */
+  // дешёвый отпечаток: по нему фон замечает одинаковые ответы на разные номера
   function digestOf(text) {
     const head = text.slice(0, 4000);
     const tail = text.length > 6000 ? text.slice(-2000) : "";
@@ -1557,12 +1229,9 @@
     return out;
   }
 
-  /* Номер отправления и статус — из карточки предмета, не из истории. */
   function extractCardFrom(json) {
     const out = emptyCard();
     if (!json) return out;
-    /* Тот же поиск по признакам, что и у карточки: путь items[0].postingInfo
-       Hub держит не всегда, а суммы терять нельзя. */
     const info = findPostingInfo(json);
     if (info) Object.assign(out, cardMoney(info));
     const match = JSON.stringify(json).match(POSTING_NUMBER_RE);
@@ -1604,25 +1273,14 @@
     if (!response?.ok || !response.text) return emptyCard();
     try {
       const json = JSON.parse(response.text);
-      /* Сначала точный разбор карточки, потом общий по признакам. */
       return fillCard(cardFrom(findPostingInfo(json)) || emptyCard(), extractCardFrom(json));
     } catch (_err) {
       return emptyCard();
     }
   }
 
-  /*
-   * Запись истории Hub узнаётся по форме, а не по тому, каким путём её
-   * достали. Это важно: раньше подсмотренный запрос ходил в ту же ручку,
-   * но ответ разбирался «вообще любым» способом — с раскладкой JSON в
-   * плоские ключи. В отчёт уезжали колонки operationContextId,
-   * placeInfo.type, stateChanges.customState и прочее, а «последней
-   * ячейкой» становилось слово Warehouse: под шаблон ячейки подходил ключ
-   * placeInfo.type.
-   *
-   * Теперь оба пути разбирают историю одинаково и дают ровно то же, что
-   * видно на странице.
-   */
+  // Запись истории узнаём по форме, а не по тому, каким путём достали. Иначе в отчёт уезжали
+  // operationContextId и placeInfo.type, а «последней ячейкой» становилось слово Warehouse.
   function looksLikeAudit(rows) {
     const first = rows?.[0];
     if (!first || typeof first !== "object" || Array.isArray(first)) return false;
@@ -1631,12 +1289,8 @@
 
   const DATE_KEY_RE = /(date|time|дата|created|moment|stamp)/i;
 
-  /*
-   * Ответ незнакомой формы. Придумывать под него колонки нельзя — раньше
-   * из-за этого в отчёт попадала сырая раскладка JSON. Берём только дату
-   * найденной строки: она нужна для корзинки. Остальное дополнит обход
-   * страницы, а если и его не было — блока в детализации просто не будет.
-   */
+  // Форма незнакомая, колонки под неё придумывать нельзя — в отчёт попадёт сырая раскладка JSON.
+  // Берём только дату: она нужна для корзинки.
   function reportFromApiRows(rows, needle) {
     const flat = rows.map((row) => flattenRow(row, "", {}, 0));
     const hit = flat.find((row) => Object.values(row).join(" ").toLowerCase().includes(needle));
@@ -1654,15 +1308,8 @@
     return { columns: [], lastRows: [], warehouseAt, warehouseCell: "", lastPlace: "" };
   }
 
-  /*
-   * Оставляем только те записи, которые показывает открытая вкладка.
-   *
-   * Пусто на выходе при непустом входе значит одно из двух: либо на этой
-   * странице и правда нет перемещений, либо наш список типов разошёлся с
-   * Hub. Различаем по памяти прогона: если совпадение хоть раз было, список
-   * верный — и пустая страница именно пустая. Пока совпадений не видели,
-   * отдаём страницу как есть, чтобы не показать пустоту вместо истории.
-   */
+  // Пусто при непустом входе: либо перемещений правда нет, либо наш список типов разошёлся
+  // с Hub. Различаем по памяти прогона.
   function keepTransitions(rows) {
     if (!Array.isArray(rows) || !rows.length) return rows || [];
     if (!looksLikeAudit(rows)) return rows;
@@ -1676,15 +1323,12 @@
 
   function reportFromRows(rows, needle) {
     if (!looksLikeAudit(rows)) return reportFromApiRows(rows, needle);
-    /* Все строки об этом складе, а не только верхняя: ячейка может стоять
-       не в ней, а строкой ниже — и раньше она терялась. */
     const hits = rows.filter((record) => recordMatches(record, needle)).slice(0, 12);
     const report = reportFromAudit(rows.slice(0, 3), hits);
     report.lastPlace = topPlaceFrom(rows);
     return report;
   }
 
-  /* Известная ручка отвалилась — в этой вкладке больше не пробуем. */
   let nativeOff = false;
 
   function withNative(result, nativeReport) {
@@ -1693,11 +1337,6 @@
   }
 
   async function apiScan(job) {
-    /*
-     * Сначала известные ручки Hub: им не нужен подсмотренный запрос, так
-     * что быстрый путь работает с самого первого номера, а не после того,
-     * как страница сама сходит за историей.
-     */
     let nativeFail = null;
     if (!nativeOff) {
       const native = await nativeScan(job);
@@ -1706,12 +1345,7 @@
       nativeFail = native;
     }
 
-    /*
-     * Про мёртвую ручку фон должен узнать в любом случае — даже когда есть
-     * подсмотренный запрос и номер удастся дочитать им. Иначе каждая
-     * вкладка ходила бы за ней заново, а лог подбора не доезжал до
-     * интерфейса, и «быстрый путь недоступен» оставалось без объяснения.
-     */
+    // про мёртвую ручку фон должен узнать в любом случае, иначе каждая вкладка ходит за ней заново
     const nativeReport = nativeFail
       ? {
           nativeMissing: Boolean(nativeFail.missing),
@@ -1724,8 +1358,7 @@
         ok: false,
         reason: nativeFail?.reason || "no_recipe",
         ...nativeReport,
-        /* Ни ручки, ни подсмотренного запроса: это не поломка быстрого
-           пути, а «пока нечем» — фон не должен считать попытку провалом. */
+        // ни ручки, ни рецепта: это «пока нечем», а не провал
         notReady: true
       };
     }
@@ -1736,8 +1369,6 @@
 
     const deadline = Date.now() + Math.max(4000, Number(job.timeoutMs) || 20000);
     const sizeModes = [DEFAULT_PAGE_SIZE, null];
-    /* Конкретная причина отказа: без неё в интерфейс уходило безликое
-       «быстрый режим недоступен», и понять, что чинить, было нельзя. */
     let failure = "";
 
     for (const pageSize of sizeModes) {
@@ -1749,7 +1380,6 @@
       let failed = false;
       let digest = "";
       let filtered = false;
-      /* Прочитано с сервера: по нему листаем. loaded — что оставили себе. */
       let read = 0;
       const allRows = [];
       let firstJson = null;
@@ -1765,7 +1395,7 @@
           if (!response) failure = "нет ответа";
           else if (response.error) failure = `сеть: ${response.error}`;
           else if (response.status === 401 || response.status === 403) {
-            /* Токен в рецепте протух — нужен свежий захват, а не повтор. */
+            // токен в рецепте протух — нужен свежий захват, а не повтор
             return withNative(
               { ok: false, auth: true, status: response.status, reason: `ответ ${response.status}` },
               nativeReport
@@ -1792,11 +1422,6 @@
           break;
         }
 
-        /*
-         * Страховка: сервер мог не принять наш список типов и отдать всю
-         * историю. Тогда лишние строки убираем сами, а «Всего» из ответа
-         * больше не про наш срез — считаем итог по прочитанному.
-         */
         const rows = keepTransitions(raw);
         if (rows.length !== raw.length) filtered = true;
 
@@ -1804,10 +1429,9 @@
           digest = digestOf(response.text);
           firstJson = json;
         }
-        /* Для отчёта достаточно верхушки списка, всю историю не копим. */
         if (allRows.length < 60) allRows.push(...rows.slice(0, 60 - allRows.length));
 
-        /* Пере-сериализуем: сервер может отдавать кириллицу \u-эскейпами. */
+        // пере-сериализуем: сервер может отдавать кириллицу \u-эскейпами
         const haystack = JSON.stringify(rows).toLowerCase();
         if (!found && haystack.includes(needle)) {
           found = true;
@@ -1821,10 +1445,6 @@
         if (pageTotal != null) total = pageTotal;
 
         if (found) break;
-        /*
-         * Листаем по тому, что отдал сервер, а не по тому, что оставили
-         * себе: страница целиком из не-перемещений — не повод бросить.
-         */
         if (!raw.length) break;
         if (total != null && read >= total) break;
         if (!pageable) break;
@@ -1835,11 +1455,7 @@
       const expected = filtered || total == null ? loaded : total;
       const report = reportFromRows(allRows, needle);
 
-      /*
-       * Номер, статус и суммы — из карточки предмета. В истории их нет, и
-       * выуживать их регуляркой из ответа истории незачем: это тот же
-       * случай, что и с колонками — можно поймать что угодно похожее.
-       */
+      // номер, статус и суммы — из карточки: в истории их нет, а регуляркой поймаешь что угодно похожее
       const card = await collectCard(posting, deadline, firstJson);
       report.number = card.number;
       report.status = card.status;
@@ -1862,19 +1478,8 @@
     return withNative({ ok: false, reason: failure || "запрос не подошёл" }, nativeReport);
   }
 
-  /* ------------------------------------------------------------------ */
-  /* надёжный путь: обход таблицы                                        */
-  /* ------------------------------------------------------------------ */
-
-  /*
-   * Подстраховка на случай, если наши селекторы не нашли строки таблицы.
-   *
-   * Раньше здесь был откат на document.body — и это давало ложное «есть»:
-   * в шапке Hub стоит кнопка с текущим складом («СЦ_Истра-ХАБ_Возвраты»),
-   * и если искали именно его, совпадение находилось на каждом номере.
-   * Теперь читаем только контейнер истории и вырезаем из него всю обвязку:
-   * кнопки, поповеры, фильтры, панель инструментов таблицы.
-   */
+  // Откат, если селекторы не нашли строк. На document.body тут нельзя: в шапке Hub стоит
+  // кнопка с текущим складом, и совпадение находилось на каждом номере.
   const CHROME_SELECTOR = [
     "header",
     "nav",
@@ -1899,30 +1504,8 @@
     '[class*="tabs"]'
   ].join(",");
 
-  /* ------------------------------------------------------------------ */
-  /* разметка страницы предмета                                          */
-  /* ------------------------------------------------------------------ */
-
-  /*
-   * Настоящие классы Hub. Страница собрана на CSS-модулях, у каждого класса
-   * свой хвост-хеш (ozi__data-grid__row__vhPt-, _headingText_1kfgo_11), и
-   * хеш меняется от сборки к сборке — держимся за стабильную часть имени.
-   *
-   * Что где лежит:
-   *   ._headingGroup_ › ._articleInfoRow_ › ._articleName_
-   *        ._headingText_                → «85610628-0256-2»  (номер)
-   *        ._badge_ .ozi__badge__label__ → «Прибыл в место назначения» (статус)
-   *   ._history_
-   *        .table-tools__counter         → «Всего: 27»
-   *        .ozi__data-grid__dataGrid__
-   *            .ozi__data-grid__scroller__ › [data-overlayscrollbars-viewport]
-   *                table.ozi__data-grid__table__
-   *                    thead › th › .ozi__data-grid__truncate__ → заголовок
-   *                    tbody › tr.ozi__data-grid__row__ › td.ozi__data-grid__cell__
-   *
-   * Внутри ячейки «Изменения» значения подписаны:
-   *   ul._stateChanges_ › li › span._left_ (метка) + div._right_ (значение)
-   */
+  // Страница на CSS-модулях, у каждого класса свой хвост-хеш (ozi__data-grid__row__vhPt-),
+  // и хеш меняется от сборки к сборке — держимся за стабильную часть имени.
   const HUB = {
     history: '[class*="_history_"]',
     grid: '[class*="ozi__data-grid__dataGrid__"]',
@@ -1948,8 +1531,6 @@
     const own = document.querySelector(HUB.history);
     if (own) return own;
 
-    /* Блока истории нет — берём обёртку вокруг таблицы: ту, в которой
-       вместе с таблицей лежит счётчик «Всего: N». */
     const grid = document.querySelector(HUB.grid);
     if (grid) {
       let node = grid.parentElement;
@@ -1963,7 +1544,6 @@
   }
 
   function fallbackHistoryText() {
-    /* Строки нашлись — обходить контейнер целиком незачем. */
     if (rowNodes().length) return "";
     const root = historyContainer();
     if (!root) return "";
@@ -1977,8 +1557,6 @@
     return norm(clone.textContent).toLowerCase();
   }
 
-  /* Поиск таблицы стоит нескольких querySelectorAll по документу, а звать
-     rowNodes() приходится на каждую пачку мутаций. Запоминаем найденное. */
   let cachedTable = null;
 
   function rowsTable() {
@@ -2006,8 +1584,7 @@
     return document.querySelectorAll(HUB.row);
   }
 
-  /* «Всего: 1 234» — число может идти с разрядами через пробел или nbsp,
-     поэтому забираем всю группу и вычищаем из неё нецифры. */
+  // «Всего: 1 234» — разряды через пробел или nbsp, поэтому чистим нецифры
   const TOTAL_RE = new RegExp("Всего:\\s*([0-9][0-9\\s\\u00a0\\u202f\\u2009]*)", "i");
 
   function readTotal(el) {
@@ -2019,7 +1596,6 @@
   }
 
   function parseCounter() {
-    /* Счётчик истории — единственный на странице и подписан своим классом. */
     const own = readTotal(document.querySelector(HUB.counter));
     if (own != null) return own;
 
@@ -2029,8 +1605,6 @@
       const value = readTotal(node);
       if (value != null) return value;
     }
-    /* Только контейнер истории: «Всего» из чужого блока страницы дало бы
-       неверный ориентир. */
     return readTotal(historyContainer());
   }
 
@@ -2044,17 +1618,8 @@
     );
   }
 
-  /*
-   * Текст ячейки для отчёта.
-   *
-   * textContent склеивает всё подряд: «ЯчейкаСОРТ 1 Степ / — / 05H / 02 /
-   * 24» — не разобрать, где кончилось одно значение и началось другое.
-   * Поэтому обходим узлы сами и расставляем разделители по разметке:
-   *   span._left_        → «Метка: »
-   *   svg внутри ._right_ → « → » (стрелка «откуда/куда» между ячейками)
-   *   соседние li         → «; »
-   *   соседние блоки      → « · »
-   */
+  // textContent склеил бы «ЯчейкаСОРТ 1 Степ / — / 05H», поэтому обходим узлы сами
+  // и расставляем разделители по разметке.
   const RICH_SKIP = new Set(["script", "style", "button", "input", "textarea", "select", "svg"]);
   const RICH_BLOCK = new Set([
     "div",
@@ -2078,8 +1643,7 @@
     "h5",
     "h6"
   ]);
-  /* Разделители по силе: слабый не затирает уже выставленный сильный.
-     Иначе вложенный div внутри li подменял «; » на « · ». */
+  // слабый разделитель не затирает сильный, иначе div внутри li подменял «; »
   const RICH_RANK = { "": 0, " ": 1, " · ": 2, "; ": 3, ": ": 4, " → ": 4 };
   const RICH_NODE_LIMIT = 4000;
 
@@ -2112,7 +1676,6 @@
 
         const tag = (child.tagName || "").toLowerCase();
         if (RICH_SKIP.has(tag)) {
-          /* Стрелка перехода рисуется иконкой — сохраняем её смысл. */
           if (tag === "svg" && out.length && child.closest?.(HUB.changeValue)) sep = " → ";
           continue;
         }
@@ -2136,10 +1699,6 @@
     return text || norm(root.textContent || "");
   }
 
-  /*
-   * Шапка карточки: номер отправления (85610628-0256-2) и статус
-   * («Прибыл в место назначения») — их в истории нет, они только в шапке.
-   */
   function readItemCardExact() {
     const out = { number: "", status: "" };
     const head = document.querySelector(HUB.headingName) || document.querySelector(HUB.heading);
@@ -2148,15 +1707,12 @@
     const number = norm(head.querySelector(HUB.headingText)?.textContent || "");
     if (number) out.number = (number.match(POSTING_NUMBER_RE) || [number])[0];
 
-    /* Такой же класс носят бейджи внутри строк истории («Внутрискладское»),
-       поэтому ищем строго в заголовке — там бейдж ровно один. */
+    // такой же класс носят бейджи в строках истории, ищем строго в заголовке
     const status = norm(head.querySelector(HUB.badgeLabel)?.textContent || "");
     if (status && status.length <= 60) out.status = status;
     return out;
   }
 
-  /* Откат для нестандартной вёрстки: ищем номер среди листьев страницы, а
-     статус — среди ближайших к нему коротких кириллических подписей. */
   function readItemCardByGuess() {
     const out = { number: "", status: "" };
     const leaves = [];
@@ -2173,9 +1729,8 @@
     if (numberAt < 0) return out;
     out.number = (leaves[numberAt].text.match(POSTING_NUMBER_RE) || [""])[0];
 
-    /* Вкладки «О предмете / Состав / История» тоже подходят под описание
-       статуса, поэтому берём ближайшее к номеру и предпочитаем то, у чего
-       есть фон. */
+    // вкладки «О предмете / Состав / История» тоже подходят под описание статуса,
+    // поэтому берём ближайшее к номеру и с фоном
     let best = null;
     for (let i = numberAt + 1; i < leaves.length && i <= numberAt + 12; i += 1) {
       const text = leaves[i].text;
@@ -2224,7 +1779,6 @@
     return [richText(row)];
   }
 
-  /* Подписанные значения строки: {«Ячейка»: «…», «Местоположение»: «…»}. */
   function rowFields(row) {
     const out = {};
     const items = row.querySelectorAll?.(`${HUB.changes} li`);
@@ -2239,15 +1793,8 @@
     return out;
   }
 
-  /*
-   * Подписи типов, которых на «Перемещениях» быть не должно: «Статус
-   * предмета», «Тайм-слот» и прочее из общей истории.
-   *
-   * Список именно запретный, а не разрешительный. Разрешительный отбрасывал
-   * бы и незнакомый вид перемещения — тот самый, подпись которого мы как раз
-   * учим со страницы: назвать его по-русски заранее нечем, и строка уезжала
-   * бы в мусор вместе с уроком.
-   */
+  // Запретный список, а не разрешительный: разрешительный отбросил бы незнакомый вид
+  // перемещения — тот самый, подпись которого мы учим.
   function foreignWords() {
     const words = new Set();
     const mine = new Set(auditTypes);
@@ -2260,19 +1807,16 @@
     };
     collect(CHANGE_TYPES);
     collect(learnedTypes);
-    /* Своё слово важнее: одну и ту же подпись носят разные коды. */
     for (const code of mine) words.delete(norm(changeTypeLabel(code)).toLowerCase());
     return words;
   }
 
-  /* Колонка «Тип изменения» — по ней и отличаем перемещение. */
   function typeColumnAt(columns) {
     const titles = columns || tableColumns();
     const at = titles.findIndex((title) => /^тип/i.test(title));
     return at >= 0 ? at : 0;
   }
 
-  /* В колонке типа лежит одна плашка, так что весь её текст — и есть подпись. */
   function rowTypeText(row, at) {
     const own = row.children;
     let cell = own && own[at];
@@ -2283,12 +1827,6 @@
     return cell ? norm(cell.textContent).toLowerCase() : "";
   }
 
-  /*
-   * То же, что keepTransitions, только для отрисованной таблицы: вкладка
-   * «Перемещения» показывает лишь их, но если страница почему-то открылась
-   * на всей истории, её строки не должны уехать в «Последние операции».
-   * Незнакомая подпись остаётся — вдруг это новый вид перемещения.
-   */
   function keepTransitionRows(rows, words, at) {
     const list = [...rows];
     if (!list.length) return list;
@@ -2298,8 +1836,7 @@
     return list.filter((row) => !foreign.has(rowTypeText(row, column)));
   }
 
-  /* Дата строки — из колонки «Дата», а не поиском по всей строке: в
-     «Описании» тоже встречаются даты. */
+  // дата из колонки «Дата»: в «Описании» тоже встречаются даты
   function rowDate(row, columns) {
     const titles = columns || tableColumns();
     const at = titles.findIndex((title) => /^дата/i.test(title));
@@ -2339,8 +1876,7 @@
       const observer = new MutationObserver(() => {
         if (test()) finish(true);
       });
-      /* Для ожидания новых строк достаточно смотреть на саму таблицу —
-         подписка на весь документ дёргает колбэк на каждый чих SPA. */
+      // подписка на весь документ дёргает колбэк на каждый чих SPA
       const root = target || document.documentElement || document;
       observer.observe(root, { childList: true, subtree: true, characterData: true });
       const poll = setInterval(() => {
@@ -2358,15 +1894,7 @@
       style.id = "hub-trace-expand";
       (document.head || document.documentElement).appendChild(style);
     }
-    /*
-     * Раньше здесь принудительно навешивались max-height и overflow на
-     * контейнеры таблицы. Это создавало второй контейнер прокрутки вокруг
-     * настоящего: мы крутили внешний, строки жили во внутреннем, список не
-     * рос — и всё сваливалось в «мало строк».
-     *
-     * Оставляем только отключение плавной прокрутки: с ней присваивание
-     * scrollTop анимируется и позиция «плывёт».
-     */
+    // Плавную прокрутку отключаем: с ней scrollTop анимируется и позиция плывёт.
     style.textContent = `
       html, body, [data-overlayscrollbars-viewport], [class*="scroller"], [class*="Scroller"] {
         scroll-behavior: auto !important;
@@ -2392,17 +1920,11 @@
     return overflow === "auto" || overflow === "scroll" || overflow === "overlay";
   }
 
-  /*
-   * Контейнер прокрутки берём от самой строки вверх по родителям, а не
-   * угадыванием по списку селекторов с сортировкой по «запасу прокрутки».
-   * Угадывание попадало то во внешнюю обёртку, то в документ — оттуда и
-   * дёрганье: одно место крутили мы, другое — scrollIntoView.
-   */
+  // Контейнер прокрутки ищем от строки вверх по родителям. Угадывание по списку селекторов
+  // попадало то во внешнюю обёртку, то в документ — оттуда и дёрганье.
   function findScroller() {
     const rows = rowNodes();
 
-    /* Путь от строки вверх — единственный надёжный: он гарантированно
-       приводит в контейнер, в котором эта строка и лежит. */
     if (rows.length) {
       let node = rows[rows.length - 1];
       while (node && node !== document.documentElement) {
@@ -2412,11 +1934,7 @@
       return null;
     }
 
-    /*
-     * Строк ещё нет. Подниматься по родителям здесь нельзя: пустая таблица
-     * не прокручивается, и поиск уходил во внешнюю обёртку страницы — её и
-     * начинали крутить. Поэтому только явные контейнеры списка.
-     */
+    // строк ещё нет: пустая таблица не прокручивается, а поиск по родителям уходил во внешнюю обёртку
     for (const selector of [
       `${HUB.grid} ${HUB.viewport}`,
       `${HUB.scroller} ${HUB.viewport}`,
@@ -2451,16 +1969,10 @@
     );
   }
 
-  /* Максимум, куда уже доскроллили: назад не откатываемся никогда. */
   let scrollReached = 0;
 
-  /*
-   * Ровно один способ прокрутки — присваивание scrollTop выбранному
-   * контейнеру. scrollIntoView убран: он двигает все прокручиваемые
-   * родители сразу, включая окно, и вместе с нашим scrollTop давал
-   * качание вверх-вниз. Колесо осталось только как запасной вариант,
-   * если элемент не реагирует на присваивание.
-   */
+  // scrollIntoView двигает все прокручиваемые родители разом, включая окно, и вместе
+  // с нашим scrollTop давал качание.
   function jumpToBottom(scroller) {
     if (!scroller) return false;
 
@@ -2476,19 +1988,11 @@
     scrollReached = Math.max(scrollReached, after);
 
     if (after > before) {
-      /*
-       * Нативное событие scroll приходит только на следующем обновлении
-       * отрисовки, а в скрытой вкладке оно ещё и придушено — обход из-за
-       * этого замедлялся в разы. Поэтому дублируем его синхронно.
-       *
-       * bubbles: false обязателен: настоящие scroll на элементах не
-       * всплывают, а всплывающий дубль будил обработчики внешних обёрток.
-       */
+      // bubbles: false обязателен — всплывающий дубль будил обработчики внешних обёрток.
       scroller.dispatchEvent(new Event("scroll", { bubbles: false }));
       return true;
     }
 
-    /* Присваивание не сработало — пробуем колесом. */
     fireWheel(scroller, Math.max(600, (scroller.clientHeight || 400) * 1.5));
     return (scroller.scrollTop || 0) > before;
   }
@@ -2505,20 +2009,10 @@
     return false;
   }
 
-  /*
-   * Ярлыки, по которым узнаём нужный вид истории. Внутри вкладки «История»
-   * Hub держит фишки фильтра «Все», «Перемещения» и «Свойства»; адрес
-   * открывает «Перемещения». Сюда попадаем, только если история почему-то
-   * не отрисовалась сама.
-   */
   const HISTORY_LABELS = ["перемещения", "история перемещений", "история"];
 
-  /*
-   * Перебираем ярлыки по порядку, но «уже открыта» и «не нашлось» — разные
-   * ответы. Если их путать, то на открытой вкладке «Перемещения» мы бы не
-   * остановились, пошли дальше по списку и кликнули «Все», уведя страницу
-   * не туда.
-   */
+  // «уже открыта» и «не нашлось» — разные ответы: спутаешь, и на открытых «Перемещениях»
+  // пойдёшь дальше по списку и кликнешь «Все»
   function clickHistoryTab() {
     for (const wanted of HISTORY_LABELS) {
       const state = clickTabLabelled(wanted);
@@ -2532,11 +2026,8 @@
     for (const el of document.querySelectorAll(HUB.tab)) {
       const label = textOf(el).toLowerCase();
       if (label !== wanted && !label.startsWith(wanted)) continue;
-      /*
-       * Активную вкладку Hub помечает не на самой кнопке, а на вложенном
-       * узле (ozi__tab-content__active__…), а активную фишку фильтра — её
-       * же классом filled и атрибутом disabled.
-       */
+      // активную вкладку Hub помечает на вложенном узле, а активную фишку фильтра —
+      // классом filled и атрибутом disabled
       if (el.getAttribute("aria-selected") === "true") return "active";
       if (el.disabled) return "active";
       if (/active|filled/i.test(String(el.className))) return "active";
@@ -2555,29 +2046,18 @@
     const left = () => deadline - Date.now();
     const dead = () => abortFlag || left() <= 0;
 
-    /* seen — строки-перемещения, seenAll — вообще все: по ним меряем, дочитали
-       ли мы список, ведь счётчик «Всего» на странице считает всё подряд. */
+    // seen — перемещения, seenAll — вообще все: счётчик «Всего» считает всё подряд
     const seen = new Set();
     const seenAll = new Set();
-    /* Страница открылась не на «Перемещениях» — счётчик тогда не про нас. */
     let domTrimmed = false;
     let prevLength = 0;
     let found = false;
     let sample = "";
-    /* Верхняя строка с искомым складом — из неё берём дату и ячейку. */
     let warehouseCells = null;
     let warehouseFields = null;
     let warehouseDate = "";
-    /*
-     * Ячейка может стоять не в верхней строке о складе, а строкой ниже:
-     * приход на склад её не показывает, а переезд по ячейкам — да. Поэтому
-     * дату берём из верхней строки, а ячейку — из первой, где она есть.
-     * Строки чужих складов сюда не попадают: отбор идёт по тому же
-     * совпадению.
-     */
     let warehouseCell = "";
 
-    /* Шапка не меняется по ходу списка — ищем колонку типа один раз. */
     let typeAt = null;
     function typeColumn() {
       if (typeAt == null) {
@@ -2609,7 +2089,6 @@
         const key = value.length > 320 ? value.slice(0, 320) : value;
         if (seenAll.has(key)) continue;
         seenAll.add(key);
-        /* Не перемещение — прочли, но себе не берём. */
         if (!keep.has(rows[i])) continue;
         seen.add(key);
         if (!value.toLowerCase().includes(needle)) continue;
@@ -2634,7 +2113,6 @@
 
     reportPhase("history", job.posting);
 
-    /* 1. Ждём саму историю. */
     let tabClicked = false;
     const ready = await waitFor(() => {
       if (historyReady()) return true;
@@ -2649,27 +2127,15 @@
       return { ok: false, status: "no_history", found: false, expected: 0, loaded: 0 };
     }
 
-    /*
-     * 2. Счётчик «Всего: N» — ориентир, дочитали ли мы список.
-     *
-     * Ноль в нём почти всегда означает «данные ещё не приехали». Раньше он
-     * принимался за настоящий итог, и дальше вся загрузка пропускалась:
-     * условие цикла было expected > 0. В ленте это видно как «N/0», а по
-     * сути читалась только первая отрисованная страница истории.
-     *
-     * Теперь total может быть null — «неизвестно». В этом случае список
-     * догружается до тех пор, пока он перестанет расти.
-     */
+    // Ноль в счётчике «Всего» обычно значит «данные ещё не приехали», поэтому total бывает null:
+    // тогда догружаем, пока список не перестанет расти.
     let total = parseCounter();
     if (total == null) {
-      /* Ждём счётчик, но не дольше, чем до появления строк: без счётчика
-         список всё равно можно вычитать, а вот стоять по 10 секунд на
-         каждом номере нельзя. */
+      // ждём счётчик, но не дольше появления строк: стоять по 10 секунд на каждом номере нельзя
       await waitFor(() => {
         total = parseCounter();
         return total != null || rowNodes().length > 0;
       }, Math.min(10000, left()));
-      /* Счётчик мог отрисоваться чуть позже строк — даём короткую отсрочку. */
       if (total == null) {
         await waitFor(() => (total = parseCounter()) != null, Math.min(600, Math.max(100, left())));
       }
@@ -2686,10 +2152,9 @@
 
     if (total == null) {
       if (detectMissing()) return { ok: false, status: "missing", found: false, expected: 0, loaded: 0 };
-      /* Счётчика нет, но строки есть — ориентируемся по ним. */
       if (!hasRows()) return { ok: false, status: "no_counter", found: false, expected: 0, loaded: 0 };
     } else if (total === 0 && hasRows()) {
-      /* Счётчик говорит «ноль», а строки на месте — значит он не про историю. */
+      // счётчик говорит «ноль», а строки на месте — значит он не про историю
       total = null;
     }
 
@@ -2714,9 +2179,7 @@
       sample = needle;
     }
 
-    /* 3. Догружаем список прыжками в конец. */
     const needMore = () => total == null || seenAll.size < total;
-    /* drained — список перестал расти, то есть прочитан до конца. */
     let drained = !needMore();
 
     if (!found && needMore()) {
@@ -2724,15 +2187,11 @@
       let stall = 0;
 
       while (!dead() && !found && needMore()) {
-        /* Ищем контейнер на каждом круге: пока строк не было, подходящего
-           контейнера могло не существовать вовсе. */
+        // ищем контейнер на каждом круге: пока строк не было, его могло не быть
         const scroller = findScroller();
         const before = rowNodes().length;
         const moved = jumpToBottom(scroller);
 
-        /* Пока счётчик известен и до него не добрали — там точно должно
-           приехать ещё, поэтому ждём заметно дольше. Медленный ответ Hub
-           не должен превращаться в «мало строк». */
         const patient = total != null;
         const wait = moved ? (patient ? 1200 : 700) : patient ? 1500 : 900;
         const grew = await waitRowGrowth(before, Math.min(wait, Math.max(150, left())));
@@ -2747,7 +2206,6 @@
         stall += 1;
 
         if (total == null) {
-          /* Итог неизвестен: внизу и не растёт — значит дочитали. */
           if (atBottom(scroller) && stall >= 2) {
             drained = true;
             break;
@@ -2771,11 +2229,6 @@
     }
 
     const card = readItemCard();
-    /*
-     * Суммы на странице истории нет — она живёт только на карточке
-     * предмета. Спрашиваем её тем же запросом, что и быстрый путь, чтобы
-     * цена была в отчёте независимо от того, как прочитана история.
-     */
     let money = emptyCard();
     if (!dead()) {
       try {
@@ -2786,14 +2239,10 @@
     }
     const tableRows = keepTransitionRows(rowNodes(), foreignWords(), typeColumn());
     const report = {
-      /* Со страницы номер и статус вернее, чем из карточки, но если её
-         разметка не прочиталась — берём то, что дал запрос. */
       number: card.number || money.number || "",
       status: card.status || money.status || "",
       columns: tableColumns(),
       lastRows: [...tableRows].slice(0, 3).map(rowCells),
-      /* Разметка знает и дату, и ячейку точно; текстовый разбор остаётся
-         откатом на случай другой вёрстки. */
       warehouseAt: warehouseDate || (warehouseCells ? findDate(warehouseCells) : ""),
       warehouseCell:
         warehouseFields?.["Ячейка"] || warehouseCell || (warehouseCells ? findCell(warehouseCells) : ""),
@@ -2802,14 +2251,8 @@
     };
 
     const loaded = seen.size;
-    /* Нашли — значит дочитали ровно столько, сколько было нужно. */
     const complete = found || (total != null ? seenAll.size >= total : drained);
-    /* Итог неизвестен: если список вычитан до конца или искомое уже нашлось,
-       «всего» = сколько прочли. Ноль остаётся только там, где мы правда не
-       дочитали — в ленте это и читается как «мало строк».
-
-       А если страница показала не только перемещения, счётчик «Всего» на ней
-       про всю историю — сравнивать наш срез с ним нельзя. */
+    // Итог неизвестен: список вычитан или искомое нашлось — «всего» это сколько прочли.
     const expected = domTrimmed
       ? complete || found
         ? loaded
@@ -2836,10 +2279,6 @@
     };
   }
 
-  /* ------------------------------------------------------------------ */
-  /* обработка заданий                                                   */
-  /* ------------------------------------------------------------------ */
-
   function normalizeReport(report) {
     if (!report || typeof report !== "object") return null;
     const rows = Array.isArray(report.lastRows) ? report.lastRows.slice(0, 3) : [];
@@ -2853,7 +2292,6 @@
       price: String(report.price || ""),
       fairPrice: String(report.fairPrice || ""),
       columns: (Array.isArray(report.columns) ? report.columns : []).map((value) => String(value || "")),
-      /* Режем длинные значения: в отчёт идут три строки, а не вся история. */
       lastRows: rows.map((row) =>
         (Array.isArray(row) ? row : []).map((value) => String(value || "").slice(0, 600))
       )
@@ -2942,11 +2380,9 @@
     if (message.action === "ht:setHints") {
       if (message.appVersion && !appVersion) appVersion = String(message.appVersion);
       if (message.placeId && !placeId) placeId = String(message.placeId);
-      /* Фон уже выяснил, что известной ручки нет. После каждой загрузки
-         страницы content script поднимается заново и без этого ходил бы
-         за ней снова и снова. */
+      // content script поднимается заново после каждой загрузки и без этого
+      // ходил бы за мёртвой ручкой снова
       if (message.nativeApi === false) nativeOff = true;
-      /* Вариант запроса уже подобран другой вкладкой — не подбираем снова. */
       if (message.apiTune && !apiTune) apiTune = message.apiTune;
       if (typeof message.cardPlaceless === "boolean" && cardPlaceless == null) {
         cardPlaceless = message.cardPlaceless;
@@ -2992,9 +2428,7 @@
     return false;
   });
 
-  /* Страница сама сообщает фону, что готова принять задание. */
-  /* Подсказки нужны всем вкладкам, а узнаёт их та, что открылась первой:
-     склад оператора Hub дописывает в адрес уже после загрузки страницы. */
+  // склад оператора Hub дописывает в адрес уже после загрузки страницы
   function shareHints() {
     readBuildVars();
     readPlaceFromLocation();
@@ -3021,7 +2455,6 @@
   }
 
   void announce();
-  /* Пробник мог поймать рецепт уже после нашей подписки. */
   setTimeout(askProbeForRecipe, 1200);
   setTimeout(askProbeForRecipe, 4000);
 })();

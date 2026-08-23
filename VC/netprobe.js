@@ -1,14 +1,5 @@
-/*
- * Hub Trace · сетевой пробник (MAIN world, document_start).
- *
- * Страница Hub тянет историю предмета обычным XHR/fetch. Пробник запоминает
- * этот запрос («рецепт») и умеет повторить его для любого другого номера.
- * Благодаря этому расширению не нужно рендерить целую SPA-страницу на каждый
- * номер: один сетевой round-trip вместо загрузки бандла, гидрации и скролла.
- *
- * Пробник ничего не отправляет наружу сам — он только кладёт рецепт в
- * window.postMessage, откуда его забирает scanner.js (ISOLATED world).
- */
+// Пробник в MAIN world: подсматривает, каким запросом страница тянет историю предмета.
+// Запомненный «рецепт» потом повторяется для любого номера — один round-trip вместо загрузки SPA.
 (() => {
   if (window.__hubTraceProbe) return;
 
@@ -28,14 +19,11 @@
   const probe = {
     recipe: null,
     score: -1,
-    /* Второй рецепт — карточка предмета. Номер отправления и статус живут
-       не в истории, а в ней, и для отчёта нужны оба запроса. */
+    // второй рецепт — карточка: номер отправления и статус живут не в истории
     card: null,
     cardScore: -1,
     startedAt: Date.now(),
     capturing: true,
-    /* Версия приложения Hub и склад оператора — для обращений к известным
-       ручкам напрямую, без подсмотренного запроса. */
     appVersion: "",
     placeId: ""
   };
@@ -44,9 +32,7 @@
   function post(payload) {
     try {
       window.postMessage({ channel: CHANNEL, ...payload }, ORIGIN);
-    } catch (_err) {
-      /* страница может заменить postMessage — не наша проблема */
-    }
+    } catch {}
   }
 
   function itemIdFromHref(href) {
@@ -92,13 +78,11 @@
       if (typeof input === "object") {
         for (const key of Object.keys(input)) out[key] = String(input[key]);
       }
-    } catch (_err) {
-      /* ignore */
-    }
+    } catch {}
     return out;
   }
 
-  /* Заголовки, которые браузер обязан выставлять сам. Повторять их нельзя. */
+  // эти заголовки браузер ставит сам, повторять их нельзя
   const FORBIDDEN_HEADERS = new Set([
     "host",
     "connection",
@@ -135,11 +119,7 @@
     return head.startsWith("{") || head.startsWith("[");
   }
 
-  /*
-   * Рецепт годится, только если ID предмета в нём виден: подставлять свой
-   * номер иначе некуда, и повтор вернул бы историю чужого предмета на
-   * каждый запрос. Такой «рецепт» лучше не отдавать вовсе.
-   */
+  // Без ID предмета в рецепте подставлять номер некуда — на каждый запрос приедет история чужого предмета.
   function carriesId(url, body, itemId) {
     if (!itemId) return false;
     const hay = `${url || ""}\n${typeof body === "string" ? body : ""}`;
@@ -170,15 +150,13 @@
       score += Math.min(12, Math.floor(responseText.length / 3000));
     }
 
-    /* Статика и телеметрия нам не нужны ни при каких обстоятельствах. */
     if (/\.(js|css|png|jpe?g|svg|woff2?|ico|map)(\?|$)/.test(url)) return -1;
     if (/analytics|metrics|sentry|telemetry|tracker/.test(url)) return -1;
 
     return score;
   }
 
-  /* Похоже на карточку предмета: номер вида 0109673395-0032-1 в ответе,
-     сам предмет опознаётся по id, и это точно не история. */
+  // карточка предмета: номер вида 0109673395-0032-1 в ответе и точно не история
   const POSTING_NUMBER_RE = /\d{6,}-\d{2,}-\d{1,3}/;
 
   function scoreCard(request, responseText) {
@@ -193,7 +171,7 @@
     if (itemId && responseText.includes(itemId)) score += 15;
     if (/"(status|state|stateName|statusName)"/i.test(responseText)) score += 20;
     if (/\/item|\/predmet|\/stock/.test(url)) score += 10;
-    /* Короткий ответ вероятнее карточка, длинный — список. */
+    // короткий ответ скорее карточка, длинный — список
     score += Math.max(0, 10 - Math.floor(responseText.length / 20000));
     return score;
   }
@@ -220,15 +198,8 @@
     post({ type: "cardRecipe", recipe });
   }
 
-  /*
-   * Подсказки: версия приложения Hub и склад оператора. Оба значения Hub
-   * шлёт в своих же запросах — версию заголовком, склад параметром
-   * warehouse. Знать их нужно, чтобы обращаться к известным ручкам без
-   * подсмотренного запроса, поэтому забираем из любого обращения, а не
-   * только из тех, что годятся в рецепт.
-   */
-  /* Значения заголовков x-o3-app-* Hub держит в глобальной переменной
-     страницы — из MAIN-мира она видна напрямую. */
+  // Версию приложения и склад оператора Hub шлёт в своих же запросах — забираем из любого
+  // обращения, а не только из тех, что годятся в рецепт.
   function readBuildVars() {
     if (probe.appVersion) return false;
     try {
@@ -237,9 +208,7 @@
         probe.appVersion = String(config.GIT_BRANCH);
         return true;
       }
-    } catch (_err) {
-      /* ignore */
-    }
+    } catch {}
     return false;
   }
 
@@ -307,8 +276,6 @@
     post({ type: "recipe", recipe });
   }
 
-  /* ---------- перехват fetch ---------- */
-
   if (originalFetch) {
     window.fetch = function hubTraceFetch(input, init) {
       let request = null;
@@ -357,8 +324,6 @@
     };
   }
 
-  /* ---------- перехват XHR ---------- */
-
   if (XHR && protoOpen && protoSend) {
     XHR.prototype.open = function hubTraceOpen(method, url) {
       try {
@@ -368,9 +333,7 @@
           headers: {},
           body: null
         };
-      } catch (_err) {
-        /* ignore */
-      }
+      } catch {}
       return protoOpen.apply(this, arguments);
     };
 
@@ -378,9 +341,7 @@
       XHR.prototype.setRequestHeader = function hubTraceSetHeader(key, value) {
         try {
           if (this[INFO]) this[INFO].headers[String(key)] = String(value);
-        } catch (_err) {
-          /* ignore */
-        }
+        } catch {}
         return protoSetHeader.apply(this, arguments);
       };
     }
@@ -397,19 +358,13 @@
               const text =
                 this.responseType === "json" ? JSON.stringify(this.response) : String(this.responseText || "");
               consider(info, text);
-            } catch (_err) {
-              /* ignore */
-            }
+            } catch {}
           });
         }
-      } catch (_err) {
-        /* ignore */
-      }
+      } catch {}
       return protoSend.apply(this, arguments);
     };
   }
-
-  /* ---------- повтор запроса по рецепту ---------- */
 
   window.addEventListener("message", (event) => {
     if (event.source !== window) return;
@@ -422,9 +377,7 @@
     const timer = setTimeout(() => {
       try {
         controller?.abort();
-      } catch (_err) {
-        /* ignore */
-      }
+      } catch {}
     }, Math.max(1000, Number(timeoutMs) || 20000));
 
     const init = {
@@ -456,8 +409,7 @@
       });
   });
 
-  /* Рецепт может быть пойман до того, как scanner.js подпишется на канал —
-     поэтому отвечаем и на запрос «что уже есть». */
+  // рецепт мог пойматься раньше, чем scanner подписался на канал
   window.addEventListener("message", (event) => {
     if (event.source !== window) return;
     if (event.origin && event.origin !== ORIGIN) return;
