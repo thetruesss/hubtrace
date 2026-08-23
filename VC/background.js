@@ -15,6 +15,19 @@
 const APP_PATH = "app.html";
 const STORAGE_RUNTIME = "hubTraceRuntime";
 const STORAGE_FINISHED = "hubTraceFinished";
+/* Список прошлых прогонов: короткие сводки в одном ключе, а полный итог
+   каждого — своим ключом, чтобы читать только тот, который открывают. */
+const STORAGE_RUNS = "hubTraceRuns";
+const RUN_PREFIX = "hubTraceRun:";
+const MAX_RUNS = 5;
+/*
+ * Сколько байт отдаём под архив. chrome.storage.local без unlimitedStorage
+ * даёт около десяти мегабайт на всё, а один прогон на тысячу номеров — это
+ * примерно мегабайт. Держим запас: как только пять прогонов перестают
+ * помещаться, самые старые уходят целиком — и сводка, и итог, — чтобы в
+ * списке не осталось строк, которые нечем открыть.
+ */
+const RUNS_BUDGET_BYTES = 6 * 1024 * 1024;
 const STORAGE_SETTINGS = "hubTraceSettings";
 
 const MODES = {
@@ -185,6 +198,22 @@ function storageSet(payload) {
 
 function storageRemove(keys) {
   return new Promise((resolve) => chrome.storage.local.remove(keys, resolve));
+}
+
+/* То же, что storageSet, но говорит, легло ли: переполнение хранилища
+   приходит через lastError, а не исключением. */
+function storageSetChecked(payload) {
+  return new Promise((resolve) => {
+    try {
+      chrome.storage.local.set(payload, () => {
+        const failed = Boolean(chrome.runtime.lastError);
+        ignoreLastError();
+        resolve(!failed);
+      });
+    } catch (_err) {
+      resolve(false);
+    }
+  });
 }
 
 function emit(payload) {
@@ -1556,6 +1585,93 @@ function maybeFinalize() {
   void finalize();
 }
 
+/* Тот же разбор, что показывает приложение: есть склад / нет / не вышло. */
+function verdictKind(item) {
+  if (item?.found) return "hit";
+  return isIssue(item) ? "issue" : "miss";
+}
+
+function runSummary(finished, bytes) {
+  const results = Array.isArray(finished?.results) ? finished.results : [];
+  let hits = 0;
+  let misses = 0;
+  let issues = 0;
+  for (const item of results) {
+    const kind = verdictKind(item);
+    if (kind === "hit") hits += 1;
+    else if (kind === "miss") misses += 1;
+    else issues += 1;
+  }
+  return {
+    jobId: finished.jobId,
+    warehouse: finished.warehouse || "",
+    at: finished.finishedAt || Date.now(),
+    inputCount: Number(finished.inputCount) || results.length,
+    durationMs: Number(finished.durationMs) || 0,
+    stopped: Boolean(finished.stopped),
+    hits,
+    misses,
+    issues,
+    bytes
+  };
+}
+
+function byteSize(value) {
+  try {
+    return new TextEncoder().encode(value).length;
+  } catch (_err) {
+    return value.length * 2;
+  }
+}
+
+/*
+ * Кладём прогон в архив: сводку — в общий список, итог — отдельным ключом.
+ * Прогон без jobId не архивируем: по нему потом нечего открывать.
+ */
+async function archiveRun(finished) {
+  if (!finished?.jobId) return;
+
+  let json;
+  try {
+    json = JSON.stringify(finished);
+  } catch (_err) {
+    return;
+  }
+
+  const saved = await new Promise((resolve) => chrome.storage.local.get([STORAGE_RUNS], resolve));
+  const previous = Array.isArray(saved[STORAGE_RUNS]) ? saved[STORAGE_RUNS] : [];
+  const fresh = runSummary(finished, byteSize(json));
+
+  /* Тот же прогон второй раз (перезапуск фона) не должен задваиваться. */
+  let runs = [fresh, ...previous.filter((run) => run && run.jobId !== fresh.jobId)];
+
+  /* Самый свежий остаётся всегда, даже если один занимает весь бюджет. */
+  const kept = [];
+  let bytes = 0;
+  for (const run of runs.slice(0, MAX_RUNS)) {
+    const size = Number(run.bytes) || 0;
+    if (kept.length && bytes + size > RUNS_BUDGET_BYTES) break;
+    kept.push(run);
+    bytes += size;
+  }
+
+  /*
+   * Сначала освобождаем место, потом пишем итог, и только если он лёг —
+   * обновляем список. chrome.storage сообщает о переполнении не
+   * исключением, а lastError, поэтому проверяем его: иначе в списке
+   * осталась бы строка, которую нечем открыть.
+   */
+  const gone = runs.filter((run) => !kept.includes(run)).map((run) => `${RUN_PREFIX}${run.jobId}`);
+  if (gone.length) await storageRemove(gone);
+
+  const stored = await storageSetChecked({ [`${RUN_PREFIX}${fresh.jobId}`]: finished });
+  if (!stored) {
+    notice("api", "Не хватило места сохранить итог прогона — список прошлых проверок не обновлён.");
+    return;
+  }
+  await storageSetChecked({ [STORAGE_RUNS]: kept });
+}
+
 async function finalize() {
   if (state.finalized) return;
   state.finalized = true;
@@ -1602,6 +1718,7 @@ async function finalize() {
   closeWorkerWindow();
 
   await storageSet({ [STORAGE_FINISHED]: finished });
+  await archiveRun(finished);
   await persistRuntime();
   notifyFinished(finished);
   emit({ action: "scanFinished", jobId: finished.jobId, stopped, finished });

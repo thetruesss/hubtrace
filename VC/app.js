@@ -2,6 +2,10 @@
 
 const STORAGE_SETTINGS = "hubTraceSettings";
 const STORAGE_FINISHED = "hubTraceFinished";
+/* Архив прогонов: сводки одним списком, полный итог каждого — своим
+   ключом, чтобы читать только тот, который открывают. */
+const STORAGE_RUNS = "hubTraceRuns";
+const RUN_PREFIX = "hubTraceRun:";
 
 const MODE_HINTS = {
   turbo: "Максимум скорости: больше вкладок, минимум перепроверок. Для длинных списков.",
@@ -72,7 +76,9 @@ const ui = {
   reportSaved: false,
   recentWarehouses: [],
   rates: {},
-  runsLog: [],
+  /* Сводки прошлых прогонов и тот, что сейчас раскрыт в списке. */
+  runs: [],
+  openRun: "",
   /* Замеры для живых графиков на экране прогона. */
   rateLog: [],
   etaLog: []
@@ -412,6 +418,8 @@ function setStep(name) {
   ui.currentStep = name;
   syncSteps();
   renderFab();
+  /* «7 мин назад» протухает, пока смотрят результат. */
+  if (name === "input") renderRuns();
   if (!to) return;
 
   window.clearTimeout(stepSwapTimer);
@@ -1012,53 +1020,140 @@ function fmtAgo(at) {
   return `${pad(date.getDate())}.${pad(date.getMonth() + 1)}`;
 }
 
-function renderRuns() {
-  const list = $("runs");
-  const empty = $("runs-empty");
-  if (!list) return;
-  list.innerHTML = "";
-  if (empty) empty.hidden = ui.runsLog.length > 0;
-  /* Пустая панель не должна раздуваться во всю колонку. */
-  list.closest(".panel")?.classList.toggle("is-empty", ui.runsLog.length === 0);
-  for (const run of ui.runsLog) {
-    const li = document.createElement("li");
-    const btn = document.createElement("button");
-    btn.type = "button";
-    btn.className = "run";
-    btn.title = "Подставить этот склад";
-    const name = document.createElement("b");
-    name.textContent = run.warehouse;
-    const meta = document.createElement("em");
-    meta.textContent = `нашлось ${run.hits} из ${run.total} · ${fmtAgo(run.at)}`;
-    /* Действие подписано прямо на карточке: раньше было непонятно, что
-       вообще случится по клику — поле склада менялось молча. */
-    const act = document.createElement("i");
-    act.textContent = "подставить склад";
-    btn.append(name, meta, act);
-    btn.addEventListener("click", () => {
-      warehouseEl.value = run.warehouse;
-      updateFormState();
-      postingsEl.focus();
-      toast("ok", `Склад ${run.warehouse} подставлен — осталось вставить номера`);
-    });
-    li.appendChild(btn);
+/*
+ * Прошлые прогоны в боковой колонке.
+ *
+ * Раньше здесь стоял список складов из прошлых проверок, но он повторял
+ * то, что и так подсказывает само поле склада. Теперь тут пять последних
+ * проверок: строка сворачивается до склада и времени, разворачивается до
+ * итога и кнопки, которая открывает разбор — не запуская новый прогон.
+ */
+function runLine(run) {
+  const item = el("div", "run");
+  const open = ui.openRun === run.jobId;
+  item.classList.toggle("is-open", open);
+
+  const head = el("button", "run__head");
+  head.type = "button";
+  head.setAttribute("aria-expanded", String(open));
+  head.title = open ? "Свернуть" : "Показать итог";
+
+  const name = el("b", "run__place", run.warehouse || "без склада");
+  name.title = run.warehouse || "";
+  head.appendChild(name);
+  head.appendChild(el("em", "run__ago", fmtAgo(run.at)));
+
+  const caret = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  caret.setAttribute("viewBox", "0 0 12 12");
+  caret.setAttribute("class", "run__caret");
+  caret.setAttribute("aria-hidden", "true");
+  const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+  path.setAttribute("d", "M2.5 4.5 6 8l3.5-3.5");
+  path.setAttribute("fill", "none");
+  path.setAttribute("stroke", "currentColor");
+  path.setAttribute("stroke-width", "1.6");
+  path.setAttribute("stroke-linecap", "round");
+  path.setAttribute("stroke-linejoin", "round");
+  caret.appendChild(path);
+  head.appendChild(caret);
+
+  /* Раскрыт всегда один: пять развёрнутых итогов не помещаются в колонку. */
+  head.addEventListener("click", () => {
+    ui.openRun = ui.openRun === run.jobId ? "" : run.jobId;
+    renderRuns();
+  });
+  item.appendChild(head);
+
+  const body = el("div", "run__body");
+  /* Один вложенный блок: сетке нужно что сжимать до нуля. */
+  const inner = el("div", "run__inner");
+  const rows = [
+    ["hit", "склад есть", run.hits],
+    ["miss", "склада нет", run.misses],
+    ["issue", "не вышло", run.issues]
+  ];
+  const list = el("ul", "last__rows");
+  for (const [mod, label, value] of rows) {
+    const li = el("li", `last__row last__row--${mod}`);
+    li.appendChild(el("b", null, String(Number(value) || 0)));
+    li.appendChild(el("span", null, label));
     list.appendChild(li);
   }
+  inner.appendChild(list);
+
+  const total = Number(run.inputCount) || 0;
+  const foot = [`из ${total} ${plural(total, ["номера", "номеров", "номеров"])}`];
+  if (run.durationMs) foot.push(fmtDuration(run.durationMs));
+  if (run.stopped) foot.push("остановлено");
+  inner.appendChild(el("p", "last__foot", foot.join(" · ")));
+
+  const go = el("button", "btn btn--ghost btn--sm last__open", "Открыть результат");
+  go.type = "button";
+  go.addEventListener("click", () => void openRun(run.jobId));
+  inner.appendChild(go);
+
+  body.appendChild(inner);
+  item.appendChild(body);
+  return item;
 }
 
-function logRun(payload, results) {
-  const warehouse = String(payload?.warehouse || "").trim();
-  if (!warehouse || !results.length) return;
-  const entry = {
-    warehouse,
-    hits: ui.lists.hits.length,
-    total: payload?.inputCount || results.length,
-    at: Date.now()
-  };
-  ui.runsLog = [entry, ...ui.runsLog].slice(0, 6);
-  renderRuns();
-  patchSettings({ runsLog: ui.runsLog });
+function renderRuns() {
+  const host = $("runs");
+  const empty = $("runs-empty");
+  const count = $("runs-count");
+  if (!host) return;
+
+  const runs = ui.runs;
+  if (empty) empty.hidden = runs.length > 0;
+  if (count) {
+    count.hidden = !runs.length;
+    count.textContent = String(runs.length);
+  }
+  $("last-run")?.classList.toggle("is-empty", runs.length === 0);
+
+  /* Ничего не раскрыто — раскрываем самый свежий. */
+  if (runs.length && !runs.some((run) => run.jobId === ui.openRun)) ui.openRun = runs[0].jobId;
+
+  host.innerHTML = "";
+  for (const run of runs) host.appendChild(runLine(run));
 }
+
+/*
+ * Открыть разбор прошлого прогона. Тот, что уже загружен, просто
+ * показываем; за остальными идём в хранилище — итоги лежат по своим
+ * ключам, чтобы не читать весь архив ради одного.
+ */
+async function openRun(jobId) {
+  if (ui.finished?.jobId && ui.finished.jobId === jobId) {
+    setStep("result");
+    return;
+  }
+  const key = `${RUN_PREFIX}${jobId}`;
+  const saved = await storageGet([key]);
+  const payload = saved[key];
+  if (!payload?.results?.length) {
+    toast("error", "Итог этого прогона не сохранился — запустите проверку заново.");
+    return;
+  }
+  /* Вернувшись к номерам, человек должен увидеть раскрытым тот прогон,
+     который только что открывал. */
+  ui.openRun = jobId;
+  renderResults(payload);
+}
+
+async function loadRuns() {
+  const saved = await storageGet([STORAGE_RUNS]);
+  ui.runs = Array.isArray(saved[STORAGE_RUNS]) ? saved[STORAGE_RUNS].filter((run) => run?.jobId) : [];
+  renderRuns();
+}
+
+/* Прогон архивирует фон — список подхватываем, как только он изменился. */
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area !== "local" || !changes[STORAGE_RUNS]) return;
+  const next = changes[STORAGE_RUNS].newValue;
+  ui.runs = Array.isArray(next) ? next.filter((run) => run?.jobId) : [];
+  renderRuns();
+});
 
 function renderResults(payload, fresh) {
   const results = (payload?.results || []).filter(Boolean);
@@ -1118,11 +1213,11 @@ function renderResults(payload, fresh) {
   setText($("gauge-eta"), payload?.stopped ? "стоп" : "0:00");
 
   ui.hasResults = true;
-  if (fresh) logRun(payload, results);
+  renderRuns();
   updateFormState();
   setStep("result");
 
-  if (duration > 4000 && results.length >= 5 && !payload?.stopped) {
+  if (fresh && duration > 4000 && results.length >= 5 && !payload?.stopped) {
     const measured = (results.length / duration) * 60000;
     ui.rates = { ...ui.rates, auto: measured };
     patchSettings({ rates: ui.rates });
@@ -1683,7 +1778,6 @@ chrome.runtime.onMessage.addListener((message) => {
 function applySavedSettings(saved) {
   if (!saved) return;
   /* Режим и вкладки движок выбирает сам — из хранилища их не читаем. */
-  if (Array.isArray(saved.runsLog)) ui.runsLog = saved.runsLog.slice(0, 6);
   if (Array.isArray(saved.statsCols)) {
     const cols = saved.statsCols.filter((key) => STATS_COLUMNS[key]);
     if (cols.length) statsCols = [...new Set(cols)];
@@ -1713,7 +1807,7 @@ async function boot() {
   applySavedSettings(saved[STORAGE_SETTINGS]);
   writeDecks();
   renderRecentWarehouses();
-  renderRuns();
+  void loadRuns();
   updateCount();
 
   const live = await send({ action: "getScanState" });

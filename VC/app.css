@@ -4519,27 +4519,137 @@ a.t-id__code:hover {
 }
 
 /* ================================================================== */
-/*  недавние проверки                                                  */
+/*  итог последней проверки                                            */
+/*                                                                     */
+/*  Со стартового экрана иначе не видно, чем кончился прошлый прогон.  */
+/*  Панель забирает высоту, которую раньше занимал список складов, —   */
+/*  но только когда есть что показать.                                 */
 /* ================================================================== */
 
-.panel--runs {
+/*
+ * Панель ровно по своему содержимому. Растягивать её на всю колонку нечем:
+ * свёрнутые строки и один раскрытый итог не заполнят полтысячи пикселей, а
+ * пустота под ними и была тем, за что не любили прошлый блок.
+ */
+.panel--last {
   min-height: 0;
-  /* Забирает высоту, которую раньше занимали настройки скорости, — но
-     только когда есть что показать: пустая панель не раздувается. */
-  flex: 1 1 auto;
-  transition: flex-grow 0.3s var(--ease);
-}
-
-.panel--runs.is-empty {
-  flex: 0 0 auto;
-}
-
-.panel--runs .runs {
-  min-height: 0;
-  overflow-y: auto;
+  flex: 0 1 auto;
 }
 
 .runs {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  overflow-y: auto;
+}
+
+.run {
+  border: 1px solid var(--stroke-2);
+  border-radius: var(--r-sm);
+  background: var(--glass-2);
+  transition: border-color 0.22s var(--ease), background 0.22s var(--ease);
+}
+
+.run.is-open {
+  border-color: rgba(47, 123, 255, 0.4);
+  background: rgba(47, 123, 255, 0.07);
+}
+
+/* Свёрнутая строка: склад, когда это было, стрелка. */
+.run__head {
+  width: 100%;
+  display: flex;
+  align-items: baseline;
+  gap: 9px;
+  padding: 9px 11px;
+  border: 0;
+  border-radius: inherit;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.run__head:hover .run__place {
+  color: #cfe0ff;
+}
+
+.run__place {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 12px;
+  font-weight: 650;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  transition: color 0.2s var(--ease);
+}
+
+.run__ago {
+  flex: 0 0 auto;
+  font-style: normal;
+  font-size: 10.5px;
+  color: var(--faint);
+  white-space: nowrap;
+}
+
+.run__caret {
+  flex: 0 0 auto;
+  align-self: center;
+  width: 12px;
+  height: 12px;
+  color: var(--faint);
+  transition: transform 0.24s var(--sp), color 0.2s var(--ease);
+}
+
+.run.is-open .run__caret {
+  transform: rotate(180deg);
+  color: #9dc2ff;
+}
+
+/*
+ * Итог раскрывается высотой, а не появляется рывком: сетка едет от 0fr к
+ * 1fr, а вложенный блок с min-height: 0 даёт ей себя сжать. Отступы живут
+ * на нём же — с box-sizing: border-box они схлопываются вместе с высотой.
+ */
+.run__body {
+  display: grid;
+  grid-template-rows: 0fr;
+  overflow: hidden;
+  /* Горизонтальные отступы здесь: на высоту свёрнутой строки не влияют. */
+  padding: 0 11px;
+  transition: grid-template-rows 0.26s var(--ease);
+}
+
+.run.is-open .run__body {
+  grid-template-rows: 1fr;
+}
+
+.run__inner {
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/*
+ * Вертикальные отступы — полями крайних детей, а не padding на .run__inner.
+ * Дорожка 0fr не сжимается ниже padding вложенного блока, и свёрнутая
+ * строка оставалась на тринадцать пикселей выше, чем нужно.
+ */
+.run__inner > :first-child {
+  margin-top: 2px;
+}
+
+.run__inner > :last-child {
+  margin-bottom: 11px;
+}
+
+.last__rows {
   list-style: none;
   margin: 0;
   padding: 0;
@@ -4548,96 +4658,60 @@ a.t-id__code:hover {
   gap: 6px;
 }
 
-.runs li {
+/* Цифра слева, подпись за ней — читается сверху вниз одним взглядом. */
+.last__row {
+  display: flex;
+  align-items: baseline;
+  gap: 9px;
+  padding: 7px 11px;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--stroke-2);
+  background: var(--glass-2);
   animation: row-in 0.32s var(--ease) both;
 }
 
-/*
- * Карточка склада из прошлой проверки. Раньше это была строка «склад —
- * итог», и что случится по клику, узнать было неоткуда. Теперь действие
- * подписано третьей строкой и проявляется под курсором.
- */
-.run {
-  width: 100%;
-  display: grid;
-  grid-template-columns: 1fr auto;
-  align-items: baseline;
-  gap: 2px 10px;
-  padding: 8px 11px;
-  border: 1px solid var(--stroke-2);
-  border-radius: var(--r-sm);
-  background: var(--glass-2);
-  color: inherit;
-  font: inherit;
-  text-align: left;
-  cursor: pointer;
-  transition: border-color 0.22s var(--ease), background 0.22s var(--ease), transform 0.22s var(--sp);
-}
-
-.run i {
-  grid-column: 1 / -1;
-  font-style: normal;
-  font-size: 10.5px;
-  letter-spacing: 0.04em;
-  color: var(--faint);
-  opacity: 0.75;
-  transition: color 0.22s var(--ease), opacity 0.22s var(--ease);
-}
-
-.run i::after {
-  content: " →";
-}
-
-.run:hover i,
-.run:focus-visible i {
-  color: #9dc2ff;
-  opacity: 1;
-}
-
-.run:hover {
-  border-color: rgba(47, 123, 255, 0.5);
-  background: rgba(47, 123, 255, 0.08);
-  transform: translateX(2px);
-}
-
-.run b {
-  min-width: 0;
-  font-size: 12px;
-  font-weight: 650;
-  color: var(--text);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.run em {
-  flex: 0 0 auto;
-  font-style: normal;
-  font-size: 10.5px;
-  color: var(--faint);
+.last__row b {
+  min-width: 2ch;
+  font-size: 16px;
+  font-weight: 700;
+  line-height: 1;
   font-variant-numeric: tabular-nums;
 }
 
-.runs__empty {
-  margin: 2px 0 0;
-  padding: 14px 12px;
-  border: 1px dashed var(--stroke-2);
-  border-radius: var(--r-sm);
+.last__row span {
   font-size: 11.5px;
-  color: var(--faint);
-  line-height: 1.5;
-  text-align: center;
+  color: var(--muted);
 }
 
-@keyframes row-in {
-  from {
-    opacity: 0;
-    transform: translateY(-6px);
-  }
-  to {
-    opacity: 1;
-    transform: none;
-  }
+.last__row--hit b {
+  color: var(--hit-soft);
+}
+
+.last__row--miss b {
+  color: var(--miss-soft);
+}
+
+.last__row--issue b {
+  color: #ffada2;
+}
+
+.last__foot {
+  margin: 0;
+  font-size: 11px;
+  color: var(--faint);
+}
+
+.last__open {
+  width: 100%;
+  min-height: 32px;
+  margin-top: 2px;
+}
+
+.last__empty {
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--faint);
 }
 
 /* ================================================================== */
@@ -4877,7 +4951,7 @@ a.t-id__code:hover {
 @media (prefers-reduced-motion: reduce) {
   .stats__table tbody tr,
   .spanel,
-  .runs li,
+  .last__row,
   .gauge__ticks i,
   .screen,
   .screen.is-leaving,
