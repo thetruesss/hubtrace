@@ -126,8 +126,31 @@
    *
    * Теперь при равном качестве побеждает более свежий рецепт.
    */
+  /*
+   * Подставить номер можно только туда, где он есть.
+   *
+   * Рецепт — это чужой запрос, в котором мы меняем ID предмета на свой.
+   * Если ID не встречается ни в адресе, ни в теле (страница могла
+   * передать его заголовком или вообще держать в сессии), подстановка
+   * молча не сработает — и на все номера приедет одна и та же история.
+   * Это худший из возможных исходов: данные перепутаны, а внешне всё
+   * хорошо. Такой рецепт не берём вовсе.
+   */
+  function carriesId(recipe) {
+    const id = String(recipe?.itemId || "");
+    if (!id) return false;
+    const hay = `${recipe.url || ""}\n${recipe.body || ""}`;
+    if (hay.includes(id)) return true;
+    try {
+      return hay.includes(encodeURIComponent(id));
+    } catch (_err) {
+      return false;
+    }
+  }
+
   function adoptRecipe(next, share) {
     if (!next || !next.url || !next.itemId) return;
+    if (!carriesId(next)) return;
     const score = Number(next.score) || 0;
     const captured = Number(next.capturedAt) || 0;
     const currentCaptured = Number(recipe?.capturedAt) || 0;
@@ -144,6 +167,7 @@
 
   function adoptCardRecipe(next, share) {
     if (!next || !next.url || !next.itemId) return;
+    if (!carriesId(next)) return;
     const score = Number(next.score) || 0;
     const captured = Number(next.capturedAt) || 0;
     const currentCaptured = Number(cardRecipe?.capturedAt) || 0;
@@ -288,10 +312,19 @@
   /* Хоть одна запись за прогон совпала со списком типов — значит он живой. */
   let typesConfirmed = false;
 
+  /*
+   * Рецепт снимается с любой открытой вкладки Hub — в том числе со
+   * «Свойств». Её список типов (Flow, USK, CustomsState…) не пересекается
+   * с перемещениями, и принять его значило бы запрашивать чужой срез, а
+   * потом выбросить всё, что пришло: ровно так из отчёта и пропадали
+   * строки. Принимаем список, только если в нём есть хоть одно
+   * перемещение.
+   */
   function adoptAuditTypes(next) {
     if (!Array.isArray(next) || !next.length) return false;
     const clean = next.map((value) => String(value || "")).filter(Boolean);
     if (!clean.length) return false;
+    if (!clean.some((code) => TRANSITION_TYPES.includes(code))) return false;
     if (clean.join("|") === auditTypes.join("|")) return false;
     auditTypes = clean;
     return true;
@@ -361,7 +394,7 @@
   }
 
   function hintPayload() {
-    return { action: "ht:hints", appVersion, placeId, apiTune, auditTypes };
+    return { action: "ht:hints", appVersion, placeId, apiTune, auditTypes, cardPlaceless };
   }
 
   function readPlaceFromLocation() {
@@ -862,8 +895,55 @@
      Полный переезд полезнее конечной ячейки: видно, откуда предмет уехал. */
   function auditCell(record) {
     const cell = record?.stateChanges?.cell;
-    if (!cell) return "";
-    return transition(cellPath(cell.from), cellPath(cell.to));
+    if (cell) {
+      const moved = transition(cellPath(cell.from), cellPath(cell.to));
+      /* Обе стороны пустые — Hub рисует прочерк. Такую «ячейку» в отчёт
+         пускать нельзя: она ничем не лучше пустоты, а строку с настоящей
+         ячейкой ниже мы бы уже не искали. */
+      if (moved && moved !== "—") return moved;
+    }
+
+    /*
+     * Переезда ячейки в этой строке не было. Но саму ячейку Hub всё равно
+     * знает: она приходит рядом с местом операции. Без этого «Последняя
+     * ячейка» пустовала у каждого второго отправления — верхняя строка о
+     * складе часто описывает не ячейку, а приход на склад.
+     *
+     * Форму приводим к той, что понимает cellPath, и берём только
+     * настоящие ячейки: общий разбор здесь опасен — он вернул бы «Warehouse»
+     * или другое соседнее поле, а это уже не ячейка.
+     */
+    const sides = [];
+    const cellInfo = record?.cellInfo;
+    if (Array.isArray(cellInfo?.cells)) sides.push({ nhlCell: cellInfo });
+    else if (Array.isArray(cellInfo?.nhlCell?.cells)) sides.push(cellInfo);
+    if (cellInfo?.personCell) sides.push({ personCell: cellInfo.personCell });
+    if (Array.isArray(record?.placeInfo?.nhlCell?.cells)) sides.push({ nhlCell: record.placeInfo.nhlCell });
+    if (record?.placeInfo?.personCell) sides.push({ personCell: record.placeInfo.personCell });
+
+    for (const side of sides) {
+      const text = cellPath(side);
+      if (text && text !== "—") return text;
+    }
+    return "";
+  }
+
+  /*
+   * Строки об искомом складе.
+   *
+   * Верхняя из них даёт дату, а ячейку берём из первой, где она вообще
+   * есть: раньше ячейка читалась строго из верхней строки, и стоило той
+   * оказаться, скажем, приходом на склад без переезда ячейки — в отчёт
+   * уходила пустота, хотя строкой ниже ячейка была написана.
+   *
+   * Смотрим только строки этого же склада: подставлять ячейку из чужой
+   * строки нельзя, это уже не те данные.
+   */
+  function pickCellRecord(records) {
+    for (const record of records) {
+      if (auditCell(record)) return record;
+    }
+    return null;
   }
 
   /*
@@ -881,16 +961,50 @@
     }
   }
 
-  function reportFromAudit(head, hit) {
+  /*
+   * Предыдущий склад: верхнее место по движениям.
+   *
+   * Интерфейс выводил его из текста трёх строк отчёта — и если в них
+   * переезда не было, «предыдущий склад» оставался пустым, хотя ниже по
+   * истории он написан. Считаем его здесь, где видно все прочитанные
+   * записи, и кладём в отчёт отдельным полем.
+   */
+  function placeOfRecord(record) {
+    const move = record?.stateChanges?.location;
+    for (const side of [move?.to, move?.from, record?.placeInfo]) {
+      if (!side || typeof side !== "object") continue;
+      const name = String(side.name || "").trim();
+      if (!name) continue;
+      return { name, warehouse: side.type === "Warehouse" };
+    }
+    return null;
+  }
+
+  function topPlaceFrom(records) {
+    let fallback = "";
+    for (const record of records || []) {
+      const place = placeOfRecord(record);
+      if (!place) continue;
+      if (place.warehouse) return place.name;
+      if (!fallback) fallback = place.name;
+    }
+    return fallback;
+  }
+
+  function reportFromAudit(head, hits) {
     const rows = head.slice(0, 3);
+    const matched = Array.isArray(hits) ? hits : hits ? [hits] : [];
+    const top = matched[0] || null;
+    const withCell = pickCellRecord(matched);
     return {
       columns: AUDIT_COLUMNS.slice(),
       lastRows: rows.map(auditRow),
       /* Коды типов — чтобы подставить настоящую подпись, когда она станет
          известна: строки уже собраны, а подпись может приехать позже. */
       codes: rows.map((record) => String(record?.changeType || "")),
-      warehouseAt: hit ? formatEventTime(hit.eventTime) : "",
-      warehouseCell: hit ? auditCell(hit) : ""
+      warehouseAt: top ? formatEventTime(top.eventTime) : "",
+      warehouseCell: withCell ? auditCell(withCell) : "",
+      lastPlace: ""
     };
   }
 
@@ -932,16 +1046,51 @@
     };
   }
 
+  /*
+   * Карточка предмета в ответе.
+   *
+   * Раньше читалось строго items[0].postingInfo — и стоило Hub положить
+   * тот же объект чуть иначе (другой контейнер, другой порядок, пустой
+   * items при непустом ответе), как из отчёта пропадали и номер, и статус,
+   * и обе суммы. Поэтому ищем объект карточки по признакам, а не по пути:
+   * им считается тот, у кого есть номер отправления, статус или цена.
+   */
+  const CARD_KEYS = ["postingName", "stateName", "moneyPrice", "fairPrice", "postingNumber"];
+
+  function findPostingInfo(json) {
+    const queue = [{ node: json, depth: 0 }];
+    let loose = null;
+    while (queue.length) {
+      const { node, depth } = queue.shift();
+      if (!node || typeof node !== "object" || depth > 6) continue;
+      if (Array.isArray(node)) {
+        for (const entry of node.slice(0, 40)) queue.push({ node: entry, depth: depth + 1 });
+        continue;
+      }
+      const own = CARD_KEYS.filter((key) => node[key] != null && node[key] !== "");
+      /* Номер плюс что-то ещё — это точно карточка, а не обломок ответа. */
+      if (own.length >= 2) return node;
+      if (own.length === 1 && !loose) loose = node;
+      for (const key of Object.keys(node)) queue.push({ node: node[key], depth: depth + 1 });
+    }
+    return loose;
+  }
+
+  function cardFrom(info) {
+    if (!info) return null;
+    const out = {
+      number: String(info.postingName || info.postingNumber || info.name || ""),
+      status: String(info.stateName || info.statusName || info.state || ""),
+      ...cardMoney(info)
+    };
+    /* Пустая карточка не отличается от неудачи — так её и считаем. */
+    return out.number || out.status || out.price || out.fairPrice ? out : null;
+  }
+
   function readCard(response) {
     if (!response?.ok || !response.text) return null;
     try {
-      const info = JSON.parse(response.text)?.items?.[0]?.postingInfo;
-      if (!info) return null;
-      return {
-        number: String(info.postingName || info.name || ""),
-        status: String(info.stateName || ""),
-        ...cardMoney(info)
-      };
+      return cardFrom(findPostingInfo(JSON.parse(response.text)));
     } catch (_err) {
       return null;
     }
@@ -951,8 +1100,34 @@
     return { number: "", status: "", price: "", fairPrice: "" };
   }
 
-  /* Проверено ли, что карточка отдаётся и без склада оператора. */
-  let placelessCard = null;
+  function cardFilled(card) {
+    return Boolean(card && (card.number || card.status || card.price || card.fairPrice));
+  }
+
+  /* Не затираем уже добытое: у путей разные сильные стороны. */
+  function fillCard(card, from) {
+    if (!from) return card;
+    for (const key of Object.keys(card)) card[key] = card[key] || from[key] || "";
+    return card;
+  }
+
+  /*
+   * Номер и статус Hub знает про любой предмет, а вот суммы бывают
+   * пустыми по-честному. Поэтому второй запрос делаем, когда не хватает
+   * именно их: гонять лишний round-trip за каждой отсутствующей ценой —
+   * это минуты на прогоне и ничего сверху.
+   */
+  function cardComplete(card) {
+    return Boolean(card.number && card.status);
+  }
+
+  /*
+   * Каким запросом карточка отдаётся: со складом оператора или без него.
+   * Запоминаем удачный вариант, но не хороним второй — раньше одна
+   * неудача ставила placelessCard = false навсегда, и весь прогон уходил
+   * без цен.
+   */
+  let cardPlaceless = null;
 
   async function nativeCard(posting, timeoutMs) {
     if (!placeId) {
@@ -962,20 +1137,43 @@
       if (placeId) void toBackground(hintPayload());
     }
 
-    if (placeId) {
-      const card = readCard(await replay(boxesRequest(posting), timeoutMs));
-      if (card) return card;
-    }
+    /* Сначала тот вариант, что уже срабатывал в этой вкладке. */
+    const order = [];
+    if (cardPlaceless === true) order.push(0);
+    else if (cardPlaceless === false && placeId) order.push(null);
+    if (placeId && !order.includes(null)) order.push(null);
+    if (!order.includes(0)) order.push(0);
 
-    /*
-     * Склад оператора не выяснился (или с ним не вышло). Один раз проверяем,
-     * отдаёт ли Hub карточку и без него: если да — номер и статус в отчёте
-     * будут всегда, а не только когда повезло увидеть warehouse в адресе.
-     */
-    if (placelessCard === false) return emptyCard();
-    const card = readCard(await replay(boxesRequest(posting, 0), timeoutMs));
-    placelessCard = Boolean(card);
-    return card || emptyCard();
+    const budget = Math.max(1500, Math.floor(timeoutMs / order.length));
+    for (const place of order) {
+      const card = readCard(await replay(boxesRequest(posting, place), budget));
+      if (!card) continue;
+      const placeless = place === 0;
+      /* Удачный вариант — общее знание: пусть остальные вкладки не тратят
+         на перебор первый номер каждая. */
+      if (cardPlaceless !== placeless) {
+        cardPlaceless = placeless;
+        void toBackground(hintPayload());
+      }
+      return card;
+    }
+    return emptyCard();
+  }
+
+  /*
+   * Карточка любой ценой: известная ручка, затем подсмотренный запрос.
+   * Пустых полей в отчёте быть не должно — цену и статус Hub знает всегда,
+   * и если один путь промолчал, спрашиваем вторым.
+   */
+  async function collectCard(posting, deadline, firstJson) {
+    const left = () => Math.max(1500, Math.min(8000, deadline - Date.now()));
+    const card = emptyCard();
+
+    fillCard(card, await nativeCard(posting, left()));
+    if (!cardComplete(card) && cardRecipe) fillCard(card, await fetchCard(posting, left()));
+    /* Совсем ничего не вышло — последняя попытка по самому ответу истории. */
+    if (!cardFilled(card) && firstJson) fillCard(card, extractCardFrom(firstJson));
+    return card;
   }
 
   async function nativeScan(job) {
@@ -1009,7 +1207,13 @@
     let sample = "";
     let digest = "";
     const head = [];
-    let hit = null;
+    /* Все строки об искомом складе, сверху вниз: верхняя даёт дату, первая
+       с ячейкой — ячейку. Раньше запоминалась только верхняя. */
+    const hits = [];
+    let foundAt = -1;
+    /* Верхний склад по движениям — для разреза «предыдущий склад». */
+    let lastPlace = "";
+    let loosePlace = "";
     let size = apiTune.pageSize;
     let retuned = false;
     /* Сервер не принял список типов и отдал лишнее — «Всего» из ответа
@@ -1075,17 +1279,31 @@
       /* В отчёт идут первые три строки, всю историю копить незачем. */
       for (const record of records) {
         if (head.length < 3) head.push(record);
-        if (!hit && recordMatches(record, needle)) hit = record;
+        if (!lastPlace) {
+          const place = placeOfRecord(record);
+          if (place?.warehouse) lastPlace = place.name;
+          else if (place && !loosePlace) loosePlace = place.name;
+        }
+        if (!recordMatches(record, needle)) continue;
+        /* Дочитываем строки этого склада, пока не встретится та, где
+           написана ячейка: дальше по истории уже другой склад. */
+        if (hits.length < 12) hits.push(record);
       }
 
       loaded += records.length;
       read += raw.length;
-      if (!found && hit) {
+      if (!found && hits.length) {
         found = true;
-        sample = JSON.stringify(hit).slice(0, 280);
+        foundAt = page;
+        sample = JSON.stringify(hits[0]).slice(0, 280);
       }
 
-      if (found) break;
+      /*
+       * Нашли склад — дальше листаем не больше одной страницы, и только
+       * пока ячейка не прочиталась. Гоняться за ней по всей истории
+       * нельзя: это минуты на каждый номер, а склад мы уже нашли.
+       */
+      if (found && (pickCellRecord(hits) || page > foundAt)) break;
       /*
        * Листаем по тому, что отдал сервер, а не по тому, что оставили себе:
        * страница целиком из не-перемещений — не повод бросить чтение.
@@ -1096,8 +1314,9 @@
       if (total == null && raw.length < size) break;
     }
 
-    const report = reportFromAudit(head, hit);
-    const card = await nativeCard(posting, Math.max(2000, Math.min(8000, deadline - Date.now())));
+    const report = reportFromAudit(head, hits);
+    report.lastPlace = lastPlace || loosePlace;
+    const card = await collectCard(posting, deadline, null);
     report.number = card.number;
     report.status = card.status;
     report.price = card.price;
@@ -1342,7 +1561,9 @@
   function extractCardFrom(json) {
     const out = emptyCard();
     if (!json) return out;
-    const info = json?.items?.[0]?.postingInfo;
+    /* Тот же поиск по признакам, что и у карточки: путь items[0].postingInfo
+       Hub держит не всегда, а суммы терять нельзя. */
+    const info = findPostingInfo(json);
     if (info) Object.assign(out, cardMoney(info));
     const match = JSON.stringify(json).match(POSTING_NUMBER_RE);
     if (match) out.number = match[0];
@@ -1382,7 +1603,9 @@
     );
     if (!response?.ok || !response.text) return emptyCard();
     try {
-      return extractCardFrom(JSON.parse(response.text));
+      const json = JSON.parse(response.text);
+      /* Сначала точный разбор карточки, потом общий по признакам. */
+      return fillCard(cardFrom(findPostingInfo(json)) || emptyCard(), extractCardFrom(json));
     } catch (_err) {
       return emptyCard();
     }
@@ -1428,7 +1651,7 @@
       }
       if (!warehouseAt) warehouseAt = findDate(Object.values(hit));
     }
-    return { columns: [], lastRows: [], warehouseAt, warehouseCell: "" };
+    return { columns: [], lastRows: [], warehouseAt, warehouseCell: "", lastPlace: "" };
   }
 
   /*
@@ -1453,8 +1676,12 @@
 
   function reportFromRows(rows, needle) {
     if (!looksLikeAudit(rows)) return reportFromApiRows(rows, needle);
-    const hit = rows.find((record) => recordMatches(record, needle));
-    return reportFromAudit(rows.slice(0, 3), hit);
+    /* Все строки об этом складе, а не только верхняя: ячейка может стоять
+       не в ней, а строкой ниже — и раньше она терялась. */
+    const hits = rows.filter((record) => recordMatches(record, needle)).slice(0, 12);
+    const report = reportFromAudit(rows.slice(0, 3), hits);
+    report.lastPlace = topPlaceFrom(rows);
+    return report;
   }
 
   /* Известная ручка отвалилась — в этой вкладке больше не пробуем. */
@@ -1607,21 +1834,13 @@
 
       const expected = filtered || total == null ? loaded : total;
       const report = reportFromRows(allRows, needle);
-      const left = () => Math.max(2000, Math.min(8000, deadline - Date.now()));
 
       /*
-       * Номер и статус — из карточки предмета. В истории их нет, и выуживать
-       * их регуляркой из ответа истории незачем: это тот же случай, что и с
-       * колонками — можно поймать что угодно похожее.
+       * Номер, статус и суммы — из карточки предмета. В истории их нет, и
+       * выуживать их регуляркой из ответа истории незачем: это тот же
+       * случай, что и с колонками — можно поймать что угодно похожее.
        */
-      const card = emptyCard();
-      const fill = (from) => {
-        for (const key of Object.keys(card)) card[key] = card[key] || from?.[key] || "";
-      };
-      fill(await nativeCard(posting, left()));
-      if (!card.number || !card.status) fill(await fetchCard(posting, left()));
-      /* Совсем ничего не вышло — последняя попытка по самому ответу. */
-      if (!card.number || !card.status) fill(extractCardFrom(firstJson));
+      const card = await collectCard(posting, deadline, firstJson);
       report.number = card.number;
       report.status = card.status;
       report.price = card.price;
@@ -2349,6 +2568,14 @@
     let warehouseCells = null;
     let warehouseFields = null;
     let warehouseDate = "";
+    /*
+     * Ячейка может стоять не в верхней строке о складе, а строкой ниже:
+     * приход на склад её не показывает, а переезд по ячейкам — да. Поэтому
+     * дату берём из верхней строки, а ячейку — из первой, где она есть.
+     * Строки чужих складов сюда не попадают: отбор идёт по тому же
+     * совпадению.
+     */
+    let warehouseCell = "";
 
     /* Шапка не меняется по ходу списка — ищем колонку типа один раз. */
     let typeAt = null;
@@ -2385,13 +2612,16 @@
         /* Не перемещение — прочли, но себе не берём. */
         if (!keep.has(rows[i])) continue;
         seen.add(key);
-        if (!found && value.toLowerCase().includes(needle)) {
+        if (!value.toLowerCase().includes(needle)) continue;
+        const fields = rowFields(rows[i]);
+        if (!found) {
           found = true;
           sample = value.slice(0, 280);
           warehouseCells = rowCells(rows[i]);
-          warehouseFields = rowFields(rows[i]);
+          warehouseFields = fields;
           warehouseDate = rowDate(rows[i]);
         }
+        if (!warehouseCell) warehouseCell = fields["Ячейка"] || findCell(rowCells(rows[i]));
       }
       prevLength = length;
       return found;
@@ -2546,25 +2776,27 @@
      * предмета. Спрашиваем её тем же запросом, что и быстрый путь, чтобы
      * цена была в отчёте независимо от того, как прочитана история.
      */
-    let money = { price: "", fairPrice: "" };
+    let money = emptyCard();
     if (!dead()) {
       try {
-        money = await nativeCard(job.posting, Math.max(1500, Math.min(6000, left())));
+        money = await collectCard(job.posting, deadline, null);
       } catch (_err) {
-        money = { price: "", fairPrice: "" };
+        money = emptyCard();
       }
     }
     const tableRows = keepTransitionRows(rowNodes(), foreignWords(), typeColumn());
     const report = {
-      number: card.number,
-      status: card.status,
+      /* Со страницы номер и статус вернее, чем из карточки, но если её
+         разметка не прочиталась — берём то, что дал запрос. */
+      number: card.number || money.number || "",
+      status: card.status || money.status || "",
       columns: tableColumns(),
       lastRows: [...tableRows].slice(0, 3).map(rowCells),
       /* Разметка знает и дату, и ячейку точно; текстовый разбор остаётся
          откатом на случай другой вёрстки. */
       warehouseAt: warehouseDate || (warehouseCells ? findDate(warehouseCells) : ""),
       warehouseCell:
-        warehouseFields?.["Ячейка"] || (warehouseCells ? findCell(warehouseCells) : ""),
+        warehouseFields?.["Ячейка"] || warehouseCell || (warehouseCells ? findCell(warehouseCells) : ""),
       price: money.price || "",
       fairPrice: money.fairPrice || ""
     };
@@ -2617,6 +2849,7 @@
       status: String(report.status || ""),
       warehouseAt: String(report.warehouseAt || ""),
       warehouseCell: String(report.warehouseCell || ""),
+      lastPlace: String(report.lastPlace || ""),
       price: String(report.price || ""),
       fairPrice: String(report.fairPrice || ""),
       columns: (Array.isArray(report.columns) ? report.columns : []).map((value) => String(value || "")),
@@ -2715,6 +2948,9 @@
       if (message.nativeApi === false) nativeOff = true;
       /* Вариант запроса уже подобран другой вкладкой — не подбираем снова. */
       if (message.apiTune && !apiTune) apiTune = message.apiTune;
+      if (typeof message.cardPlaceless === "boolean" && cardPlaceless == null) {
+        cardPlaceless = message.cardPlaceless;
+      }
       if (message.labels) learnedTypes = { ...learnedTypes, ...message.labels };
       adoptAuditTypes(message.auditTypes);
       sendResponse({ ok: true });

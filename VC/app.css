@@ -371,13 +371,22 @@ main {
 /*  между ними живёт плавающей пилюлей снизу по центру.                */
 /* ================================================================== */
 
+/*
+ * Кнопки стоят равными колонками, а не flex-элементами.
+ *
+ * С flex:1 ширина всё равно упиралась в самое длинное слово («Результат»),
+ * колонки выходили разными — а пилюля под ними считается как «треть
+ * ширины» и уезжала мимо. Grid с 1fr даёт ровно равные доли.
+ */
 .steps {
   position: fixed;
   left: 50%;
   bottom: 18px;
   z-index: 30;
   transform: translateX(-50%);
-  display: flex;
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: 1fr;
   padding: 4px;
   border-radius: 999px;
   --step-index: 0;
@@ -414,7 +423,7 @@ main {
 .step {
   position: relative;
   z-index: 1;
-  flex: 1;
+  min-width: 92px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -796,10 +805,24 @@ input[type="number"] {
   transform: none;
 }
 
-.btn.is-copied {
+/*
+ * Подтверждение копирования остаётся зелёным и под курсором.
+ *
+ * Раньше .btn--ghost:hover и .btn--primary:hover были специфичнее этого
+ * правила и перекрашивали уже нажатую кнопку обратно в серую или синюю —
+ * ровно в тот момент, когда с неё не убрали мышь.
+ */
+.btn.is-copied,
+.btn.is-copied:hover:not(:disabled),
+.btn.is-copied:focus-visible {
   color: #06301c;
   background: var(--ok);
   border-color: transparent;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.3), 0 8px 22px rgba(47, 206, 122, 0.28);
+}
+
+.btn.is-copied:hover:not(:disabled) {
+  background: #45dc8e;
 }
 
 .error {
@@ -1970,13 +1993,17 @@ input[type="number"] {
   --seg-count: 3;
   --seg-index: 0;
   flex: 0 0 auto;
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: 1fr;
   padding: 3px;
 }
 
+/* Колонки равны, поэтому подсветка встаёт ровно под выбранную вкладку. */
 .seg--tabs .seg__btn {
-  flex: 0 0 auto;
-  min-width: 104px;
+  min-width: 108px;
   height: 30px;
+  padding: 0 12px;
   font-size: 12px;
 }
 
@@ -2032,6 +2059,13 @@ input[type="number"] {
   padding: 12px 14px;
   border-radius: var(--r);
   flex-wrap: wrap;
+  /*
+   * Поповер фильтров выходит за край панели, поэтому у .glass снимаем
+   * обрезку и поднимаем строку над карточками — иначе список фильтров
+   * прятался бы под ними.
+   */
+  overflow: visible;
+  z-index: 20;
 }
 
 .detail__search {
@@ -2076,11 +2110,154 @@ input[type="number"] {
   color: var(--faint);
 }
 
-.detail__filters {
-  display: flex;
-  align-items: center;
+/* ---- счётчик среза: слева и крупно ---- */
+
+/*
+ * Сколько отправлений в срезе — самая нужная цифра на этой панели, и
+ * раньше она стояла мелким серым текстом в правом углу. Теперь это первый
+ * блок строки, число читается сразу.
+ */
+.tally {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 7px;
+  flex: 0 0 auto;
+  height: 38px;
+  padding: 0 14px;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--stroke-2);
+  background: rgba(6, 10, 19, 0.5);
+  white-space: nowrap;
+}
+
+.tally b {
+  font-size: 19px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+  line-height: 38px;
+}
+
+.tally em {
+  font-style: normal;
+  font-size: 11.5px;
+  color: var(--muted);
+}
+
+/* Срез отличается от общего итога — подсвечиваем, что фильтры работают. */
+.tally.is-filtered {
+  border-color: rgba(47, 123, 255, 0.45);
+  background: rgba(0, 91, 255, 0.12);
+}
+
+.tally.is-filtered b {
+  color: #a9c9ff;
+}
+
+/* ---- фильтры под одной кнопкой ---- */
+
+/*
+ * Раньше все селекты стояли прямо в строке и занимали по две-три полосы
+ * панели. Теперь они живут в поповере: в строке остаётся одна кнопка со
+ * счётчиком активных фильтров.
+ */
+.filterbox {
+  position: relative;
+  flex: 0 0 auto;
+}
+
+.filterbox__btn {
+  height: 38px;
+  min-height: 38px;
   gap: 8px;
-  flex-wrap: wrap;
+  padding: 0 13px;
+  font-size: 12px;
+}
+
+.filterbox__btn svg {
+  width: 15px;
+  height: 15px;
+  flex-shrink: 0;
+}
+
+.filterbox__btn.is-on {
+  background: rgba(0, 91, 255, 0.2);
+  border-color: rgba(47, 123, 255, 0.5);
+  color: var(--text);
+}
+
+.filterbox__count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--blue);
+  color: #fff;
+  font-size: 10.5px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.filterbox__pop {
+  position: absolute;
+  z-index: 40;
+  top: calc(100% + 8px);
+  right: 0;
+  width: min(88vw, 320px);
+  padding: 14px;
+  border-radius: var(--r);
+  border: 1px solid var(--stroke);
+  background: rgba(10, 14, 24, 0.97);
+  backdrop-filter: blur(18px);
+  box-shadow: 0 22px 54px rgba(0, 0, 0, 0.55);
+  display: grid;
+  gap: 10px;
+  justify-items: stretch;
+  opacity: 0;
+  transform: translateY(-6px) scale(0.985);
+  transform-origin: 100% 0;
+  transition: opacity 0.2s var(--ease), transform 0.2s var(--ease);
+}
+
+.filterbox__pop--wide {
+  width: min(92vw, 430px);
+}
+
+.filterbox__pop.is-open {
+  opacity: 1;
+  transform: none;
+}
+
+.filterbox__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(184px, 1fr));
+  gap: 8px;
+}
+
+/* Внутри поповера у фильтра своя строка: подпись слева, значение справа. */
+.filterbox__grid .pick {
+  display: grid;
+  grid-template-columns: minmax(64px, auto) 1fr;
+  align-items: center;
+  height: 34px;
+  padding: 0 6px 0 11px;
+  border-radius: var(--r-sm);
+  gap: 8px;
+}
+
+.filterbox__grid .pick select {
+  max-width: none;
+  width: 100%;
+  border-radius: var(--r-xs);
+  text-align: right;
+}
+
+.filterbox__pop .btn {
+  justify-self: end;
 }
 
 .pick {
@@ -2129,6 +2306,11 @@ input[type="number"] {
   display: flex;
   gap: 6px;
   flex-wrap: wrap;
+  flex: 1 1 100%;
+}
+
+.detail__chips:empty {
+  display: none;
 }
 
 .detail__chip {
@@ -2163,12 +2345,6 @@ input[type="number"] {
   color: #ffd9d4;
 }
 
-.detail__count {
-  margin-left: auto;
-  font-size: 11.5px;
-  color: var(--faint);
-  white-space: nowrap;
-}
 
 .detail__scroll {
   min-height: 0;
@@ -2977,6 +3153,7 @@ input[type="number"] {
   gap: 12px;
   margin-bottom: 8px;
   min-height: 26px;
+  flex-wrap: wrap;
 }
 
 .spanel__head h3 {
@@ -3652,9 +3829,10 @@ a.t-id__code:hover {
 /* ================================================================== */
 /*  приветствие                                                        */
 /*                                                                     */
-/*  Луч делает ровно один оборот, на нём загорается одна отметка,      */
-/*  следом проявляется подпись — и приветствие уходит. Работа за ним   */
-/*  всё это время уже идёт: приветствие лежит поверх и ничего не ждёт. */
+/*  Луч делает два ровных оборота с постоянной скоростью, и каждая     */
+/*  отметка загорается ровно тогда, когда он до неё доходит: задержка  */
+/*  --d посчитана из угла --a. Раньше точка вспыхивала сама по себе, и */
+/*  выглядело это как случайное пятно посреди радара.                  */
 /* ================================================================== */
 
 .splash {
@@ -3663,9 +3841,26 @@ a.t-id__code:hover {
   z-index: 200;
   display: grid;
   place-items: center;
-  background: radial-gradient(circle at 50% 44%, #0a1226 0%, #05070d 62%);
+  background:
+    radial-gradient(circle at 50% 40%, rgba(24, 66, 148, 0.42) 0%, transparent 42%),
+    radial-gradient(circle at 50% 44%, #0a1226 0%, #05070d 72%);
   opacity: 1;
   transition: opacity 0.62s var(--ease);
+}
+
+/* Тонкая сетка под радаром — та же, что живёт на фоне приложения. */
+.splash::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background-image:
+    linear-gradient(rgba(120, 170, 255, 0.05) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(120, 170, 255, 0.05) 1px, transparent 1px);
+  background-size: 46px 46px;
+  -webkit-mask: radial-gradient(circle at 50% 45%, #000 0%, transparent 68%);
+  mask: radial-gradient(circle at 50% 45%, #000 0%, transparent 68%);
+  opacity: 0;
+  animation: splash-grid 1.1s var(--ease) 0.1s forwards;
 }
 
 .splash.is-out {
@@ -3674,120 +3869,224 @@ a.t-id__code:hover {
 }
 
 .splash__stage {
+  position: relative;
   display: grid;
   justify-items: center;
-  gap: 26px;
+  gap: 30px;
 }
 
 .splash__radar {
   position: relative;
-  width: min(46vmin, 240px);
+  width: min(52vmin, 300px);
   aspect-ratio: 1;
   opacity: 0;
-  transform: scale(0.94);
+  transform: scale(0.9);
 }
 
 .splash.is-on .splash__radar {
-  animation: splash-in 0.7s var(--sp) forwards;
+  animation: splash-in 0.62s var(--sp) forwards;
 }
 
 .splash__dish {
   width: 100%;
   height: 100%;
   display: block;
-  filter: drop-shadow(0 18px 46px rgba(0, 60, 160, 0.5));
+  filter: drop-shadow(0 20px 52px rgba(0, 62, 168, 0.55));
+}
+
+/* Насечки по ободу медленно едут — радар «живой», а не картинка. */
+.splash.is-on .splash__ticks {
+  transform-origin: 100px 100px;
+  animation: splash-rim 26s linear infinite;
 }
 
 .splash__beam {
   position: absolute;
-  inset: 1.6%;
+  inset: 8%;
   border-radius: 50%;
   overflow: hidden;
-  -webkit-mask: radial-gradient(circle, transparent 11%, #000 12%);
-  mask: radial-gradient(circle, transparent 11%, #000 12%);
+  -webkit-mask: radial-gradient(circle, transparent 3%, #000 4%);
+  mask: radial-gradient(circle, transparent 3%, #000 4%);
 }
 
 .splash__arm {
   position: absolute;
   inset: 0;
   border-radius: 50%;
+  opacity: 0;
   background: conic-gradient(
     from 0deg,
-    rgba(122, 208, 255, 0.5) 0deg,
-    rgba(122, 208, 255, 0.16) 26deg,
-    transparent 62deg,
+    rgba(150, 216, 255, 0.62) 0deg,
+    rgba(122, 208, 255, 0.26) 20deg,
+    rgba(90, 160, 255, 0.08) 52deg,
+    transparent 96deg,
     transparent 360deg
   );
   transform: rotate(0deg);
 }
 
-/* Ровно один оборот — и луч гаснет. */
-.splash.is-on .splash__arm {
-  animation: splash-sweep 1.85s cubic-bezier(0.4, 0, 0.35, 1) 0.42s forwards;
+/* Луч светится по ведущей кромке — она и «находит» отметки. */
+.splash__arm::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 0;
+  bottom: 50%;
+  width: 1.5px;
+  margin-left: -0.75px;
+  background: linear-gradient(180deg, rgba(190, 232, 255, 0), rgba(190, 232, 255, 0.85));
+  box-shadow: 0 0 10px rgba(122, 208, 255, 0.75);
 }
 
-.splash__blip {
+/* Два ровных оборота с постоянной скоростью: только так отметки могут
+   загораться ровно под лучом. */
+.splash.is-on .splash__arm {
+  animation:
+    splash-sweep 1.35s linear 0.3s 2,
+    splash-arm-fade 2.7s linear 0.3s forwards;
+}
+
+/* Волна дальности расходится от центра вслед за первым проходом. */
+.splash__wave {
   position: absolute;
-  /* Отметка лежит там, где луч пройдёт около трёх четвертей оборота. */
-  left: 68%;
-  top: 33%;
-  width: 15px;
-  height: 15px;
-  margin: -7.5px 0 0 -7.5px;
+  left: 50%;
+  top: 50%;
+  width: 8%;
+  aspect-ratio: 1;
+  margin: -4% 0 0 -4%;
+  border-radius: 50%;
+  border: 1px solid rgba(122, 208, 255, 0.55);
   opacity: 0;
 }
 
+.splash.is-on .splash__wave {
+  animation: splash-wave 1.5s var(--ease) 0.4s forwards;
+}
+
+.splash.is-on .splash__wave--late {
+  animation-delay: 1.35s;
+}
+
+/*
+ * Отметка стоит в полярных координатах.
+ *
+ * Обёртка занимает весь радар и поворачивается на --a, точка внутри
+ * отъезжает от центра на --r и разворачивается обратно, чтобы остаться
+ * ровной. Отступ считается от обёртки, а не от самой точки: проценты в
+ * translate меряются по размеру элемента, и с ними все отметки сползались
+ * в центр — ровно то «случайное пятно», которое было видно на экране.
+ */
+.splash__blip {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  transform: rotate(var(--a));
+}
+
 .splash.is-on .splash__blip {
-  animation: splash-found 1.5s var(--ease) 1.44s forwards;
+  animation: splash-found 2.1s var(--ease) var(--d) forwards;
 }
 
 .splash__blip i {
   position: absolute;
-  inset: 3.5px;
+  left: 50%;
+  top: calc(50% - var(--r));
+  width: 13px;
+  height: 13px;
+  margin: -6.5px 0 0 -6.5px;
   border-radius: 50%;
   background: var(--hit);
-  box-shadow: 0 0 12px 3px rgba(239, 176, 60, 0.6);
+  box-shadow: 0 0 14px 4px rgba(239, 176, 60, 0.5);
+  transform: rotate(calc(-1 * var(--a)));
 }
 
-.splash__blip::after {
+.splash.is-on .splash__blip i {
+  animation: splash-pop 0.72s var(--sp) var(--d) both;
+}
+
+.splash__blip--miss i {
+  background: var(--ok);
+  box-shadow: 0 0 14px 4px rgba(47, 206, 122, 0.45);
+}
+
+/* Кольцо расходится от самой отметки — это и есть «засёк». */
+.splash__blip i::after {
   content: "";
   position: absolute;
-  inset: 0;
+  inset: -4px;
   border-radius: 50%;
-  border: 1.5px solid var(--hit);
+  border: 1.4px solid var(--hit);
   opacity: 0;
 }
 
-.splash.is-on .splash__blip::after {
-  animation: splash-ping 1.5s var(--ease) 1.52s 2;
+.splash__blip--miss i::after {
+  border-color: var(--ok);
+}
+
+.splash.is-on .splash__blip i::after {
+  animation: splash-ping 1.3s var(--ease) var(--d) 2;
 }
 
 .splash__word {
   display: grid;
   justify-items: center;
-  gap: 5px;
+  gap: 7px;
   opacity: 0;
-  transform: translateY(9px);
+  transform: translateY(10px);
 }
 
 .splash.is-on .splash__word {
-  animation: splash-word 0.72s var(--ease) 1.82s forwards;
+  animation: splash-word 0.7s var(--ease) 1.55s forwards;
 }
 
 .splash__word h1 {
   margin: 0;
-  font-size: clamp(26px, 4.4vmin, 36px);
+  font-size: clamp(28px, 4.8vmin, 40px);
   font-weight: 700;
   letter-spacing: -0.03em;
   color: var(--text);
+  background: linear-gradient(180deg, #ffffff 0%, #a9c6f5 120%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
 }
 
 .splash__word p {
   margin: 0;
-  font-size: 12.5px;
-  letter-spacing: 0.24em;
+  font-size: 12px;
+  letter-spacing: 0.3em;
   text-transform: uppercase;
   color: var(--muted);
+}
+
+/* Полоска под подписью показывает, что приложение уже поднимается. */
+.splash__load {
+  position: relative;
+  width: 132px;
+  height: 2px;
+  margin-top: 6px;
+  border-radius: 2px;
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.splash__load i {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  transform-origin: 0 50%;
+  transform: scaleX(0);
+  background: linear-gradient(90deg, var(--blue), var(--cyan));
+}
+
+.splash.is-on .splash__load i {
+  animation: splash-load 1.25s var(--ease) 1.72s forwards;
+}
+
+@keyframes splash-grid {
+  to {
+    opacity: 1;
+  }
 }
 
 @keyframes splash-in {
@@ -3797,46 +4096,95 @@ a.t-id__code:hover {
   }
 }
 
+@keyframes splash-rim {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 @keyframes splash-sweep {
   from {
     transform: rotate(0deg);
-    opacity: 1;
-  }
-  86% {
-    opacity: 1;
   }
   to {
     transform: rotate(360deg);
+  }
+}
+
+@keyframes splash-arm-fade {
+  0% {
     opacity: 0;
+  }
+  6% {
+    opacity: 1;
+  }
+  82% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+  }
+}
+
+@keyframes splash-wave {
+  0% {
+    opacity: 0.6;
+    width: 8%;
+    margin: -4% 0 0 -4%;
+  }
+  100% {
+    opacity: 0;
+    width: 168%;
+    margin: -84% 0 0 -84%;
   }
 }
 
 @keyframes splash-found {
   0% {
     opacity: 0;
-    transform: scale(0.4);
   }
-  36% {
+  14% {
     opacity: 1;
-    transform: scale(1.18);
-  }
-  60% {
-    transform: scale(1);
   }
   100% {
     opacity: 1;
-    transform: scale(1);
+  }
+}
+
+/* Отдельным свойством scale: поворот точки трогать нельзя. */
+@keyframes splash-pop {
+  0% {
+    scale: 0.3;
+  }
+  58% {
+    scale: 1.28;
+  }
+  100% {
+    scale: 1;
   }
 }
 
 @keyframes splash-ping {
   0% {
-    opacity: 0.85;
-    transform: scale(0.6);
+    opacity: 0.8;
+    transform: scale(0.55);
   }
   100% {
     opacity: 0;
-    transform: scale(2.3);
+    transform: scale(2.6);
+  }
+}
+
+@keyframes splash-word {
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes splash-load {
+  to {
+    transform: scaleX(1);
   }
 }
 
@@ -3927,32 +4275,55 @@ a.t-id__code:hover {
   fill: rgba(122, 208, 255, 0.1);
 }
 
-/* «Прошло» — не линия, а ровные засечки: одна на минуту работы. */
+/*
+ * «Прошло» — засечки по минутам: пройденные закрашены, текущая
+ * заполняется секундами (--fill). Раньше здесь стояли две одинаковые
+ * полоски на весь блок, и что они значат, понять было нельзя.
+ */
 .gauge__ticks {
   display: flex;
   align-items: flex-end;
   gap: 4px;
-  height: 30px;
-  margin-top: 5px;
+  height: 26px;
+  margin-top: 6px;
 }
 
 .gauge__ticks i {
+  position: relative;
   flex: 1 1 0;
-  min-width: 0;
-  max-width: 9px;
-  height: 9px;
-  border-radius: 2px;
-  background: rgba(255, 255, 255, 0.12);
+  min-width: 3px;
+  height: 100%;
+  border-radius: 3px;
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.08);
   animation: tick-in 0.34s var(--sp) both;
 }
 
-.gauge__ticks i.is-now {
-  height: 20px;
-  background: var(--blue-soft);
+.gauge__ticks i::after {
+  content: "";
+  position: absolute;
+  inset: auto 0 0 0;
+  height: var(--fill, 100%);
+  border-radius: inherit;
+  background: linear-gradient(180deg, var(--blue-soft), rgba(0, 91, 255, 0.65));
+  transition: height 0.5s linear;
+}
+
+.gauge__ticks i.is-now::after {
+  background: linear-gradient(180deg, var(--cyan), var(--blue-soft));
 }
 
 .gauges.is-live .gauge__ticks i.is-now {
   animation: tick-in 0.34s var(--sp) both, breathe 2.1s var(--ease) 0.34s infinite;
+}
+
+.gauge__foot {
+  display: block;
+  margin-top: 6px;
+  font-size: 9.5px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--faint);
 }
 
 @keyframes tick-in {
@@ -4000,12 +4371,17 @@ a.t-id__code:hover {
   animation: row-in 0.32s var(--ease) both;
 }
 
+/*
+ * Карточка склада из прошлой проверки. Раньше это была строка «склад —
+ * итог», и что случится по клику, узнать было неоткуда. Теперь действие
+ * подписано третьей строкой и проявляется под курсором.
+ */
 .run {
   width: 100%;
-  display: flex;
+  display: grid;
+  grid-template-columns: 1fr auto;
   align-items: baseline;
-  justify-content: space-between;
-  gap: 10px;
+  gap: 2px 10px;
   padding: 8px 11px;
   border: 1px solid var(--stroke-2);
   border-radius: var(--r-sm);
@@ -4015,6 +4391,26 @@ a.t-id__code:hover {
   text-align: left;
   cursor: pointer;
   transition: border-color 0.22s var(--ease), background 0.22s var(--ease), transform 0.22s var(--sp);
+}
+
+.run i {
+  grid-column: 1 / -1;
+  font-style: normal;
+  font-size: 10.5px;
+  letter-spacing: 0.04em;
+  color: var(--faint);
+  opacity: 0.75;
+  transition: color 0.22s var(--ease), opacity 0.22s var(--ease);
+}
+
+.run i::after {
+  content: " →";
+}
+
+.run:hover i,
+.run:focus-visible i {
+  color: #9dc2ff;
+  opacity: 1;
 }
 
 .run:hover {
@@ -4092,31 +4488,35 @@ a.t-id__code:hover {
   transition: color 0.2s var(--ease);
 }
 
+/*
+ * Заголовок панели меняет то, что нарисовано ниже, — значит он должен
+ * читаться как главное слово блока. Раньше это была приглушённая серая
+ * строчка, неотличимая от подписи, и смена разреза проходила незамеченной.
+ */
 .ptitle__btn h3 {
   margin: 0;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.07em;
-  text-transform: uppercase;
-  color: var(--muted);
+  font-size: 12.5px;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  color: #ffffff;
   transition: color 0.2s var(--ease);
 }
 
 .ptitle__caret {
-  width: 12px;
-  height: 12px;
+  width: 13px;
+  height: 13px;
   flex-shrink: 0;
-  color: var(--faint);
+  color: var(--muted);
   transition: transform 0.24s var(--sp), color 0.2s var(--ease);
 }
 
 .ptitle:hover .ptitle__btn h3,
 .ptitle__select:focus-visible + .ptitle__btn h3 {
-  color: var(--text-dim);
+  color: #cfe0ff;
 }
 
 .ptitle:hover .ptitle__caret {
@@ -4344,4 +4744,106 @@ kbd,
 .stats__table th[draggable="true"] {
   -webkit-user-drag: element;
   user-drag: element;
+}
+
+/* ================================================================== */
+/*  подсказка графиков                                                 */
+/*                                                                     */
+/*  Одна на все панели: ходит за курсором и отвечает цифрами — сколько */
+/*  ID, какая доля среза и что случится по клику.                     */
+/* ================================================================== */
+
+.viztip {
+  position: fixed;
+  z-index: 90;
+  min-width: 152px;
+  max-width: 320px;
+  padding: 10px 12px;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--stroke);
+  background: rgba(9, 13, 23, 0.97);
+  backdrop-filter: blur(14px);
+  box-shadow: 0 18px 42px rgba(0, 0, 0, 0.55);
+  pointer-events: none;
+  opacity: 0;
+  transform: translateY(4px);
+  transition: opacity 0.14s var(--ease), transform 0.14s var(--ease);
+}
+
+.viztip.is-on {
+  opacity: 1;
+  transform: none;
+}
+
+.viztip__head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-bottom: 7px;
+  font-size: 12.5px;
+  font-weight: 700;
+  color: var(--text);
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+}
+
+.viztip__head i {
+  width: 9px;
+  height: 9px;
+  flex-shrink: 0;
+  border-radius: 2px;
+}
+
+.viztip__row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 14px;
+  font-size: 11.5px;
+  color: var(--muted);
+  line-height: 1.7;
+}
+
+.viztip__row b {
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.viztip__foot {
+  margin: 7px 0 0;
+  padding-top: 7px;
+  border-top: 1px solid var(--stroke-2);
+  font-size: 10.5px;
+  color: var(--faint);
+}
+
+/* Наведение поднимает элемент над остальными — не только подсказкой. */
+.col:hover .col__cap,
+.col:focus-visible .col__cap {
+  color: var(--text);
+}
+
+.line__dot {
+  cursor: pointer;
+  transition: transform 0.16s var(--sp), box-shadow 0.16s var(--ease), opacity 0.2s var(--ease);
+}
+
+.line__dot:hover {
+  transform: translate(-50%, -50%) scale(1.75);
+  box-shadow: 0 0 0 2px #0a0e18, 0 0 0 5px rgba(255, 255, 255, 0.16);
+  opacity: 1;
+  z-index: 3;
+}
+
+.donut__seg {
+  cursor: pointer;
+}
+
+/* Круг добора: радар остаётся живым, но меняет тон — работа ещё идёт. */
+.radar.is-retry .radar__hud b {
+  color: var(--cyan);
+}
+
+.radar.is-retry .radar__hud em {
+  color: var(--text-dim);
 }

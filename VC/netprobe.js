@@ -135,6 +135,22 @@
     return head.startsWith("{") || head.startsWith("[");
   }
 
+  /*
+   * Рецепт годится, только если ID предмета в нём виден: подставлять свой
+   * номер иначе некуда, и повтор вернул бы историю чужого предмета на
+   * каждый запрос. Такой «рецепт» лучше не отдавать вовсе.
+   */
+  function carriesId(url, body, itemId) {
+    if (!itemId) return false;
+    const hay = `${url || ""}\n${typeof body === "string" ? body : ""}`;
+    if (hay.includes(itemId)) return true;
+    try {
+      return hay.includes(encodeURIComponent(itemId));
+    } catch (_err) {
+      return false;
+    }
+  }
+
   function scoreCandidate(request, responseText) {
     const url = String(request.url || "").toLowerCase();
     const body = typeof request.body === "string" ? request.body : "";
@@ -185,6 +201,7 @@
   function considerCard(request, responseText) {
     const score = scoreCard(request, responseText);
     if (score <= 0 || score <= probe.cardScore) return;
+    if (!carriesId(request.url, request.body, itemIdFromHref(location.href))) return;
 
     const recipe = {
       id: `c${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`,
@@ -271,6 +288,7 @@
     if (score <= 0 || score <= probe.score) return;
 
     const itemId = itemIdFromHref(location.href);
+    if (!carriesId(request.url, request.body, itemId)) return;
     const recipe = {
       id: `r${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`,
       url: absolute(request.url),

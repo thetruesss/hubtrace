@@ -31,28 +31,65 @@
     <div class="splash" id="splash">
       <div class="splash__stage">
         <div class="splash__radar" aria-hidden="true">
-          <svg class="splash__dish" viewBox="0 0 64 64">
+          <svg class="splash__dish" viewBox="0 0 200 200">
             <defs>
-              <radialGradient id="splash-dish" cx="50%" cy="42%" r="58%">
-                <stop offset="0%" stop-color="#12356e" />
-                <stop offset="100%" stop-color="#07101f" />
+              <radialGradient id="splash-dish" cx="50%" cy="40%" r="62%">
+                <stop offset="0%" stop-color="#143a78" />
+                <stop offset="58%" stop-color="#0a1c3c" />
+                <stop offset="100%" stop-color="#060c18" />
               </radialGradient>
+              <linearGradient id="splash-rim" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0%" stop-color="#5f9bff" stop-opacity=".95" />
+                <stop offset="100%" stop-color="#1b3f88" stop-opacity=".55" />
+              </linearGradient>
             </defs>
-            <circle cx="32" cy="32" r="31" fill="#080e1c" />
-            <circle cx="32" cy="32" r="30" fill="url(#splash-dish)" stroke="#1d4fb8" stroke-width="1.15" />
-            <circle cx="32" cy="32" r="22.5" fill="none" stroke="#4d8dff" stroke-opacity=".42" />
-            <circle cx="32" cy="32" r="15" fill="none" stroke="#7ad0ff" stroke-opacity=".36" />
-            <circle cx="32" cy="32" r="7.5" fill="none" stroke="#9ec4ff" stroke-opacity=".4" />
-            <path d="M32 2 V62 M2 32 H62" stroke="#9ec4ff" stroke-opacity=".22" stroke-width=".7" />
-            <circle cx="32" cy="32" r="2.4" fill="#005BFF" />
-            <circle cx="32" cy="32" r="1.1" fill="#E8EEF8" />
+
+            <circle cx="100" cy="100" r="96" fill="none" stroke="url(#splash-rim)" stroke-width="1.2" />
+            <circle
+              class="splash__ticks"
+              cx="100"
+              cy="100"
+              r="90"
+              fill="none"
+              stroke="#7fb0ff"
+              stroke-opacity=".5"
+              stroke-width="7"
+              stroke-dasharray="1.6 21"
+            />
+            <circle cx="100" cy="100" r="84" fill="url(#splash-dish)" stroke="#2a63c8" stroke-width="1" />
+
+            <g fill="none" stroke="#8fc0ff">
+              <circle cx="100" cy="100" r="63" stroke-opacity=".26" />
+              <circle cx="100" cy="100" r="42" stroke-opacity=".22" />
+              <circle cx="100" cy="100" r="21" stroke-opacity=".2" />
+              <path d="M100 16V184M16 100H184" stroke-opacity=".16" stroke-width=".9" />
+              <path
+                d="M40.6 40.6 159.4 159.4M159.4 40.6 40.6 159.4"
+                stroke-opacity=".08"
+                stroke-width=".8"
+              />
+            </g>
+
+            <circle cx="100" cy="100" r="3.4" fill="#4d8dff" />
+            <circle cx="100" cy="100" r="1.5" fill="#eaf1ff" />
           </svg>
+
           <div class="splash__beam"><span class="splash__arm"></span></div>
-          <span class="splash__blip"><i></i></span>
+
+          <span class="splash__wave"></span>
+          <span class="splash__wave splash__wave--late"></span>
+
+          <!-- Радиус меряется от центра радара; тарелка кончается на 42 %. -->
+          <span class="splash__blip" style="--a: 40deg; --r: 29%; --d: 0.45s"><i></i></span>
+          <span class="splash__blip splash__blip--miss" style="--a: 116deg; --r: 36%; --d: 0.735s"><i></i></span>
+          <span class="splash__blip" style="--a: 203deg; --r: 21%; --d: 1.061s"><i></i></span>
+          <span class="splash__blip splash__blip--miss" style="--a: 295deg; --r: 33%; --d: 1.406s"><i></i></span>
         </div>
+
         <div class="splash__word">
           <h1>Hub Trace</h1>
           <p>Разбор OnTime</p>
+          <span class="splash__load" aria-hidden="true"><i></i></span>
         </div>
       </div>
     </div>
@@ -96,10 +133,11 @@
 
               <section class="panel glass panel--runs">
                 <div class="panel__head">
-                  <h2>Недавние проверки</h2>
+                  <h2>Склады прошлых проверок</h2>
                 </div>
+                <p class="hint hint--tight">Клик подставит склад в поле выше — набирать заново не нужно.</p>
                 <ul class="runs" id="runs"></ul>
-                <p class="runs__empty" id="runs-empty">Здесь появятся прошлые проверки — склад и итог одним кликом.</p>
+                <p class="runs__empty" id="runs-empty">Пусто: здесь останутся склады, которые вы уже проверяли.</p>
               </section>
 
               <section class="panel glass panel--brief">
@@ -212,7 +250,9 @@
                       <em>прошло</em>
                       <b id="gauge-elapsed">0:00</b>
                     </div>
+                    <!-- Каждая засечка — минута прогона, последняя заполняется секундами. -->
                     <div class="gauge__ticks" id="gauge-ticks" aria-hidden="true"></div>
+                    <span class="gauge__foot" id="gauge-elapsed-note">минуты прогона</span>
                   </div>
                 </div>
 
@@ -254,12 +294,6 @@
                 <button class="seg__btn" type="button" data-view="detail" role="tab">Детализация</button>
                 <button class="seg__btn" type="button" data-view="stats" role="tab">Аналитика</button>
               </div>
-              <button id="btn-copy" class="btn btn--primary" type="button" disabled>
-                <span class="btn__swap">
-                  <span class="btn__idle">Копировать найденные</span>
-                  <span class="btn__done">Скопировано</span>
-                </span>
-              </button>
               <button id="btn-again" class="btn btn--ghost" type="button">Ещё раз</button>
             </div>
           </div>
@@ -319,6 +353,10 @@
 
           <div class="detail" id="result-detail" hidden>
             <div class="detail__bar glass">
+              <!-- Сколько отправлений в срезе — первое, что нужно видеть. -->
+              <div class="tally" id="detail-count">
+                <b>0</b><em>отправлений</em>
+              </div>
               <label class="detail__search">
                 <svg viewBox="0 0 24 24" aria-hidden="true">
                   <circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2" />
@@ -332,38 +370,53 @@
                   placeholder="ID, номер, склад, ячейка, пользователь, тип операции — можно несколько значений"
                 />
               </label>
-              <div class="detail__filters">
-                <label class="pick">
-                  <span>Результат</span>
-                  <select id="filter-verdict">
-                    <option value="">любой</option>
-                    <option value="hit">склад есть</option>
-                    <option value="miss">склада нет</option>
-                    <option value="issue">не вышло</option>
-                  </select>
-                </label>
-                <label class="pick">
-                  <span>Корзинка</span>
-                  <select id="filter-bucket">
-                    <option value="">любая</option>
-                  </select>
-                </label>
-                <label class="pick">
-                  <span>Статус</span>
-                  <select id="filter-status">
-                    <option value="">любой</option>
-                  </select>
-                </label>
-                <button id="filter-reset" class="btn btn--ghost btn--sm" type="button" hidden>Сбросить</button>
+              <div class="filterbox" data-filterbox="detail">
+                <button class="btn btn--ghost btn--sm filterbox__btn" id="detail-filters-btn" type="button"
+                        aria-expanded="false">
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M4 6h16M7 12h10M10 18h4" fill="none" stroke="currentColor" stroke-width="2"
+                          stroke-linecap="round" />
+                  </svg>
+                  Фильтры
+                  <span class="filterbox__count" id="detail-filters-count" hidden>0</span>
+                </button>
+                <div class="filterbox__pop" id="detail-filters-pop" hidden>
+                  <div class="filterbox__grid">
+                    <label class="pick">
+                      <span>Результат</span>
+                      <select id="filter-verdict">
+                        <option value="">любой</option>
+                        <option value="hit">склад есть</option>
+                        <option value="miss">склада нет</option>
+                        <option value="issue">не вышло</option>
+                      </select>
+                    </label>
+                    <label class="pick">
+                      <span>Корзинка</span>
+                      <select id="filter-bucket">
+                        <option value="">любая</option>
+                      </select>
+                    </label>
+                    <label class="pick">
+                      <span>Статус</span>
+                      <select id="filter-status">
+                        <option value="">любой</option>
+                      </select>
+                    </label>
+                  </div>
+                  <button id="filter-reset" class="btn btn--ghost btn--sm" type="button" hidden>Сбросить всё</button>
+                </div>
               </div>
               <div class="detail__chips" id="detail-chips"></div>
-              <span class="detail__count" id="detail-count"></span>
             </div>
             <div class="detail__scroll" id="detail-list"></div>
           </div>
 
           <div class="stats" id="result-stats" hidden>
             <div class="detail__bar glass">
+              <div class="tally" id="stats-count">
+                <b>0</b><em>отправлений</em>
+              </div>
               <label class="detail__search">
                 <svg viewBox="0 0 24 24" aria-hidden="true">
                   <circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2" />
@@ -377,56 +430,68 @@
                   placeholder="ID, ячейка, склад, номер отправления — можно списком"
                 />
               </label>
-              <div class="detail__filters">
-                <label class="pick">
-                  <span>Результат</span>
-                  <select id="stats-verdict">
-                    <option value="">любой</option>
-                    <option value="hit">склад есть</option>
-                    <option value="miss">склада нет</option>
-                    <option value="issue">не вышло</option>
-                  </select>
-                </label>
-                <label class="pick">
-                  <span>Ячейка</span>
-                  <select id="stats-cell">
-                    <option value="">любая</option>
-                  </select>
-                </label>
-                <label class="pick">
-                  <span>Склад</span>
-                  <select id="stats-place">
-                    <option value="">любой</option>
-                  </select>
-                </label>
-                <label class="pick">
-                  <span>Корзинка</span>
-                  <select id="stats-bucket">
-                    <option value="">любая</option>
-                  </select>
-                </label>
-                <label class="pick">
-                  <span>Статус</span>
-                  <select id="stats-status">
-                    <option value="">любой</option>
-                  </select>
-                </label>
-                <label class="pick">
-                  <span>Операция</span>
-                  <select id="stats-op">
-                    <option value="">любая</option>
-                  </select>
-                </label>
-                <label class="pick">
-                  <span>Цена</span>
-                  <select id="stats-price">
-                    <option value="">любая</option>
-                  </select>
-                </label>
-                <button id="stats-reset" class="btn btn--ghost btn--sm" type="button" hidden>Сбросить</button>
+              <div class="filterbox" data-filterbox="stats">
+                <button class="btn btn--ghost btn--sm filterbox__btn" id="stats-filters-btn" type="button"
+                        aria-expanded="false">
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M4 6h16M7 12h10M10 18h4" fill="none" stroke="currentColor" stroke-width="2"
+                          stroke-linecap="round" />
+                  </svg>
+                  Фильтры
+                  <span class="filterbox__count" id="stats-filters-count" hidden>0</span>
+                </button>
+                <div class="filterbox__pop filterbox__pop--wide" id="stats-filters-pop" hidden>
+                  <div class="filterbox__grid">
+                    <label class="pick">
+                      <span>Результат</span>
+                      <select id="stats-verdict">
+                        <option value="">любой</option>
+                        <option value="hit">склад есть</option>
+                        <option value="miss">склада нет</option>
+                        <option value="issue">не вышло</option>
+                      </select>
+                    </label>
+                    <label class="pick">
+                      <span>Ячейка</span>
+                      <select id="stats-cell">
+                        <option value="">любая</option>
+                      </select>
+                    </label>
+                    <label class="pick">
+                      <span>Склад</span>
+                      <select id="stats-place">
+                        <option value="">любой</option>
+                      </select>
+                    </label>
+                    <label class="pick">
+                      <span>Корзинка</span>
+                      <select id="stats-bucket">
+                        <option value="">любая</option>
+                      </select>
+                    </label>
+                    <label class="pick">
+                      <span>Статус</span>
+                      <select id="stats-status">
+                        <option value="">любой</option>
+                      </select>
+                    </label>
+                    <label class="pick">
+                      <span>Операция</span>
+                      <select id="stats-op">
+                        <option value="">любая</option>
+                      </select>
+                    </label>
+                    <label class="pick">
+                      <span>Цена</span>
+                      <select id="stats-price">
+                        <option value="">любая</option>
+                      </select>
+                    </label>
+                  </div>
+                  <button id="stats-reset" class="btn btn--ghost btn--sm" type="button" hidden>Сбросить всё</button>
+                </div>
               </div>
               <div class="detail__chips" id="stats-chips"></div>
-              <span class="detail__count" id="stats-count"></span>
             </div>
 
             <div class="stats__scroll" id="stats-scroll">
@@ -446,9 +511,12 @@
                   <div class="spanel__tools">
                     <span class="spanel__sub" id="stats-table-count"></span>
                     <button id="stats-cols" class="btn btn--ghost btn--sm" type="button">Столбцы</button>
-                    <button id="stats-xlsx" class="btn btn--ghost btn--sm" type="button">В Excel</button>
                   </div>
                 </div>
+                <p class="spanel__note">
+                  Кнопка «Скачать отчёт» внизу забирает эту таблицу как есть — те же столбцы, порядок и фильтры,
+                  плюс второй лист с тремя последними действиями по каждому ID.
+                </p>
                 <div class="colmenu" id="stats-colmenu" hidden></div>
                 <div class="stats__wrap">
                   <table class="stats__table" id="stats-table">
@@ -482,7 +550,7 @@
       </svg>
       <span class="fab__text">
         <b>Скачать отчёт</b>
-        <em id="fab-note">Excel · 2 листа</em>
+        <em id="fab-note">Excel · «Все ID» + действия</em>
       </span>
     </button>
 
