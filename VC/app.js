@@ -1008,6 +1008,8 @@ const REPORT_COLUMNS = [
   { title: "Статус", width: 26 },
   { title: "Полнота проверки", width: 18 },
   { title: "Корзинка", width: 12 },
+  /* Так эта сумма подписана на карточке Hub: «Цена, которую заплатил клиент». */
+  { title: "Цена реализации", width: 16 },
   /* Путь ячейки Hub пишет через «/», а переезд — через «→»: строка длинная. */
   { title: "Последняя ячейка", width: 52 },
   { title: "Подробнее", width: 14 }
@@ -1122,6 +1124,7 @@ function buildXlsx() {
       { text: report.status || "" },
       { text: CHECK_STATUS[item.status] || item.status || "" },
       { text: bucketOf(report.warehouseAt, now) },
+      { text: report.price || "" },
       { text: report.warehouseCell || "" },
       anchor ? { text: "смотреть →", anchor, style: xlsxStyles.STYLE_JUMP } : { text: "" }
     ]);
@@ -1612,6 +1615,8 @@ function haystackOf(item) {
     report.status,
     report.warehouseAt,
     report.warehouseCell,
+    ...priceNeedles(report.price),
+    ...priceNeedles(report.fairPrice),
     bucketOf(report.warehouseAt, Date.now()),
     kind === "hit" ? "есть склад" : kind === "miss" ? "нет склада" : "не вышло",
     CHECK_STATUS[item.status] || item.status,
@@ -1723,10 +1728,16 @@ function setResultView(view, animate) {
   viewSwapTimer = window.setTimeout(show, 160);
 }
 
-/* Поиск принимает и один ID, и список: через пробел, запятую или строками. */
+/*
+ * Поиск принимает и один ID, и список: через пробел, запятую или строками.
+ *
+ * Запятая при этом бывает и десятичной — «12 000,50». Отличаем по хвосту:
+ * если за запятой ровно две цифры и дальше не цифра, это копейки, и рвать
+ * строку нельзя; список же ID («…000,…001») разделяется как прежде.
+ */
 function parseDetailQuery(raw) {
   return String(raw || "")
-    .split(/[\s,;]+/)
+    .split(/[\s;]+|,(?!\d{2}(?!\d))/)
     .map((part) => part.trim().toLowerCase())
     .filter(Boolean);
 }
@@ -1795,6 +1806,8 @@ function detailCard(item) {
   };
   addFact("Корзинка", bucketOf(report.warehouseAt, Date.now()));
   addFact("Когда", report.warehouseAt);
+  addFact("Цена реализации", report.price);
+  addFact("Цена", report.fairPrice);
   addFact("Последняя ячейка", report.warehouseCell);
   if (facts.childElementCount) card.appendChild(facts);
 
@@ -1974,7 +1987,8 @@ const statsFilters = {
   op: "",
   day: "",
   user: "",
-  hour: ""
+  hour: "",
+  priceBand: ""
 };
 let statsSort = { key: "at", dir: -1 };
 
@@ -2006,7 +2020,8 @@ const STATS_SELECTS = {
   place: "stats-place",
   bucket: "stats-bucket",
   status: "stats-status",
-  op: "stats-op"
+  op: "stats-op",
+  priceBand: "stats-price"
 };
 
 /* «A → B» — предмет доехал до B; «A → —» — последним известным остаётся A. */
@@ -2074,6 +2089,64 @@ function blameOf(item) {
 
 const BLAME_TAGS = { cell: "ячейка", place: "склад" };
 
+/*
+ * Сумма приходит с карточки Hub уже в его формате — «12 000,50 ₽», причём
+ * разряды разделены неразрывным пробелом. Ищут её люди как придётся:
+ * «12000,50», «12 000.5», «12000». Поэтому в строку поиска кладём и
+ * исходный вид, и вид без разделителей, и точку вместо запятой.
+ */
+function priceNeedles(text) {
+  const value = priceValue(text);
+  if (value == null) return [];
+  const exact = value.toFixed(2);
+  const plain = String(value);
+  return [
+    String(text),
+    exact,
+    exact.replace(".", ","),
+    plain,
+    plain.replace(".", ",")
+  ];
+}
+
+/*
+ * Для сортировки и диапазонов нужно число, поэтому разбираем формат Hub
+ * обратно: убираем всё, кроме цифр и разделителя дробной части.
+ */
+function priceValue(text) {
+  const clean = String(text || "").replace(/[^0-9,.\s]/g, "").replace(/\s+/g, "").replace(",", ".");
+  const number = Number.parseFloat(clean);
+  return Number.isFinite(number) ? number : null;
+}
+
+/* Тот же формат, что у Hub: два знака после запятой и рубль. */
+function priceText(value) {
+  try {
+    return `${new Intl.NumberFormat("ru-RU", {
+      maximumFractionDigits: 2,
+      minimumFractionDigits: 2
+    }).format(value)} \u20bd`;
+  } catch (_err) {
+    return `${value.toFixed(2)} \u20bd`;
+  }
+}
+
+/* Разряды цены — чтобы видеть, на каких суммах чаще застревает. */
+const PRICE_STEPS = [
+  { upTo: 500, label: "до 500 ₽" },
+  { upTo: 1000, label: "500–1 000 ₽" },
+  { upTo: 3000, label: "1 000–3 000 ₽" },
+  { upTo: 10000, label: "3 000–10 000 ₽" }
+];
+const PRICE_ORDER = [...PRICE_STEPS.map((step) => step.label), "10 000 ₽+"];
+
+function priceBandOf(text) {
+  const value = priceValue(text);
+  if (value == null) return "";
+  for (const step of PRICE_STEPS) if (value < step.upTo) return step.label;
+  return "10 000 ₽+";
+}
+
 /* Колонка «Пользователь» верхней строки — кто делал последнюю операцию. */
 function topUserOf(report) {
   const rows = report?.lastRows;
@@ -2093,16 +2166,21 @@ function buildStatsIndex(results) {
     const op = String(withLabels(item.report)[0]?.[0] || "").trim();
     const user = topUserOf(item.report);
     const hour = stamp ? `${pad(stamp.getHours())}:00` : "";
+    const price = item.report?.price || "";
     return {
       item,
       blame,
       op,
       user,
       hour,
+      price,
+      priceBand: priceBandOf(price),
       bucket: bucketOf(item.report?.warehouseAt, now),
       day: stamp ? `${pad(stamp.getDate())}.${pad(stamp.getMonth() + 1)}` : "",
       dayTs: stamp ? new Date(stamp.getFullYear(), stamp.getMonth(), stamp.getDate()).getTime() : 0,
-      hay: [haystackOf(item), blame.value, BLAME_TAGS[blame.kind] || "", user, hour].join(" ").toLowerCase()
+      hay: [haystackOf(item), blame.value, BLAME_TAGS[blame.kind] || "", user, hour, ...priceNeedles(price)]
+        .join(" ")
+        .toLowerCase()
     };
   });
   assignStatsColors();
@@ -2126,6 +2204,7 @@ function passesStats(entry, skip) {
   if (!s.has("day") && statsFilters.day && entry.day !== statsFilters.day) return false;
   if (!s.has("user") && statsFilters.user && entry.user !== statsFilters.user) return false;
   if (!s.has("hour") && statsFilters.hour && entry.hour !== statsFilters.hour) return false;
+  if (!s.has("priceBand") && statsFilters.priceBand && entry.priceBand !== statsFilters.priceBand) return false;
   if (statsQuery.length && !statsQuery.some((needle) => entry.hay.includes(needle))) return false;
   return true;
 }
@@ -2175,21 +2254,25 @@ function fillStatsOptions() {
   const buckets = [];
   const statuses = [];
   const ops = [];
+  const bands = [];
   for (const entry of statsIndex) {
     if (entry.bucket && !buckets.includes(entry.bucket)) buckets.push(entry.bucket);
     const status = entry.item.report?.status;
     if (status && !statuses.includes(status)) statuses.push(status);
     if (entry.op && !ops.includes(entry.op)) ops.push(entry.op);
+    if (entry.priceBand && !bands.includes(entry.priceBand)) bands.push(entry.priceBand);
   }
   buckets.sort((a, b) => BUCKET_ORDER.indexOf(a) - BUCKET_ORDER.indexOf(b));
   statuses.sort((a, b) => a.localeCompare(b, "ru"));
   ops.sort((a, b) => a.localeCompare(b, "ru"));
+  bands.sort((a, b) => PRICE_ORDER.indexOf(a) - PRICE_ORDER.indexOf(b));
 
   fill("stats-cell", cells, "любая");
   fill("stats-place", places, "любой");
   fill("stats-bucket", buckets, "любая");
   fill("stats-status", statuses, "любой");
   fill("stats-op", ops, "любая");
+  fill("stats-price", bands, "любая");
 }
 
 function syncStatsControls() {
@@ -2213,6 +2296,8 @@ function renderStatsKpis(shown) {
   let hits = 0;
   let misses = 0;
   let issues = 0;
+  let sum = 0;
+  let priced = 0;
   const cells = new Set();
   const places = new Set();
   for (const entry of shown) {
@@ -2222,6 +2307,11 @@ function renderStatsKpis(shown) {
     else issues += 1;
     if (entry.blame.kind === "cell" && entry.blame.value) cells.add(entry.blame.value);
     if (entry.blame.kind === "place" && entry.blame.value) places.add(entry.blame.value);
+    const value = priceValue(entry.price);
+    if (value != null) {
+      sum += value;
+      priced += 1;
+    }
   }
 
   const filtered = statsFiltersActive();
@@ -2233,12 +2323,20 @@ function renderStatsKpis(shown) {
     { label: "Последних ячеек", value: cells.size, mod: "cell" },
     { label: "Предыдущих складов", value: places.size, mod: "place" }
   ];
+  if (priced) {
+    tiles.push({
+      label: "Сумма",
+      text: priceText(sum),
+      sub: priced < shown.length ? `по ${priced} из ${shown.length}` : "",
+      mod: "money"
+    });
+  }
 
   host.innerHTML = "";
   for (const tile of tiles) {
     const box = el("div", `kpi${tile.mod ? ` kpi--${tile.mod}` : ""}`);
     box.appendChild(el("span", null, tile.label));
-    box.appendChild(el("b", null, String(tile.value)));
+    box.appendChild(el("b", null, tile.text != null ? tile.text : String(tile.value)));
     if (tile.sub) box.appendChild(el("em", null, tile.sub));
     host.appendChild(box);
   }
@@ -2325,6 +2423,13 @@ const STATS_DIMS = {
     ordered: "hour",
     of: (entry) => entry.hour
   },
+  priceBand: {
+    title: "Цена реализации",
+    sub: "разряды суммы с карточки Hub",
+    filter: "priceBand",
+    ordered: "priceBand",
+    of: (entry) => entry.priceBand
+  },
   bucket: {
     title: "Корзинки",
     sub: "возраст верхней строки о складе",
@@ -2350,6 +2455,10 @@ function assignStatsColors() {
 /* Порядок значений упорядоченного измерения — по его природе. */
 function dimOrderKey(dimKey, entry) {
   if (dimKey === "day") return entry.dayTs;
+  if (dimKey === "priceBand") {
+    const at = PRICE_ORDER.indexOf(entry.priceBand);
+    return at < 0 ? PRICE_ORDER.length : at;
+  }
   if (dimKey === "hour") return Number(entry.hour.slice(0, 2));
   if (dimKey === "bucket") {
     const at = BUCKET_ORDER.indexOf(entry.bucket);
@@ -3019,6 +3128,29 @@ const STATS_COLUMNS = {
       td.textContent = entry.op || "—";
     }
   },
+  price: {
+    title: "Цена реализации",
+    width: 16,
+    /* Сортируем по числу, а не по строке: «1 000,00» иначе встанет раньше «9,00». */
+    sort: (entry) => priceValue(entry.price) ?? -1,
+    text: (entry) => entry.price || "",
+    cell: (entry, td) => {
+      td.className = "t-price";
+      td.textContent = entry.price || "—";
+    }
+  },
+  priceBand: {
+    title: "Разряд цены",
+    width: 16,
+    sort: (entry) => {
+      const at = PRICE_ORDER.indexOf(entry.priceBand);
+      return at < 0 ? PRICE_ORDER.length : at;
+    },
+    text: (entry) => entry.priceBand || "",
+    cell: (entry, td) => {
+      td.textContent = entry.priceBand || "—";
+    }
+  },
   user: {
     title: "Пользователь",
     width: 32,
@@ -3040,7 +3172,7 @@ const STATS_COLUMNS = {
   }
 };
 
-const DEFAULT_STATS_COLS = ["id", "number", "verdict", "blame", "at", "bucket", "status", "op"];
+const DEFAULT_STATS_COLS = ["id", "number", "verdict", "blame", "at", "bucket", "price", "status", "op"];
 let statsCols = DEFAULT_STATS_COLS.slice();
 
 function persistStatsCols() {
@@ -3247,7 +3379,8 @@ function renderStatsChips() {
     ["place", "склад"],
     ["day", "день"],
     ["hour", "час"],
-    ["user", "пользователь"]
+    ["user", "пользователь"],
+    ["priceBand", "цена"]
   ];
   for (const [key, label] of chips) {
     const value = statsFilters[key];
@@ -3297,6 +3430,7 @@ function resetStatsFilters() {
     const select = $(id);
     if (select) select.value = "";
   }
+  statsFilters.day = "";
 }
 
 /* Переход «углубиться»: сбрасываем фильтры детализации и ищем ровно этот ID. */

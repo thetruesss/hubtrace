@@ -4274,3 +4274,18 @@ a.t-id__code:hover {
     animation: none !important;
   }
 }
+
+/* Сумма — колонкой цифр, поэтому равноширокие знаки и выравнивание вправо. */
+.t-price {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.kpi--money::after {
+  background: var(--cyan);
+}
+
+.kpi--money b {
+  font-size: 19px;
+  color: var(--cyan);
+}
