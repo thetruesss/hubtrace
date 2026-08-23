@@ -78,16 +78,7 @@ const ui = {
   etaLog: []
 };
 
-/* Плавность: там, где страница умеет, перерисовка идёт мягким переходом. */
 const REDUCED_MOTION = window.matchMedia("(prefers-reduced-motion: reduce)");
-
-function smooth(render) {
-  if (typeof document.startViewTransition === "function" && !REDUCED_MOTION.matches) {
-    document.startViewTransition(render);
-    return;
-  }
-  render();
-}
 
 /* Числа не прыгают, а докручиваются. */
 function animateNumber(node, to) {
@@ -2725,21 +2716,21 @@ const VERDICT_WORDS = { hit: "склад есть", miss: "склада нет",
 const STATS_DIMS = {
   cell: {
     title: "Последняя ячейка",
-    sub: "склад найден — последняя ячейка верхней строки о нём",
+    sub: "Искомый склад в истории есть. Ячейка, в которой предмет лежал на нём последний раз.",
     filter: "cell",
     hue: "var(--viz-hit)",
     of: (entry) => (entry.blame.kind === "cell" ? entry.blame.value : "")
   },
   place: {
     title: "Предыдущий склад",
-    sub: "склада нет — верхний склад по движениям",
+    sub: "Искомого склада в истории нет. Склад, где предмет находится по последнему движению.",
     filter: "place",
     hue: "var(--viz-miss)",
     of: (entry) => (entry.blame.kind === "place" ? entry.blame.value : "")
   },
   verdict: {
     title: "Результат проверки",
-    sub: "есть / нет / не вышло",
+    sub: "Чем закончилась проверка каждого ID.",
     filter: "verdict",
     of: (entry) => classify(entry.item),
     label: (value) => VERDICT_WORDS[value] || value,
@@ -2747,46 +2738,46 @@ const STATS_DIMS = {
   },
   status: {
     title: "Статусы отправлений",
-    sub: "как в карточке Hub",
+    sub: "Статус предмета, как он написан в карточке Hub.",
     filter: "status",
     of: (entry) => entry.item.report?.status || ""
   },
   op: {
     title: "Последние операции",
-    sub: "тип верхней строки истории",
+    sub: "Что делали с предметом последним — тип верхней строки истории.",
     filter: "op",
     of: (entry) => entry.op
   },
   user: {
     title: "Кто делал операцию",
-    sub: "пользователь верхней строки",
+    sub: "Кто делал последнюю операцию.",
     filter: "user",
     of: (entry) => entry.user
   },
   day: {
     title: "По дням",
-    sub: "дата верхней операции",
+    sub: "Дата последней операции по предмету.",
     filter: "day",
     ordered: "day",
     of: (entry) => entry.day
   },
   hour: {
     title: "По часам",
-    sub: "час верхней операции",
+    sub: "Час, в который прошла последняя операция.",
     filter: "hour",
     ordered: "hour",
     of: (entry) => entry.hour
   },
   priceBand: {
     title: "Цена реализации",
-    sub: "разряды суммы с карточки Hub",
+    sub: "Цена реализации с карточки Hub, разложенная по разрядам.",
     filter: "priceBand",
     ordered: "priceBand",
     of: (entry) => entry.priceBand
   },
   bucket: {
     title: "Корзинки",
-    sub: "возраст верхней строки о складе",
+    sub: "Сколько прошло с последней операции по предмету.",
     filter: "bucket",
     ordered: "bucket",
     of: (entry) => entry.bucket
@@ -2916,6 +2907,12 @@ function renderBarChart(host, rows, options) {
   const top = rows.slice(0, 10);
   const max = Math.max(...top.map(([, count]) => count)) || 1;
   const total = rows.reduce((sum, [, count]) => sum + count, 0);
+  /* Полосы живут в своей обёртке: она растягивается на всю высоту блока,
+     а подпись под ней остаётся прижатой к низу. Число строк отдаём в CSS —
+     по нему высота делится поровну, и полосы толстеют, когда значений мало,
+     вместо того чтобы висеть ниткой посреди пустоты. */
+  const rowsBox = el("div", "bars__rows");
+  rowsBox.style.setProperty("--bar-rows", String(top.length));
   for (const [value, count] of top) {
     const active = options.active;
     const row = document.createElement("button");
@@ -2944,13 +2941,21 @@ function renderBarChart(host, rows, options) {
     const num = el("span", "hbar__value", String(count));
 
     row.append(label, track, num);
-    host.appendChild(row);
+    rowsBox.appendChild(row);
   }
+  host.appendChild(rowsBox);
 
   const feet = [];
   if (rows.length > top.length) {
     const rest = rows.slice(top.length).reduce((sum, [, count]) => sum + count, 0);
-    feet.push(`за десяткой ещё ${rows.length - top.length} — на них ${rest} ID`);
+    /* «за десяткой ещё 7 — на них 23 ID» читалось как загадка: непонятно,
+       чего семь. Говорим прямо — сколько значений не поместилось и сколько
+       ID в них суммарно. */
+    const left = rows.length - top.length;
+    feet.push(
+      `показаны ${top.length} самых частых · ещё ` +
+        `${left} ${plural(left, ["значение", "значения", "значений"])}, суммарно ${rest} ID`
+    );
   }
   if (options.foot) feet.push(options.foot);
   if (feet.length) host.appendChild(el("p", "bars__foot", feet.join(" · ")));
@@ -2996,7 +3001,6 @@ function renderColsChart(host, slice, dimKey, options) {
   host.appendChild(legend);
 
   const cols = el("div", "cols");
-  const PLOT = 108;
   const max = Math.max(...top.map(([value]) => {
     const counts = split.get(value);
     return counts.hit + counts.miss + counts.issue;
@@ -3025,7 +3029,14 @@ function renderColsChart(host, slice, dimKey, options) {
     });
 
     col.appendChild(el("span", "col__cap", String(total)));
+    /*
+     * Высота столбика — доля от самого высокого, а не число пикселей:
+     * тогда график занимает ровно ту высоту, которую ему отвела раскладка,
+     * и не оставляет пустоту под собой при смене вида блока.
+     */
+    const plot = el("span", "col__plot");
     const stack = el("span", "col__stack");
+    stack.style.height = `${Math.max(2, (total / max) * 100)}%`;
     /* Сверху вниз: не вышло, склада нет, склад есть — жёлтое у основания. */
     const parts = [
       [VERDICT_COLORS.issue, counts.issue],
@@ -3036,10 +3047,12 @@ function renderColsChart(host, slice, dimKey, options) {
       if (!count) continue;
       const seg = el("i", "col__seg");
       seg.style.background = color;
-      seg.style.height = `${Math.max(3, Math.round((count / max) * PLOT))}px`;
+      /* Слои делят столбик по своим долям — зазоры при этом не съезжают. */
+      seg.style.flexGrow = String(count);
       stack.appendChild(seg);
     }
-    col.appendChild(stack);
+    plot.appendChild(stack);
+    col.appendChild(plot);
     col.appendChild(el("span", "col__day", labelOf(value)));
     cols.appendChild(col);
   }
@@ -3268,10 +3281,30 @@ function panelSelect(value, entries, onChange) {
   return pick;
 }
 
+/*
+ * Правка панели меняет только её саму.
+ *
+ * Раньше смена измерения или вида звала renderStats(), а тот перерисовывал
+ * всё пространство — KPI, все панели, таблицу — да ещё и через переход
+ * всей страницы. Со стороны это выглядело как моргание приложения из-за
+ * одного выпадающего списка.
+ */
 function updatePanel(index, patch) {
   statsPanels[index] = { ...statsPanels[index], ...patch };
   persistStatsPanels();
-  renderStats();
+
+  const grid = $("stats-panels");
+  const node = grid?.querySelector(`.spanel[data-at="${index}"]`);
+  if (!node) {
+    renderStatsPanels();
+    return;
+  }
+  node.replaceWith(renderStatsPanel(statsPanels[index], index));
+}
+
+function syncPanelTools() {
+  const addBtn = $("stats-add");
+  if (addBtn) addBtn.disabled = statsPanels.length >= MAX_PANELS;
 }
 
 /*
@@ -3282,6 +3315,7 @@ function updatePanel(index, patch) {
 function renderStatsPanel(panel, index) {
   const dim = STATS_DIMS[panel.dim];
   const section = el("section", "panel glass spanel");
+  section.dataset.at = String(index);
   section.dataset.dim = panel.dim;
   section.dataset.viz = panel.viz;
 
@@ -3295,17 +3329,26 @@ function renderStatsPanel(panel, index) {
   tools.appendChild(
     panelSelect(panel.viz, Object.entries(STATS_VIZ), (next) => updatePanel(index, { viz: next }))
   );
-  if (statsPanels.length > 1) {
-    const drop = el("button", "spanel__drop", "×");
-    drop.type = "button";
-    drop.title = "Убрать панель";
-    drop.addEventListener("click", () => {
+  /* Крестик есть всегда: у единственной панели его прячет CSS — так не
+     приходится пересобирать соседей, когда панелей стало две. */
+  const drop = el("button", "spanel__drop", "×");
+  drop.type = "button";
+  drop.title = "Убрать панель";
+  drop.addEventListener("click", () => {
+    const done = () => {
       statsPanels.splice(index, 1);
       persistStatsPanels();
-      renderStats();
-    });
-    tools.appendChild(drop);
-  }
+      renderStatsPanels();
+    };
+    /* Панель уходит плавно, а не пропадает под руками. */
+    if (REDUCED_MOTION.matches) {
+      done();
+      return;
+    }
+    section.classList.add("is-going");
+    window.setTimeout(done, 260);
+  });
+  tools.appendChild(drop);
   head.appendChild(tools);
   section.appendChild(head);
   if (dim.sub) section.appendChild(el("p", "spanel__note", dim.sub));
@@ -3373,11 +3416,17 @@ function renderStatsPanel(panel, index) {
     active,
     pick,
     empty,
-    foot: missing ? `${panel.dim === "cell" ? "ячейка" : "склад"} не прочиталась: ${missing}` : ""
+    foot: missing ? `без значения: ${missing} ${plural(missing, ["ID", "ID", "ID"])}` : ""
   });
   return section;
 }
 
+/*
+ * Панели рисуются без анимации появления: их пересборка случается на
+ * каждый клик по значению (панели фасетные), и мигать всем набором на
+ * каждый фильтр незачем. Анимацию получает только та панель, которую
+ * действительно добавили, — класс is-fresh вешает appendStatsPanel.
+ */
 function renderStatsPanels() {
   const grid = $("stats-panels");
   if (!grid) return;
@@ -3386,8 +3435,16 @@ function renderStatsPanels() {
     if (!STATS_DIMS[panel.dim] || !STATS_VIZ[panel.viz]) return;
     grid.appendChild(renderStatsPanel(panel, index));
   });
-  const addBtn = $("stats-add");
-  if (addBtn) addBtn.disabled = statsPanels.length >= MAX_PANELS;
+  syncPanelTools();
+}
+
+function appendStatsPanel(index) {
+  const grid = $("stats-panels");
+  if (!grid) return;
+  const node = renderStatsPanel(statsPanels[index], index);
+  if (!REDUCED_MOTION.matches) node.classList.add("is-fresh");
+  grid.appendChild(node);
+  syncPanelTools();
 }
 
 /* ---- таблица ---- */
@@ -3454,8 +3511,11 @@ const STATS_COLUMNS = {
         td.appendChild(el("span", "t-none", "—"));
         return;
       }
+      /* Значения нет — ставим прочерк, как в любой пустой ячейке таблицы.
+         Раньше здесь стояло «склад не прочиталась»: и не по-русски, и шумно
+         на весь столбец. */
       if (!entry.blame.value) {
-        td.appendChild(el("span", "t-none", `${BLAME_TAGS[entry.blame.kind]} не прочиталась`));
+        td.appendChild(el("span", "t-none", "—"));
         return;
       }
       const chip = el("button", `t-blame t-blame--${entry.blame.kind}`);
@@ -3634,7 +3694,7 @@ function renderStatsHead() {
       if (from < 0 || to < 0) return;
       statsCols.splice(to, 0, ...statsCols.splice(from, 1));
       persistStatsCols();
-      smooth(renderStats);
+      refreshStatsTable();
     });
 
     head.appendChild(th);
@@ -3670,7 +3730,7 @@ function renderColMenu() {
         if (statsSort.key === key) statsSort = { key: statsCols[0], dir: 1 };
       }
       persistStatsCols();
-      smooth(renderStats);
+      refreshStatsTable();
     });
     row.append(box2, el("span", null, column.title));
     list.appendChild(row);
@@ -3683,9 +3743,21 @@ function renderColMenu() {
     statsCols = DEFAULT_STATS_COLS.slice();
     statsSort = { key: "at", dir: -1 };
     persistStatsCols();
-    smooth(renderStats);
+    renderColMenu();
+    refreshStatsTable();
   });
   box.appendChild(reset);
+}
+
+/*
+ * Столбцы касаются только таблицы.
+ *
+ * Раньше перетаскивание заголовка и галочка в меню пересобирали всё
+ * пространство, да ещё и через переход всей страницы — экран заметно моргал
+ * на каждое движение мышью. Считаем срез и перерисовываем одну таблицу.
+ */
+function refreshStatsTable() {
+  renderStatsTable(statsIndex.filter((entry) => passesStats(entry)));
 }
 
 function renderStatsTable(shown) {
@@ -3858,7 +3930,7 @@ function mountStats() {
     const dim = Object.keys(STATS_DIMS).find((key) => !used.has(key)) || "verdict";
     statsPanels.push({ dim, viz: "bars" });
     persistStatsPanels();
-    renderStats();
+    appendStatsPanel(statsPanels.length - 1);
   });
 
   $("stats-default")?.addEventListener("click", () => {
@@ -3887,8 +3959,8 @@ function mountStats() {
         else statsSort = { key, dir: key === "at" ? -1 : 1 };
         persistStatsCols();
         /* Плавность здесь даёт сама таблица: строки въезжают своей
-           анимацией. Переход всей страницы тут только тормозил бы отклик. */
-        renderStats();
+           анимацией. Пересобирать всё пространство ради сортировки незачем. */
+        refreshStatsTable();
       }
     });
   }

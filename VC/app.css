@@ -3136,14 +3136,27 @@ input[type="number"] {
 
 /* ---- сетка панелей ---- */
 
+/*
+ * Строки равной высоты. Без этого блок с гистограммой на десять строк
+ * стоял рядом с диаграммой на две — и высота панели прыгала при каждой
+ * смене вида. Теперь высота одна на ряд, а график внутри тянется на всё,
+ * что осталось от шапки и подписи.
+ */
 .stats__grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-auto-rows: 1fr;
   gap: var(--gap);
 }
 
 .spanel {
   padding: 14px 16px 16px;
+  min-height: 268px;
+}
+
+/* Панель одна — убирать её некуда, крестик прячем. */
+.stats__grid > .spanel:only-child .spanel__drop {
+  display: none;
 }
 
 .spanel__head {
@@ -3208,23 +3221,45 @@ input[type="number"] {
   color: #ffd9d4;
 }
 
+/* Подпись объясняет, что показывает разрез, — её должно быть видно. */
 .spanel__note {
-  margin: -4px 0 10px;
-  font-size: 10.5px;
-  color: var(--faint);
+  flex: 0 0 auto;
+  margin: -2px 0 12px;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--muted);
 }
 
 .pchart .legend {
   margin-bottom: 10px;
+  flex: 0 0 auto;
+}
+
+/* Обе рисовалки — колонка на весь остаток блока. */
+.bars,
+.pchart {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/*
+ * Высота делится между строками поровну — их число приходит из JS в
+ * --bar-rows. Одно значение занимает блок целиком, десять становятся
+ * ровным столбцом; пустоты под графиком не остаётся ни там, ни там.
+ */
+.bars__rows {
+  flex: 1 1 auto;
+  display: grid;
+  grid-template-rows: repeat(var(--bar-rows, 1), minmax(20px, 1fr));
+  gap: 6px;
+  min-height: 0;
 }
 
 /* ---- горизонтальные полосы ---- */
 
-.bars {
-  display: flex;
-  flex-direction: column;
-  gap: 9px;
-}
+
 
 .hbar {
   display: grid;
@@ -3255,9 +3290,10 @@ input[type="number"] {
   transition: color 0.2s var(--ease);
 }
 
+/* Толщина полосы тянется за высотой строки, но не превращается в плиту. */
 .hbar__track {
   display: block;
-  height: 12px;
+  height: min(100%, 24px);
   border-radius: 4px;
   background: rgba(255, 255, 255, 0.045);
   overflow: hidden;
@@ -3301,12 +3337,14 @@ input[type="number"] {
 }
 
 .bars__foot {
+  flex: 0 0 auto;
   margin: 2px 0 0;
   font-size: 10.5px;
   color: var(--faint);
 }
 
 .bars__none {
+  margin: auto 0;
   margin: 6px 0;
   font-size: 11.5px;
   color: var(--faint);
@@ -3336,10 +3374,11 @@ input[type="number"] {
 }
 
 .cols {
+  flex: 1 1 auto;
   display: flex;
-  align-items: flex-end;
+  align-items: stretch;
   gap: 10px;
-  min-height: 150px;
+  min-height: 130px;
 }
 
 .col {
@@ -3373,7 +3412,17 @@ input[type="number"] {
   font-variant-numeric: tabular-nums;
 }
 
+/* Площадка столбика: тянется на всю свободную высоту, сам столбик стоит
+   на её дне и занимает свою долю от самого высокого. */
+.col__plot {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  align-items: flex-end;
+}
+
 .col__stack {
+  width: 100%;
   display: flex;
   flex-direction: column;
   gap: 2px; /* зазор цветом поверхности отделяет слои друг от друга */
@@ -3382,6 +3431,8 @@ input[type="number"] {
 .col__seg {
   display: block;
   width: 100%;
+  flex-basis: 0;
+  min-height: 3px;
 }
 
 .col__stack .col__seg:first-child {
@@ -3622,6 +3673,8 @@ a.t-id__code:hover {
 /* ---- «График»: линии по дням ---- */
 
 .line {
+  flex: 1 1 auto;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -3629,7 +3682,8 @@ a.t-id__code:hover {
 
 .line__plot {
   position: relative;
-  height: 150px;
+  flex: 1 1 auto;
+  min-height: 120px;
   border-radius: var(--r-xs);
   /* Три тихие горизонтали — сетка одной ступенью от поверхности. */
   background:
@@ -3774,6 +3828,8 @@ a.t-id__code:hover {
 /* ---- «Диаграмма»: доли кольцом ---- */
 
 .donut {
+  flex: 1 1 auto;
+  min-height: 0;
   display: flex;
   align-items: center;
   gap: 18px;
@@ -3781,8 +3837,9 @@ a.t-id__code:hover {
 
 .donut__ring {
   flex: 0 0 auto;
-  width: 148px;
-  height: 148px;
+  width: clamp(132px, 42%, 176px);
+  height: auto;
+  aspect-ratio: 1;
 }
 
 .donut__seg {
@@ -4694,18 +4751,39 @@ a.t-id__code:hover {
   animation: row-in 0.26s var(--ease) both;
 }
 
-.spanel {
-  animation: panel-in 0.34s var(--ease) both;
+/*
+ * Анимацию получает только та панель, которую действительно добавили.
+ * Раньше её вешали на все сразу, и любой клик по значению — а он
+ * пересобирает фасеты — прокатывал волну по всему набору.
+ */
+.spanel.is-fresh {
+  animation: panel-in 0.42s var(--ease) both;
+}
+
+.spanel.is-going {
+  animation: panel-out 0.26s var(--ease) forwards;
+  pointer-events: none;
 }
 
 @keyframes panel-in {
   from {
     opacity: 0;
-    transform: translateY(8px) scale(0.995);
+    transform: translateY(10px) scale(0.985);
   }
   to {
     opacity: 1;
     transform: none;
+  }
+}
+
+@keyframes panel-out {
+  from {
+    opacity: 1;
+    transform: none;
+  }
+  to {
+    opacity: 0;
+    transform: translateY(6px) scale(0.97);
   }
 }
 
