@@ -3839,6 +3839,10 @@ a.t-id__code:hover {
   position: fixed;
   inset: 0;
   z-index: 200;
+  /* Оборот луча и момент, когда он трогается. Из этих двух чисел считается
+     всё остальное — и повороты, и вспышки отметок. */
+  --sweep-dur: 1.35s;
+  --sweep-start: 0.3s;
   display: grid;
   place-items: center;
   background:
@@ -3914,13 +3918,23 @@ a.t-id__code:hover {
   inset: 0;
   border-radius: 50%;
   opacity: 0;
+  /*
+   * Луч крутится по часовой, значит его кромка — это 360°, а послесвечение
+   * тянется назад, к меньшим углам. Раньше градиент шёл наоборот: яркий
+   * край стоял на 0° и уходил вперёд по ходу вращения, то есть свет бежал
+   * впереди кромки. Отметка загоралась под кромкой, когда мимо неё уже
+   * прошло всё свечение, — и выглядело это как «точка сама по себе».
+   *
+   * Прозрачность задаём синим с нулевой альфой: обычный transparent — это
+   * прозрачный чёрный, и на переходе появлялась бы серая кайма.
+   */
   background: conic-gradient(
     from 0deg,
-    rgba(150, 216, 255, 0.62) 0deg,
-    rgba(122, 208, 255, 0.26) 20deg,
-    rgba(90, 160, 255, 0.08) 52deg,
-    transparent 96deg,
-    transparent 360deg
+    rgba(90, 160, 255, 0) 0deg,
+    rgba(90, 160, 255, 0) 264deg,
+    rgba(90, 160, 255, 0.08) 300deg,
+    rgba(122, 208, 255, 0.26) 338deg,
+    rgba(160, 222, 255, 0.62) 360deg
   );
   transform: rotate(0deg);
 }
@@ -3942,8 +3956,8 @@ a.t-id__code:hover {
    загораться ровно под лучом. */
 .splash.is-on .splash__arm {
   animation:
-    splash-sweep 1.35s linear 0.3s 2,
-    splash-arm-fade 2.7s linear 0.3s forwards;
+    splash-sweep var(--sweep-dur) linear var(--sweep-start) 2,
+    splash-arm-fade calc(var(--sweep-dur) * 2) linear var(--sweep-start) forwards;
 }
 
 /* Волна дальности расходится от центра вслед за первым проходом. */
@@ -3960,11 +3974,11 @@ a.t-id__code:hover {
 }
 
 .splash.is-on .splash__wave {
-  animation: splash-wave 1.5s var(--ease) 0.4s forwards;
+  animation: splash-wave 1.5s var(--ease) var(--sweep-start) forwards;
 }
 
 .splash.is-on .splash__wave--late {
-  animation-delay: 1.35s;
+  animation-delay: calc(var(--sweep-start) + var(--sweep-dur));
 }
 
 /*
@@ -3980,11 +3994,29 @@ a.t-id__code:hover {
   position: absolute;
   inset: 0;
   opacity: 0;
+  /*
+   * Угол и задержка выведены из одной доли оборота: где стоит отметка —
+   * тогда до неё и доходит кромка луча. Считать их порознь нельзя, стоит
+   * подвинуть одну отметку и забыть про вторую цифру — и она снова
+   * загорается сама по себе.
+   */
+  --a: calc(var(--turn) * 360deg);
+  --d: calc(var(--sweep-start) + var(--sweep-dur) * var(--turn));
   transform: rotate(var(--a));
 }
 
+/*
+ * Один заход луча — один цикл отметки: вспышка ровно в тот кадр, когда
+ * кромка до неё дошла, потом послесвечение до следующего захода. Задержка
+ * --d посчитана из угла --a, оборот у луча тоже 1.35 с — поэтому вторая
+ * вспышка приходится ровно на второй проход.
+ *
+ * forwards, а не both: до своей задержки отметка должна оставаться
+ * невидимой (opacity: 0 у самого элемента), иначе она горела бы с первого
+ * кадра, ещё до того как луч её нашёл.
+ */
 .splash.is-on .splash__blip {
-  animation: splash-found 2.1s var(--ease) var(--d) forwards;
+  animation: splash-contact var(--sweep-dur) linear var(--d) 2 forwards;
 }
 
 .splash__blip i {
@@ -4001,7 +4033,7 @@ a.t-id__code:hover {
 }
 
 .splash.is-on .splash__blip i {
-  animation: splash-pop 0.72s var(--sp) var(--d) both;
+  animation: splash-pop var(--sweep-dur) var(--ease) var(--d) 2 forwards;
 }
 
 .splash__blip--miss i {
@@ -4024,7 +4056,7 @@ a.t-id__code:hover {
 }
 
 .splash.is-on .splash__blip i::after {
-  animation: splash-ping 1.3s var(--ease) var(--d) 2;
+  animation: splash-ping var(--sweep-dur) var(--ease) var(--d) 2;
 }
 
 .splash__word {
@@ -4139,25 +4171,26 @@ a.t-id__code:hover {
   }
 }
 
-@keyframes splash-found {
+/* Засветка и послесвечение: вспышка в нулевом кадре, дальше угасание. */
+@keyframes splash-contact {
   0% {
-    opacity: 0;
-  }
-  14% {
     opacity: 1;
+  }
+  70% {
+    opacity: 0.62;
   }
   100% {
-    opacity: 1;
+    opacity: 0.5;
   }
 }
 
 /* Отдельным свойством scale: поворот точки трогать нельзя. */
 @keyframes splash-pop {
   0% {
-    scale: 0.3;
+    scale: 1.55;
   }
-  58% {
-    scale: 1.28;
+  9% {
+    scale: 1;
   }
   100% {
     scale: 1;
@@ -4166,12 +4199,16 @@ a.t-id__code:hover {
 
 @keyframes splash-ping {
   0% {
-    opacity: 0.8;
-    transform: scale(0.55);
+    opacity: 0.85;
+    transform: scale(0.5);
+  }
+  22% {
+    opacity: 0;
+    transform: scale(2.5);
   }
   100% {
     opacity: 0;
-    transform: scale(2.6);
+    transform: scale(2.5);
   }
 }
 
