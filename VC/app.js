@@ -121,6 +121,58 @@ function storageSet(payload) {
   return new Promise((resolve) => chrome.storage.local.set(payload, resolve));
 }
 
+/*
+ * Настройки сохраняет одно место.
+ *
+ * Раньше их писали семь разных, и каждое делало «прочитать — дописать
+ * своё — записать целиком». Два сохранения подряд затирали друг друга:
+ * набор столбцов таблицы пропадал при перезапуске, потому что раскладка
+ * панелей успевала записаться со снимком, сделанным до него.
+ *
+ * Теперь правки копятся в одной заплатке и уезжают одной записью, а
+ * записи выстроены в цепочку: следующая читает то, что записала
+ * предыдущая. Чтение перед записью оставлено — им подхватывается то, что
+ * пишет фон (склад и список номеров на старте прогона).
+ */
+const SETTINGS_IDLE_MS = 300;
+/* Набор длинного списка — это поток правок. Ждать тишины бесконечно
+   нельзя, поэтому раз в две секунды пишем в любом случае. */
+const SETTINGS_MAX_WAIT_MS = 2000;
+
+let settingsPatch = {};
+let settingsFlushTimer = null;
+let settingsPatchedAt = 0;
+let settingsChain = Promise.resolve();
+
+function flushSettings() {
+  window.clearTimeout(settingsFlushTimer);
+  settingsFlushTimer = null;
+  settingsPatchedAt = 0;
+  if (!Object.keys(settingsPatch).length) return settingsChain;
+  const patch = settingsPatch;
+  settingsPatch = {};
+  settingsChain = settingsChain.then(async () => {
+    const saved = await storageGet([STORAGE_SETTINGS]);
+    await storageSet({ [STORAGE_SETTINGS]: { ...(saved[STORAGE_SETTINGS] || {}), ...patch } });
+  });
+  return settingsChain;
+}
+
+function patchSettings(patch) {
+  Object.assign(settingsPatch, patch);
+  const now = Date.now();
+  if (!settingsPatchedAt) settingsPatchedAt = now;
+  window.clearTimeout(settingsFlushTimer);
+  const wait = Math.min(SETTINGS_IDLE_MS, Math.max(0, settingsPatchedAt + SETTINGS_MAX_WAIT_MS - now));
+  settingsFlushTimer = window.setTimeout(flushSettings, wait);
+}
+
+/* Вкладку могут закрыть между правкой и записью — дописываем на выходе. */
+window.addEventListener("pagehide", () => void flushSettings());
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) void flushSettings();
+});
+
 function send(message) {
   return new Promise((resolve) => {
     try {
@@ -293,7 +345,6 @@ function writeDecks() {
   renderBrief();
 }
 
-let settingsSaveTimer = null;
 /* Пока идёт наш собственный апдейт, не даём фону откатить переключатель. */
 let settingsDirtyUntil = 0;
 
@@ -303,11 +354,7 @@ async function setSetting(patch, { pushLive = true } = {}) {
   settings.threads = Math.max(1, Math.min(12, Number(settings.threads) || 5));
   writeDecks();
 
-  window.clearTimeout(settingsSaveTimer);
-  settingsSaveTimer = window.setTimeout(async () => {
-    const saved = await storageGet([STORAGE_SETTINGS]);
-    await storageSet({ [STORAGE_SETTINGS]: { ...(saved[STORAGE_SETTINGS] || {}), ...settings } });
-  }, 250);
+  patchSettings({ ...settings });
 
   if (pushLive && ui.running) {
     const reply = await send({ action: "updateSettings", settings: { ...settings } });
@@ -1019,9 +1066,7 @@ function logRun(payload, results) {
   };
   ui.runsLog = [entry, ...ui.runsLog].slice(0, 6);
   renderRuns();
-  void storageGet([STORAGE_SETTINGS]).then((saved) =>
-    storageSet({ [STORAGE_SETTINGS]: { ...(saved[STORAGE_SETTINGS] || {}), runsLog: ui.runsLog } })
-  );
+  patchSettings({ runsLog: ui.runsLog });
 }
 
 function renderResults(payload, fresh) {
@@ -1070,7 +1115,8 @@ function renderResults(payload, fresh) {
   buildStatsIndex(results);
   resetStatsFilters();
   fillStatsOptions();
-  setResultView("list");
+  /* Возвращаемся туда, где человек был в прошлый раз. */
+  setResultView(resultView);
   renderDetail();
 
   /* Плашка сверху после финиша должна показывать итог, а не последний
@@ -1088,9 +1134,7 @@ function renderResults(payload, fresh) {
   if (duration > 4000 && results.length >= 5 && !payload?.stopped) {
     const measured = (results.length / duration) * 60000;
     ui.rates = { ...ui.rates, auto: measured };
-    void storageGet([STORAGE_SETTINGS]).then((saved) =>
-      storageSet({ [STORAGE_SETTINGS]: { ...(saved[STORAGE_SETTINGS] || {}), rates: ui.rates } })
-    );
+    patchSettings({ rates: ui.rates });
   }
 }
 
@@ -1285,15 +1329,12 @@ function exportName(extension) {
 /* запуск / пауза / стоп                                               */
 /* ------------------------------------------------------------------ */
 
-async function rememberWarehouse(value) {
+function rememberWarehouse(value) {
   const clean = String(value || "").trim();
   if (!clean) return;
   ui.recentWarehouses = [clean, ...ui.recentWarehouses.filter((item) => item !== clean)].slice(0, 8);
   renderRecentWarehouses();
-  const saved = await storageGet([STORAGE_SETTINGS]);
-  await storageSet({
-    [STORAGE_SETTINGS]: { ...(saved[STORAGE_SETTINGS] || {}), recentWarehouses: ui.recentWarehouses }
-  });
+  patchSettings({ recentWarehouses: ui.recentWarehouses, warehouse: clean });
 }
 
 function renderRecentWarehouses() {
@@ -1326,16 +1367,10 @@ async function startScan() {
   ui.apiState = "unknown";
   ui.apiNote = "";
 
-  const saved = await storageGet([STORAGE_SETTINGS]);
-  await storageSet({
-    [STORAGE_SETTINGS]: {
-      ...(saved[STORAGE_SETTINGS] || {}),
-      ...settings,
-      warehouse,
-      lastPostings: postingsEl.value
-    }
-  });
-  void rememberWarehouse(warehouse);
+  rememberWarehouse(warehouse);
+  patchSettings({ ...settings, warehouse, lastPostings: postingsEl.value });
+  /* Дожидаемся записи: фон следом дописывает в тот же ключ. */
+  await flushSettings();
 
   ensureKeepAlive();
   resetScanHud(postings.length);
@@ -1387,13 +1422,25 @@ function requestStop() {
 /* события                                                             */
 /* ------------------------------------------------------------------ */
 
-postingsEl.addEventListener("input", updateCount);
-warehouseEl.addEventListener("input", updateFormState);
-warehouseEl.addEventListener("change", () => void rememberWarehouse(warehouseEl.value));
+/*
+ * Склад и список номеров сохранялись только на старте прогона — набранное
+ * и не запущенное пропадало при перезапуске. Пишем по мере набора: очередь
+ * настроек всё равно копит правки и уезжает одной записью.
+ */
+postingsEl.addEventListener("input", () => {
+  updateCount();
+  patchSettings({ lastPostings: postingsEl.value });
+});
+warehouseEl.addEventListener("input", () => {
+  updateFormState();
+  patchSettings({ warehouse: warehouseEl.value.trim() });
+});
+warehouseEl.addEventListener("change", () => rememberWarehouse(warehouseEl.value));
 
 $("btn-clear").addEventListener("click", () => {
   postingsEl.value = "";
   updateCount();
+  patchSettings({ lastPostings: "" });
 });
 
 $("btn-file").addEventListener("click", () => $("file-input").click());
@@ -1407,6 +1454,7 @@ function appendToField(text) {
   const current = postingsEl.value.trim();
   postingsEl.value = current ? `${current}\n${text}` : text;
   updateCount();
+  patchSettings({ lastPostings: postingsEl.value });
 }
 
 /*
@@ -1649,6 +1697,10 @@ function applySavedSettings(saved) {
     const cols = saved.statsCols.filter((key) => STATS_COLUMNS[key]);
     if (cols.length) statsCols = [...new Set(cols)];
   }
+  if (saved.statsSort && STATS_COLUMNS[saved.statsSort.key]) {
+    statsSort = { key: saved.statsSort.key, dir: saved.statsSort.dir < 0 ? -1 : 1 };
+  }
+  if (RESULT_VIEWS.includes(saved.resultView)) resultView = saved.resultView;
   if (Array.isArray(saved.statsPanels)) {
     const panels = saved.statsPanels
       .filter((panel) => STATS_DIMS[panel?.dim] && STATS_VIZ[panel?.viz])
@@ -1793,6 +1845,9 @@ function filtersActive() {
   return Object.values(detailFilters).some(Boolean) || detailQuery.length > 0;
 }
 
+/* Три пространства экрана результата — они же допустимые значения
+   сохранённой вкладки. */
+const RESULT_VIEWS = ["list", "detail", "stats"];
 let resultView = "list";
 let viewSwapTimer = null;
 
@@ -1823,6 +1878,7 @@ function setResultView(view, animate) {
   const from = panes[resultView];
   const same = resultView === view;
   resultView = view;
+  patchSettings({ resultView: view });
 
   window.clearTimeout(viewSwapTimer);
   const show = () => {
@@ -2210,9 +2266,7 @@ const MAX_PANELS = 8;
 let statsPanels = DEFAULT_PANELS.map((panel) => ({ ...panel }));
 
 function persistStatsPanels() {
-  void storageGet([STORAGE_SETTINGS]).then((saved) =>
-    storageSet({ [STORAGE_SETTINGS]: { ...(saved[STORAGE_SETTINGS] || {}), statsPanels } })
-  );
+  patchSettings({ statsPanels });
 }
 
 const STATS_SELECTS = {
@@ -3513,10 +3567,9 @@ const STATS_COLUMNS = {
 const DEFAULT_STATS_COLS = ["id", "number", "verdict", "blame", "at", "bucket", "price", "status", "op"];
 let statsCols = DEFAULT_STATS_COLS.slice();
 
+/* Набор столбцов, их порядок и сортировка — одна настройка таблицы. */
 function persistStatsCols() {
-  void storageGet([STORAGE_SETTINGS]).then((saved) =>
-    storageSet({ [STORAGE_SETTINGS]: { ...(saved[STORAGE_SETTINGS] || {}), statsCols } })
-  );
+  patchSettings({ statsCols, statsSort });
 }
 
 function sortStats(entries) {
@@ -3732,10 +3785,13 @@ function renderStats() {
   renderFab();
 }
 
+/*
+ * Сортировка сюда не входит: это настройка таблицы, как набор столбцов, а
+ * не фильтр. Раньше её сбрасывал и «Сбросить всё», и каждый новый прогон.
+ */
 function resetStatsFilters() {
   statsQuery = [];
   for (const key of Object.keys(statsFilters)) statsFilters[key] = "";
-  statsSort = { key: "at", dir: -1 };
   const search = $("stats-search");
   if (search) search.value = "";
   for (const id of Object.values(STATS_SELECTS)) {
@@ -3829,6 +3885,7 @@ function mountStats() {
         const key = th.dataset.sort;
         if (statsSort.key === key) statsSort.dir = -statsSort.dir;
         else statsSort = { key, dir: key === "at" ? -1 : 1 };
+        persistStatsCols();
         /* Плавность здесь даёт сама таблица: строки въезжают своей
            анимацией. Переход всей страницы тут только тормозил бы отклик. */
         renderStats();
