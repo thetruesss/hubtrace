@@ -1486,6 +1486,13 @@ function applySavedSettings(saved) {
     focusMode: saved.focusMode !== false,
     useApi: saved.useApi !== false
   });
+  if (Array.isArray(saved.statsPanels)) {
+    const panels = saved.statsPanels
+      .filter((panel) => STATS_DIMS[panel?.dim] && STATS_VIZ[panel?.viz])
+      .map((panel) => ({ dim: panel.dim, viz: panel.viz }))
+      .slice(0, MAX_PANELS);
+    if (panels.length) statsPanels = panels;
+  }
   if (saved.warehouse) warehouseEl.value = saved.warehouse;
   if (Array.isArray(saved.recentWarehouses)) ui.recentWarehouses = saved.recentWarehouses;
   if (saved.rates && typeof saved.rates === "object") ui.rates = saved.rates;
@@ -1918,11 +1925,40 @@ mountDetail();
  */
 let statsIndex = [];
 let statsQuery = [];
-const statsFilters = { verdict: "", cell: "", place: "", bucket: "", status: "", op: "", day: "" };
+const statsFilters = {
+  verdict: "",
+  cell: "",
+  place: "",
+  bucket: "",
+  status: "",
+  op: "",
+  day: "",
+  user: "",
+  hour: ""
+};
 let statsSort = { key: "at", dir: -1 };
-/* Вид графиков: гистограмма, график, диаграмма. Это не фильтр — «Сбросить»
-   его не трогает, а выбранный вид переживает новый прогон. */
-let statsMode = "bars";
+
+/*
+ * Набор панелей собирает сам пользователь: в каждой — что показывать
+ * (измерение) и в каком виде (гистограмма, столбики, график, диаграмма).
+ * Раскладка хранится в настройках и переживает перезапуск; «Сбросить»
+ * фильтров её не трогает.
+ */
+const STATS_VIZ = { bars: "Гистограмма", cols: "Столбики", line: "График", donut: "Диаграмма" };
+const DEFAULT_PANELS = [
+  { dim: "cell", viz: "bars" },
+  { dim: "place", viz: "bars" },
+  { dim: "day", viz: "cols" },
+  { dim: "status", viz: "bars" }
+];
+const MAX_PANELS = 8;
+let statsPanels = DEFAULT_PANELS.map((panel) => ({ ...panel }));
+
+function persistStatsPanels() {
+  void storageGet([STORAGE_SETTINGS]).then((saved) =>
+    storageSet({ [STORAGE_SETTINGS]: { ...(saved[STORAGE_SETTINGS] || {}), statsPanels } })
+  );
+}
 
 const STATS_SELECTS = {
   verdict: "stats-verdict",
@@ -1998,6 +2034,16 @@ function blameOf(item) {
 
 const BLAME_TAGS = { cell: "ячейка", place: "склад" };
 
+/* Колонка «Пользователь» верхней строки — кто делал последнюю операцию. */
+function topUserOf(report) {
+  const rows = report?.lastRows;
+  if (!Array.isArray(rows) || !rows.length) return "";
+  const columns = report.columns || [];
+  let at = columns.findIndex((title) => /^польз/i.test(String(title || "")));
+  if (at < 0) at = 2;
+  return String(rows[0]?.[at] || "").trim();
+}
+
 function buildStatsIndex(results) {
   const now = Date.now();
   statsIndex = results.map((item) => {
@@ -2005,14 +2051,18 @@ function buildStatsIndex(results) {
     const stamp = parseHubDate(blame.at);
     /* Последняя операция — тип верхней строки истории, словами Hub. */
     const op = String(withLabels(item.report)[0]?.[0] || "").trim();
+    const user = topUserOf(item.report);
+    const hour = stamp ? `${pad(stamp.getHours())}:00` : "";
     return {
       item,
       blame,
       op,
+      user,
+      hour,
       bucket: bucketOf(item.report?.warehouseAt, now),
       day: stamp ? `${pad(stamp.getDate())}.${pad(stamp.getMonth() + 1)}` : "",
       dayTs: stamp ? new Date(stamp.getFullYear(), stamp.getMonth(), stamp.getDate()).getTime() : 0,
-      hay: [haystackOf(item), blame.value, BLAME_TAGS[blame.kind] || ""].join(" ").toLowerCase()
+      hay: [haystackOf(item), blame.value, BLAME_TAGS[blame.kind] || "", user, hour].join(" ").toLowerCase()
     };
   });
   assignStatsColors();
@@ -2034,6 +2084,8 @@ function passesStats(entry, skip) {
     if (entry.blame.kind !== "place" || entry.blame.value !== statsFilters.place) return false;
   }
   if (!s.has("day") && statsFilters.day && entry.day !== statsFilters.day) return false;
+  if (!s.has("user") && statsFilters.user && entry.user !== statsFilters.user) return false;
+  if (!s.has("hour") && statsFilters.hour && entry.hour !== statsFilters.hour) return false;
   if (statsQuery.length && !statsQuery.some((needle) => entry.hay.includes(needle))) return false;
   return true;
 }
@@ -2159,79 +2211,147 @@ function chartEmpty(host, text) {
 }
 
 /*
- * Полосы — фасетные: каждая панель считается по срезу без собственного
- * фильтра, выбранное значение подсвечено, остальные пригашены. Так после
- * клика по полосе распределение остаётся на месте, и с него можно
- * переключиться на соседнее значение одним кликом.
- */
-function renderBarChart(hostId, rows, options) {
-  const host = $(hostId);
-  if (!host) return;
-  host.innerHTML = "";
-
-  if (!rows.length) {
-    chartEmpty(host, options.empty || "Под фильтры ничего не попало.");
-    return;
-  }
-
-  const top = rows.slice(0, 10);
-  const max = top[0][1] || 1;
-  for (const [value, count] of top) {
-    const active = options.active;
-    const row = document.createElement("button");
-    row.type = "button";
-    row.className = `hbar${active === value ? " is-on" : active ? " is-dim" : ""}`;
-    row.title = active === value ? "Снять фильтр" : "Показать все ID с этим виновником";
-    row.addEventListener("click", () => options.pick(value));
-
-    const label = el("span", "hbar__label", value);
-    label.title = value;
-    const track = el("span", "hbar__track");
-    const fill = el("i", "hbar__fill");
-    fill.style.width = `${Math.max(3, (count / max) * 100)}%`;
-    if (options.color) fill.style.background = options.color;
-    track.appendChild(fill);
-    const num = el("span", "hbar__value", String(count));
-
-    row.append(label, track, num);
-    host.appendChild(row);
-  }
-
-  const feet = [];
-  if (rows.length > top.length) {
-    const rest = rows.slice(top.length).reduce((sum, [, count]) => sum + count, 0);
-    feet.push(`за десяткой ещё ${rows.length - top.length} — на них ${rest} ID`);
-  }
-  if (options.foot) feet.push(options.foot);
-  if (feet.length) host.appendChild(el("p", "bars__foot", feet.join(" · ")));
-}
-
-/*
- * Один и тот же срез — три вида. Цвет закреплён за значением на весь
- * прогон (по полному списку, а не по текущему рангу): фильтр не должен
- * перекрашивать выживших. Палитры проверены валидатором на тёмной
- * поверхности: категориальная пятёрка и порядковая синяя лента для дней.
+ * Измерения и рисовалки.
+ *
+ * Цвет закреплён за значением на весь прогон (по полному списку, а не по
+ * текущему рангу): фильтр не должен перекрашивать выживших. Палитры
+ * проверены валидатором на тёмной поверхности: категориальная пятёрка,
+ * тройка есть/нет/не вышло для слоёв и порядковая синяя лента.
  */
 const STATS_CAT = ["#3987e5", "#d95926", "#199e70", "#c98500", "#d55181"];
 const STATS_REST = "#5b6478";
 const DAY_RAMP = ["#9ec4ff", "#63a3ef", "#3987e5", "#2262b8", "#184f95"];
+const VERDICT_COLORS = { hit: "var(--viz-hit)", miss: "var(--viz-miss)", issue: "#e66767" };
+const VERDICT_WORDS = { hit: "склад есть", miss: "склада нет", issue: "не вышло" };
 
-let statsColors = { cell: new Map(), place: new Map(), status: new Map() };
+/*
+ * Что можно показать в панели. of() возвращает значение фильтра («» —
+ * записи в этом измерении нет), label() — подпись для человека; filter —
+ * какой фильтр ставит клик; ordered — как сортировать значения по природе
+ * измерения, а не по счёту.
+ */
+const STATS_DIMS = {
+  cell: {
+    title: "Виновные ячейки",
+    sub: "склад найден — последняя ячейка верхней строки о нём",
+    filter: "cell",
+    hue: "var(--viz-hit)",
+    of: (entry) => (entry.blame.kind === "cell" ? entry.blame.value : "")
+  },
+  place: {
+    title: "Виновные склады",
+    sub: "склада нет — виноват верхний склад по движениям",
+    filter: "place",
+    hue: "var(--viz-miss)",
+    of: (entry) => (entry.blame.kind === "place" ? entry.blame.value : "")
+  },
+  verdict: {
+    title: "Результат проверки",
+    sub: "есть / нет / не вышло",
+    filter: "verdict",
+    of: (entry) => classify(entry.item),
+    label: (value) => VERDICT_WORDS[value] || value,
+    color: (value) => VERDICT_COLORS[value] || STATS_REST
+  },
+  status: {
+    title: "Статусы отправлений",
+    sub: "как в карточке Hub",
+    filter: "status",
+    of: (entry) => entry.item.report?.status || ""
+  },
+  op: {
+    title: "Последние операции",
+    sub: "тип верхней строки истории",
+    filter: "op",
+    of: (entry) => entry.op
+  },
+  user: {
+    title: "Кто делал операцию",
+    sub: "пользователь верхней строки",
+    filter: "user",
+    of: (entry) => entry.user
+  },
+  day: {
+    title: "По дням",
+    sub: "дата верхней операции",
+    filter: "day",
+    ordered: "day",
+    of: (entry) => entry.day
+  },
+  hour: {
+    title: "По часам",
+    sub: "час верхней операции",
+    filter: "hour",
+    ordered: "hour",
+    of: (entry) => entry.hour
+  },
+  bucket: {
+    title: "Корзинки",
+    sub: "возраст верхней строки о складе",
+    filter: "bucket",
+    ordered: "bucket",
+    of: (entry) => entry.bucket
+  }
+};
+
+let statsColors = {};
 
 function assignStatsColors() {
-  const dims = {
-    cell: (entry) => (entry.blame.kind === "cell" ? entry.blame.value : ""),
-    place: (entry) => (entry.blame.kind === "place" ? entry.blame.value : ""),
-    status: (entry) => entry.item.report?.status || ""
-  };
   statsColors = {};
-  for (const [dim, keyOf] of Object.entries(dims)) {
+  for (const dim of ["cell", "place", "status", "op", "user"]) {
     const map = new Map();
-    tallyBy(statsIndex, keyOf).forEach(([value], index) => {
+    tallyBy(statsIndex, STATS_DIMS[dim].of).forEach(([value], index) => {
       map.set(value, STATS_CAT[index] || STATS_REST);
     });
     statsColors[dim] = map;
   }
+}
+
+/* Порядок значений упорядоченного измерения — по его природе. */
+function dimOrderKey(dimKey, entry) {
+  if (dimKey === "day") return entry.dayTs;
+  if (dimKey === "hour") return Number(entry.hour.slice(0, 2));
+  if (dimKey === "bucket") {
+    const at = BUCKET_ORDER.indexOf(entry.bucket);
+    return at < 0 ? BUCKET_ORDER.length : at;
+  }
+  return 0;
+}
+
+/* Строки панели: [значение, счёт], упорядоченные по природе измерения
+   или по убыванию счёта. */
+function dimRows(dimKey, slice) {
+  const dim = STATS_DIMS[dimKey];
+  const rows = tallyBy(slice, dim.of);
+  if (!dim.ordered) return rows;
+  const order = new Map();
+  for (const entry of slice) {
+    const value = dim.of(entry);
+    if (value && !order.has(value)) order.set(value, dimOrderKey(dimKey, entry));
+  }
+  return rows.sort((a, b) => (order.get(a[0]) || 0) - (order.get(b[0]) || 0));
+}
+
+/* Цвет значения в измерении — для линий, долей и слоёв. */
+function dimColorOf(dimKey, slice) {
+  const dim = STATS_DIMS[dimKey];
+  if (dim.color) return dim.color;
+  if (dim.ordered) {
+    const values = dimRows(dimKey, slice).map(([value]) => value);
+    const shade = new Map(
+      values.map((value, index) => [
+        value,
+        DAY_RAMP[values.length === 1 ? 2 : Math.round((index * (DAY_RAMP.length - 1)) / (values.length - 1))]
+      ])
+    );
+    return (value) => shade.get(value) || STATS_REST;
+  }
+  const map = statsColors[dimKey] || new Map();
+  return (value) => map.get(value) || STATS_REST;
+}
+
+function dimLabelOf(dimKey) {
+  return STATS_DIMS[dimKey].label || ((value) => value);
 }
 
 /* Дни среза по порядку времени (не больше 16 последних). */
@@ -2248,7 +2368,7 @@ function statsDays(entries) {
 }
 
 /* Ряды для «Графика»: по каждому значению — счёт на каждый день. */
-function seriesByDay(entries, keyOf, colorOf, topN) {
+function seriesByDay(entries, keyOf, colorOf, labelOf, topN) {
   const days = statsDays(entries);
   const at = new Map(days.map((day, index) => [day.day, index]));
   const names = tallyBy(entries, keyOf).slice(0, topN);
@@ -2259,20 +2379,20 @@ function seriesByDay(entries, keyOf, colorOf, topN) {
       const index = at.get(entry.day);
       if (index != null) points[index] += 1;
     }
-    return { name, total, points, color: colorOf(name) };
+    return { name, label: labelOf(name), total, points, color: colorOf(name) };
   });
   return { days, series };
 }
 
-function legendChip(name, total, color, state, pick) {
+function legendChip(label, total, color, state, pick) {
   const chip = document.createElement("button");
   chip.type = "button";
   chip.className = `lchip${state}`;
   chip.title = state === " is-on" ? "Снять фильтр" : "Показать все ID с этим значением";
   const mark = el("i");
   mark.style.background = color;
-  chip.append(mark, el("span", null, name), el("b", null, String(total)));
-  chip.addEventListener("click", () => pick(name));
+  chip.append(mark, el("span", null, label), el("b", null, String(total)));
+  chip.addEventListener("click", pick);
   return chip;
 }
 
@@ -2280,14 +2400,135 @@ function chipState(active, name) {
   return active === name ? " is-on" : active ? " is-dim" : "";
 }
 
-function renderLineChart(hostId, data, options) {
-  const host = $(hostId);
-  if (!host) return;
-  host.innerHTML = "";
+/* ---- гистограмма: горизонтальные полосы ---- */
 
+function renderBarChart(host, rows, options) {
+  host.innerHTML = "";
+  if (!rows.length) {
+    chartEmpty(host, options.empty);
+    return;
+  }
+
+  const top = rows.slice(0, 10);
+  const max = Math.max(...top.map(([, count]) => count)) || 1;
+  for (const [value, count] of top) {
+    const active = options.active;
+    const row = document.createElement("button");
+    row.type = "button";
+    row.className = `hbar${chipState(active, value)}`;
+    row.title = active === value ? "Снять фильтр" : "Показать все ID с этим значением";
+    row.addEventListener("click", () => options.pick(value));
+
+    const label = el("span", "hbar__label", options.labelOf(value));
+    label.title = options.labelOf(value);
+    const track = el("span", "hbar__track");
+    const fill = el("i", "hbar__fill");
+    fill.style.width = `${Math.max(3, (count / max) * 100)}%`;
+    fill.style.background = options.colorPerValue ? options.colorPerValue(value) : options.color;
+    track.appendChild(fill);
+    const num = el("span", "hbar__value", String(count));
+
+    row.append(label, track, num);
+    host.appendChild(row);
+  }
+
+  const feet = [];
+  if (rows.length > top.length) {
+    const rest = rows.slice(top.length).reduce((sum, [, count]) => sum + count, 0);
+    feet.push(`за десяткой ещё ${rows.length - top.length} — на них ${rest} ID`);
+  }
+  if (options.foot) feet.push(options.foot);
+  if (feet.length) host.appendChild(el("p", "bars__foot", feet.join(" · ")));
+}
+
+/* ---- столбики: слои есть / нет / не вышло, зазор 2px ---- */
+
+function renderColsChart(host, slice, dimKey, options) {
+  host.innerHTML = "";
+  const dim = STATS_DIMS[dimKey];
+  const labelOf = dimLabelOf(dimKey);
+  const rows = dimRows(dimKey, slice);
+  const top = rows.length > 12 && !dim.ordered ? rows.slice(0, 12) : rows.slice(0, 16);
+  if (!top.length) {
+    chartEmpty(host, options.empty);
+    return;
+  }
+
+  const split = new Map(top.map(([value]) => [value, { hit: 0, miss: 0, issue: 0 }]));
+  for (const entry of slice) {
+    const bucket = split.get(dim.of(entry));
+    if (bucket) bucket[classify(entry.item)] += 1;
+  }
+
+  let totals = { hit: 0, miss: 0, issue: 0 };
+  for (const counts of split.values()) {
+    totals.hit += counts.hit;
+    totals.miss += counts.miss;
+    totals.issue += counts.issue;
+  }
+
+  const legend = el("div", "legend");
+  const key = (color, text) => {
+    const item = el("span", "legend__item", text);
+    const mark = el("i");
+    mark.style.background = color;
+    item.prepend(mark);
+    legend.appendChild(item);
+  };
+  key(VERDICT_COLORS.hit, `склад есть · ${totals.hit}`);
+  key(VERDICT_COLORS.miss, `склада нет · ${totals.miss}`);
+  if (totals.issue) key(VERDICT_COLORS.issue, `не вышло · ${totals.issue}`);
+  host.appendChild(legend);
+
+  const cols = el("div", "cols");
+  const PLOT = 108;
+  const max = Math.max(...top.map(([value]) => {
+    const counts = split.get(value);
+    return counts.hit + counts.miss + counts.issue;
+  })) || 1;
+
+  for (const [value] of top) {
+    const counts = split.get(value);
+    const total = counts.hit + counts.miss + counts.issue;
+    const active = options.active;
+    const col = document.createElement("button");
+    col.type = "button";
+    col.className = `col${chipState(active, value)}`;
+    col.title = active === value ? "Снять фильтр" : `Показать все ID: ${labelOf(value)}`;
+    col.addEventListener("click", () => options.pick(value));
+
+    col.appendChild(el("span", "col__cap", String(total)));
+    const stack = el("span", "col__stack");
+    /* Сверху вниз: не вышло, склада нет, склад есть — жёлтое у основания. */
+    const parts = [
+      [VERDICT_COLORS.issue, counts.issue],
+      [VERDICT_COLORS.miss, counts.miss],
+      [VERDICT_COLORS.hit, counts.hit]
+    ];
+    for (const [color, count] of parts) {
+      if (!count) continue;
+      const seg = el("i", "col__seg");
+      seg.style.background = color;
+      seg.style.height = `${Math.max(3, Math.round((count / max) * PLOT))}px`;
+      stack.appendChild(seg);
+    }
+    col.appendChild(stack);
+    col.appendChild(el("span", "col__day", labelOf(value)));
+    cols.appendChild(col);
+  }
+  host.appendChild(cols);
+  if (rows.length > top.length) {
+    host.appendChild(el("p", "bars__foot", `показаны первые ${top.length} из ${rows.length}`));
+  }
+}
+
+/* ---- график: линии по дням ---- */
+
+function renderLineChart(host, data, options) {
+  host.innerHTML = "";
   const { days, series } = data;
   if (!days.length || !series.length) {
-    chartEmpty(host, options.empty || "Под фильтры ничего не попало.");
+    chartEmpty(host, options.empty);
     return;
   }
 
@@ -2318,7 +2559,7 @@ function renderLineChart(hostId, data, options) {
       dot.style.left = `${xOf(index)}%`;
       dot.style.top = `${yOf(value)}%`;
       dot.style.background = line.color;
-      dot.title = `${line.name} · ${days[index].day}: ${value}`;
+      dot.title = `${line.label} · ${days[index].day}: ${value}`;
       plot.appendChild(dot);
     });
   }
@@ -2331,30 +2572,37 @@ function renderLineChart(hostId, data, options) {
 
   const legend = el("div", "lchips");
   for (const line of series) {
-    legend.appendChild(legendChip(line.name, line.total, line.color, chipState(options.active, line.name), options.pick));
+    legend.appendChild(
+      legendChip(line.label, line.total, line.color, chipState(options.active, line.name), () => options.pick(line.name))
+    );
   }
   box.appendChild(legend);
   if (options.foot) box.appendChild(el("p", "bars__foot", options.foot));
   host.appendChild(box);
 }
 
-function renderDonutChart(hostId, rows, options) {
-  const host = $(hostId);
-  if (!host) return;
-  host.innerHTML = "";
+/* ---- диаграмма: доли кольцом ---- */
 
+function renderDonutChart(host, rows, options) {
+  host.innerHTML = "";
   if (!rows.length) {
-    chartEmpty(host, options.empty || "Под фильтры ничего не попало.");
+    chartEmpty(host, options.empty);
     return;
   }
 
   const top = rows.slice(0, 5);
   const rest = rows.slice(5);
   const restCount = rest.reduce((sum, [, count]) => sum + count, 0);
-  const segments = [...top.map(([name, count], index) => ({
-    name, count, color: options.colorOf(name, index), pickable: true
-  }))];
-  if (restCount) segments.push({ name: `остальные · ${rest.length}`, count: restCount, color: STATS_REST, pickable: false });
+  const segments = top.map(([name, count]) => ({
+    name,
+    label: options.labelOf(name),
+    count,
+    color: options.colorOf(name),
+    pickable: true
+  }));
+  if (restCount) {
+    segments.push({ name: "", label: `остальные · ${rest.length}`, count: restCount, color: STATS_REST, pickable: false });
+  }
 
   const total = segments.reduce((sum, seg) => sum + seg.count, 0) || 1;
   const box = el("div", "donut");
@@ -2379,7 +2627,7 @@ function renderDonutChart(hostId, rows, options) {
     circle.setAttribute("stroke-dashoffset", String(-offset));
     circle.setAttribute("transform", "rotate(-90 60 60)");
     const title = document.createElementNS("http://www.w3.org/2000/svg", "title");
-    title.textContent = `${seg.name}: ${seg.count}`;
+    title.textContent = `${seg.label}: ${seg.count}`;
     circle.appendChild(title);
     if (seg.pickable) circle.addEventListener("click", () => options.pick(seg.name));
     svg.appendChild(circle);
@@ -2396,19 +2644,21 @@ function renderDonutChart(hostId, rows, options) {
   centerLabel.setAttribute("x", "60");
   centerLabel.setAttribute("y", "74");
   centerLabel.setAttribute("class", "donut__label");
-  centerLabel.textContent = options.centerLabel || "ID";
+  centerLabel.textContent = "ID";
   svg.appendChild(centerLabel);
   box.appendChild(svg);
 
   const legend = el("div", "lchips lchips--column");
   for (const seg of segments) {
     if (seg.pickable) {
-      legend.appendChild(legendChip(seg.name, seg.count, seg.color, chipState(options.active, seg.name), options.pick));
+      legend.appendChild(
+        legendChip(seg.label, seg.count, seg.color, chipState(options.active, seg.name), () => options.pick(seg.name))
+      );
     } else {
       const still = el("span", "lchip is-rest");
       const mark = el("i");
       mark.style.background = seg.color;
-      still.append(mark, el("span", null, seg.name), el("b", null, String(seg.count)));
+      still.append(mark, el("span", null, seg.label), el("b", null, String(seg.count)));
       legend.appendChild(still);
     }
   }
@@ -2416,202 +2666,144 @@ function renderDonutChart(hostId, rows, options) {
   host.appendChild(box);
 }
 
-function renderStatsCharts() {
-  const cellSlice = statsIndex.filter(
-    (entry) => passesStats(entry, new Set(["cell"])) && entry.blame.kind === "cell" && entry.blame.value
-  );
-  const placeSlice = statsIndex.filter(
-    (entry) => passesStats(entry, new Set(["place"])) && entry.blame.kind === "place" && entry.blame.value
-  );
-  const statusSlice = statsIndex.filter((entry) => passesStats(entry, new Set(["status"])));
-  const daySlice = statsIndex.filter((entry) => passesStats(entry, new Set(["day"])) && entry.day);
+/* ---- сами панели ---- */
 
-  const dims = [
-    {
-      host: "chart-cells",
-      slice: cellSlice,
-      keyOf: (entry) => entry.blame.value,
-      colors: statsColors.cell,
-      barColor: "var(--viz-hit)",
-      key: "cell",
-      empty: "Ни одного ID с найденным складом под фильтрами."
-    },
-    {
-      host: "chart-places",
-      slice: placeSlice,
-      keyOf: (entry) => entry.blame.value,
-      colors: statsColors.place,
-      barColor: "var(--viz-miss)",
-      key: "place",
-      empty: "Ни одного ID без склада под фильтрами."
-    },
-    {
-      host: "chart-status",
-      slice: statusSlice,
-      keyOf: (entry) => entry.item.report?.status || "",
-      colors: statsColors.status,
-      barColor: "var(--viz-blue)",
-      key: "status",
-      empty: "Статусы не прочитались."
-    }
-  ];
-
-  for (const dim of dims) {
-    const active = statsFilters[dim.key];
-    const pick = (value) => toggleStatsFilter(dim.key, value);
-    const colorOf = (name) => dim.colors.get(name) || STATS_REST;
-
-    if (statsMode === "line") {
-      renderLineChart(dim.host, seriesByDay(dim.slice, dim.keyOf, colorOf, 3), {
-        active,
-        pick,
-        empty: dim.empty,
-        foot: tallyBy(dim.slice, dim.keyOf).length > 3 ? "линии — три самых частых значения; остальное в гистограмме" : ""
-      });
-      continue;
-    }
-    if (statsMode === "donut") {
-      renderDonutChart(dim.host, tallyBy(dim.slice, dim.keyOf), {
-        active,
-        pick,
-        colorOf,
-        empty: dim.empty
-      });
-      continue;
-    }
-
-    const rows = tallyBy(dim.slice, dim.keyOf);
-    const missing =
-      dim.key === "cell"
-        ? statsIndex.filter((entry) => passesStats(entry, new Set(["cell"])) && entry.blame.kind === "cell" && !entry.blame.value).length
-        : dim.key === "place"
-          ? statsIndex.filter((entry) => passesStats(entry, new Set(["place"])) && entry.blame.kind === "place" && !entry.blame.value).length
-          : 0;
-    renderBarChart(dim.host, rows, {
-      color: dim.barColor,
-      active,
-      pick,
-      foot: missing ? `${dim.key === "cell" ? "ячейка" : "склад"} не прочиталась: ${missing}` : "",
-      empty: dim.empty
-    });
+function panelSelect(value, entries, onChange) {
+  const pick = el("label", "pick pick--panel");
+  const select = document.createElement("select");
+  for (const [key, title] of entries) {
+    const option = document.createElement("option");
+    option.value = key;
+    option.textContent = title;
+    select.appendChild(option);
   }
-
-  renderDaysPanel(daySlice);
+  select.value = value;
+  select.addEventListener("change", () => onChange(select.value));
+  pick.appendChild(select);
+  return pick;
 }
 
-/* «По дням»: столбики, две линии есть/нет или доли дней синей лентой. */
-function renderDaysPanel(slice) {
-  const legend = $("stats-legend");
-
-  if (statsMode === "line") {
-    if (legend) legend.innerHTML = "";
-    const data = seriesByDay(
-      slice.filter((entry) => classify(entry.item) !== "issue"),
-      (entry) => (classify(entry.item) === "hit" ? "склад есть" : "склада нет"),
-      (name) => (name === "склад есть" ? "var(--viz-hit)" : "var(--viz-miss)"),
-      2
-    );
-    renderLineChart("chart-days", data, {
-      active: statsFilters.verdict === "hit" ? "склад есть" : statsFilters.verdict === "miss" ? "склада нет" : "",
-      pick: (name) => toggleStatsFilter("verdict", name === "склад есть" ? "hit" : "miss"),
-      empty: "Дат верхних операций не нашлось."
-    });
-    return;
-  }
-
-  if (statsMode === "donut") {
-    if (legend) legend.innerHTML = "";
-    const days = statsDays(slice);
-    const shade = new Map(
-      days.map((day, index) => [
-        day.day,
-        DAY_RAMP[days.length === 1 ? 2 : Math.round((index * (DAY_RAMP.length - 1)) / (days.length - 1))]
-      ])
-    );
-    renderDonutChart("chart-days", tallyBy(slice, (entry) => entry.day), {
-      active: statsFilters.day,
-      pick: (value) => toggleStatsFilter("day", value),
-      colorOf: (name) => shade.get(name) || STATS_REST,
-      centerLabel: "ID",
-      empty: "Дат верхних операций не нашлось."
-    });
-    return;
-  }
-
-  renderDaysChart(slice);
+function updatePanel(index, patch) {
+  statsPanels[index] = { ...statsPanels[index], ...patch };
+  persistStatsPanels();
+  renderStats();
 }
 
-/* Колонки по дням: снизу «склад есть», сверху «склада нет», зазор 2px. */
-function renderDaysChart(slice) {
-  const host = $("chart-days");
-  const legend = $("stats-legend");
-  if (!host) return;
-  host.innerHTML = "";
+/*
+ * Панели фасетные: каждая считается по срезу без собственного фильтра,
+ * поэтому клик по значению не схлопывает картину, а подсвечивает выбранное
+ * и пригашает остальное; повторный клик снимает фильтр.
+ */
+function renderStatsPanel(panel, index) {
+  const dim = STATS_DIMS[panel.dim];
+  const section = el("section", "panel glass spanel");
+  section.dataset.dim = panel.dim;
+  section.dataset.viz = panel.viz;
 
-  const byDay = new Map();
-  for (const entry of slice) {
-    const bucket = byDay.get(entry.day) || { day: entry.day, ts: entry.dayTs, hit: 0, miss: 0 };
-    bucket.ts = Math.min(bucket.ts, entry.dayTs);
-    const kind = classify(entry.item);
-    if (kind === "hit") bucket.hit += 1;
-    else if (kind === "miss") bucket.miss += 1;
-    byDay.set(entry.day, bucket);
+  const head = el("div", "spanel__head");
+  head.appendChild(el("h3", null, dim.title));
+  const tools = el("div", "spanel__tools");
+  tools.appendChild(
+    panelSelect(panel.dim, Object.entries(STATS_DIMS).map(([key, entry]) => [key, entry.title]), (next) =>
+      updatePanel(index, { dim: next })
+    )
+  );
+  tools.appendChild(
+    panelSelect(panel.viz, Object.entries(STATS_VIZ), (next) => updatePanel(index, { viz: next }))
+  );
+  if (statsPanels.length > 1) {
+    const drop = el("button", "spanel__drop", "×");
+    drop.type = "button";
+    drop.title = "Убрать панель";
+    drop.addEventListener("click", () => {
+      statsPanels.splice(index, 1);
+      persistStatsPanels();
+      renderStats();
+    });
+    tools.appendChild(drop);
   }
+  head.appendChild(tools);
+  section.appendChild(head);
+  if (dim.sub) section.appendChild(el("p", "spanel__note", dim.sub));
 
-  let days = [...byDay.values()].sort((a, b) => a.ts - b.ts);
-  if (days.length > 16) days = days.slice(-16);
+  const chart = el("div", panel.viz === "bars" ? "bars" : "pchart");
+  section.appendChild(chart);
 
-  let hits = 0;
-  let misses = 0;
-  for (const day of days) {
-    hits += day.hit;
-    misses += day.miss;
-  }
-  if (legend) {
-    legend.innerHTML = "";
-    const key = (color, text) => {
-      const item = el("span", "legend__item", text);
-      const mark = el("i");
-      mark.style.background = color;
-      item.prepend(mark);
-      legend.appendChild(item);
-    };
-    key("var(--viz-hit)", `склад есть · ${hits}`);
-    key("var(--viz-miss)", `склада нет · ${misses}`);
-  }
+  const slice = statsIndex.filter(
+    (entry) => passesStats(entry, new Set([dim.filter])) && dim.of(entry)
+  );
+  const active = statsFilters[dim.filter];
+  const pick = (value) => toggleStatsFilter(dim.filter, value);
+  const labelOf = dimLabelOf(panel.dim);
+  const colorOf = dimColorOf(panel.dim, slice);
+  const empty = "Под фильтры ничего не попало.";
 
-  if (!days.length) {
-    chartEmpty(host, "Дат верхних операций не нашлось.");
-    return;
-  }
-
-  const PLOT = 108;
-  const max = Math.max(...days.map((day) => day.hit + day.miss)) || 1;
-  for (const day of days) {
-    const active = statsFilters.day;
-    const col = document.createElement("button");
-    col.type = "button";
-    col.className = `col${active === day.day ? " is-on" : active ? " is-dim" : ""}`;
-    col.title = active === day.day ? "Снять фильтр" : `Показать все ID за ${day.day}`;
-    col.addEventListener("click", () => toggleStatsFilter("day", day.day));
-
-    col.appendChild(el("span", "col__cap", String(day.hit + day.miss)));
-    const stack = el("span", "col__stack");
-    /* Сверху вниз: «склада нет», потом «склад есть» — жёлтое у основания. */
-    const parts = [
-      ["col__seg col__seg--miss", day.miss],
-      ["col__seg col__seg--hit", day.hit]
-    ];
-    for (const [className, count] of parts) {
-      if (!count) continue;
-      const seg = el("i", className);
-      seg.style.height = `${Math.max(3, Math.round((count / max) * PLOT))}px`;
-      stack.appendChild(seg);
+  if (panel.viz === "line") {
+    if (panel.dim === "day") {
+      /* Дни по дням выродились бы в диагональ — рисуем линии есть/нет. */
+      const data = seriesByDay(
+        slice.filter((entry) => classify(entry.item) !== "issue"),
+        (entry) => classify(entry.item),
+        (value) => VERDICT_COLORS[value],
+        (value) => VERDICT_WORDS[value],
+        2
+      );
+      renderLineChart(chart, data, {
+        active: statsFilters.verdict,
+        pick: (value) => toggleStatsFilter("verdict", value),
+        empty
+      });
+    } else {
+      const rows = tallyBy(slice, dim.of);
+      renderLineChart(chart, seriesByDay(slice, dim.of, colorOf, labelOf, 3), {
+        active,
+        pick,
+        empty,
+        foot: rows.length > 3 ? "линии — три самых частых значения; остальное в гистограмме" : ""
+      });
     }
-    col.appendChild(stack);
-    col.appendChild(el("span", "col__day", day.day));
-    host.appendChild(col);
+    return section;
   }
+
+  if (panel.viz === "donut") {
+    renderDonutChart(chart, dimRows(panel.dim, slice), { active, pick, colorOf, labelOf, empty });
+    return section;
+  }
+
+  if (panel.viz === "cols") {
+    renderColsChart(chart, slice, panel.dim, { active, pick, empty });
+    return section;
+  }
+
+  const missing =
+    panel.dim === "cell" || panel.dim === "place"
+      ? statsIndex.filter(
+          (entry) =>
+            passesStats(entry, new Set([dim.filter])) && entry.blame.kind === panel.dim && !entry.blame.value
+        ).length
+      : 0;
+  renderBarChart(chart, dimRows(panel.dim, slice), {
+    color: dim.hue || "var(--viz-blue)",
+    colorPerValue: dim.color || null,
+    labelOf,
+    active,
+    pick,
+    empty,
+    foot: missing ? `${panel.dim === "cell" ? "ячейка" : "склад"} не прочиталась: ${missing}` : ""
+  });
+  return section;
+}
+
+function renderStatsPanels() {
+  const grid = $("stats-panels");
+  if (!grid) return;
+  grid.innerHTML = "";
+  statsPanels.forEach((panel, index) => {
+    if (!STATS_DIMS[panel.dim] || !STATS_VIZ[panel.viz]) return;
+    grid.appendChild(renderStatsPanel(panel, index));
+  });
+  const addBtn = $("stats-add");
+  if (addBtn) addBtn.disabled = statsPanels.length >= MAX_PANELS;
 }
 
 /* ---- таблица ---- */
@@ -2743,7 +2935,9 @@ function renderStatsChips() {
   const chips = [
     ["cell", "ячейка"],
     ["place", "склад"],
-    ["day", "день"]
+    ["day", "день"],
+    ["hour", "час"],
+    ["user", "пользователь"]
   ];
   for (const [key, label] of chips) {
     const value = statsFilters[key];
@@ -2766,16 +2960,6 @@ function renderStats() {
   if (!host) return;
 
   syncStatsControls();
-
-  const mode = $("stats-mode");
-  if (mode) {
-    const buttons = $$(".seg__btn", mode);
-    const at = buttons.findIndex((btn) => btn.dataset.viz === statsMode);
-    mode.style.setProperty("--seg-index", String(Math.max(0, at)));
-    mode.style.setProperty("--seg-count", String(buttons.length || 1));
-    for (const btn of buttons) btn.classList.toggle("is-on", btn.dataset.viz === statsMode);
-  }
-
   const shown = statsIndex.filter((entry) => passesStats(entry));
 
   const count = $("stats-count");
@@ -2788,7 +2972,7 @@ function renderStats() {
   if (reset) reset.hidden = !statsFiltersActive();
 
   renderStatsKpis(shown);
-  renderStatsCharts();
+  renderStatsPanels();
   renderStatsTable(shown);
   renderStatsChips();
 }
@@ -2841,10 +3025,19 @@ function mountStats() {
     renderStats();
   });
 
-  $("stats-mode")?.addEventListener("click", (event) => {
-    const btn = event.target.closest("[data-viz]");
-    if (!btn || btn.dataset.viz === statsMode) return;
-    statsMode = btn.dataset.viz;
+  $("stats-add")?.addEventListener("click", () => {
+    if (statsPanels.length >= MAX_PANELS) return;
+    /* Новая панель — первое измерение, которого ещё нет на экране. */
+    const used = new Set(statsPanels.map((panel) => panel.dim));
+    const dim = Object.keys(STATS_DIMS).find((key) => !used.has(key)) || "verdict";
+    statsPanels.push({ dim, viz: "bars" });
+    persistStatsPanels();
+    renderStats();
+  });
+
+  $("stats-default")?.addEventListener("click", () => {
+    statsPanels = DEFAULT_PANELS.map((panel) => ({ ...panel }));
+    persistStatsPanels();
     renderStats();
   });
 

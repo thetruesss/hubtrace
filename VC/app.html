@@ -405,45 +405,12 @@
               <div class="kpis" id="stats-kpis"></div>
 
               <div class="stats__viewbar">
-                <span class="stats__viewlabel">Вид</span>
-                <div class="seg seg--viz" id="stats-mode" role="group" aria-label="Вид графиков">
-                  <span class="seg__pill" aria-hidden="true"></span>
-                  <button class="seg__btn is-on" type="button" data-viz="bars">Гистограмма</button>
-                  <button class="seg__btn" type="button" data-viz="line">График</button>
-                  <button class="seg__btn" type="button" data-viz="donut">Диаграмма</button>
-                </div>
+                <span class="stats__viewlabel" id="stats-panels-note">Панели можно настраивать: что показывать и в каком виде</span>
+                <button id="stats-add" class="btn btn--ghost btn--sm" type="button">+ Панель</button>
+                <button id="stats-default" class="btn btn--ghost btn--sm" type="button">Стандартные</button>
               </div>
 
-              <div class="stats__grid">
-                <section class="panel glass spanel">
-                  <div class="spanel__head">
-                    <h3>Виновные ячейки</h3>
-                    <span class="spanel__sub">склад найден — смотрим последнюю ячейку верхней строки о нём</span>
-                  </div>
-                  <div class="bars" id="chart-cells"></div>
-                </section>
-                <section class="panel glass spanel">
-                  <div class="spanel__head">
-                    <h3>Виновные склады</h3>
-                    <span class="spanel__sub">склада нет — виноват верхний склад по движениям</span>
-                  </div>
-                  <div class="bars" id="chart-places"></div>
-                </section>
-                <section class="panel glass spanel">
-                  <div class="spanel__head">
-                    <h3>По дням</h3>
-                    <div class="legend" id="stats-legend"></div>
-                  </div>
-                  <div class="cols" id="chart-days"></div>
-                </section>
-                <section class="panel glass spanel">
-                  <div class="spanel__head">
-                    <h3>Статусы отправлений</h3>
-                    <span class="spanel__sub">как в карточке Hub</span>
-                  </div>
-                  <div class="bars" id="chart-status"></div>
-                </section>
-              </div>
+              <div class="stats__grid" id="stats-panels"></div>
 
               <section class="panel glass spanel spanel--table">
                 <div class="spanel__head">

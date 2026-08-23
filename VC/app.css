@@ -3076,17 +3076,73 @@ input[type="number"] {
 
 .spanel__head {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   justify-content: space-between;
   gap: 12px;
-  margin-bottom: 12px;
-  min-height: 18px;
+  margin-bottom: 8px;
+  min-height: 26px;
+}
+
+.spanel__head h3 {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .spanel__sub {
   font-size: 10.5px;
   color: var(--faint);
   text-align: right;
+}
+
+/* Настройка панели: что показывать и в каком виде. */
+.spanel__tools {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+
+.pick--panel {
+  height: 26px;
+  padding: 0 2px;
+}
+
+.pick--panel select {
+  height: 22px;
+  max-width: 132px;
+  font-size: 10.5px;
+}
+
+.spanel__drop {
+  width: 22px;
+  height: 22px;
+  border: 1px solid var(--stroke-2);
+  border-radius: 50%;
+  background: var(--glass-2);
+  color: var(--muted);
+  font: inherit;
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  transition: border-color 0.2s var(--ease), color 0.2s var(--ease), background 0.2s var(--ease);
+}
+
+.spanel__drop:hover {
+  border-color: rgba(240, 90, 74, 0.5);
+  background: rgba(240, 90, 74, 0.14);
+  color: #ffd9d4;
+}
+
+.spanel__note {
+  margin: -4px 0 10px;
+  font-size: 10.5px;
+  color: var(--faint);
+}
+
+.pchart .legend {
+  margin-bottom: 10px;
 }
 
 /* ---- горизонтальные полосы ---- */
@@ -3470,26 +3526,14 @@ input[type="number"] {
   display: flex;
   align-items: center;
   justify-content: flex-end;
-  gap: 10px;
+  gap: 8px;
 }
 
 .stats__viewlabel {
+  margin-right: auto;
   font-size: 10.5px;
   color: var(--faint);
   letter-spacing: 0.02em;
-}
-
-.seg--viz {
-  --seg-count: 3;
-  --seg-index: 0;
-  flex: 0 0 auto;
-}
-
-.seg--viz .seg__btn {
-  flex: 0 0 auto;
-  min-width: 92px;
-  height: 26px;
-  font-size: 11px;
 }
 
 /* ---- «График»: линии по дням ---- */
