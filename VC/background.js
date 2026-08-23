@@ -902,6 +902,8 @@ function mergeReports(a, b) {
     status: strong.status || weak.status || "",
     warehouseAt: strong.warehouseAt || weak.warehouseAt || "",
     warehouseCell: strong.warehouseCell || weak.warehouseCell || "",
+    price: strong.price || weak.price || "",
+    fairPrice: strong.fairPrice || weak.fairPrice || "",
     columns: strong.columns?.length ? strong.columns : weak.columns || [],
     lastRows: strong.lastRows?.length ? strong.lastRows : weak.lastRows || [],
     /* Коды идут в паре со строками: берём те, что от того же пути. */

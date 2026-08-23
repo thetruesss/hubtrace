@@ -898,6 +898,40 @@
   /* быстрый путь по известным ручкам                                    */
   /* ------------------------------------------------------------------ */
 
+  /*
+   * Деньги карточки.
+   *
+   * Hub показывает на карточке предмета две суммы и подписывает их так:
+   *   «Цена реализации» — moneyPrice, подсказка «Цена, которую заплатил
+   *   клиент»; «Цена» — fairPrice. Формат числа у Hub один и тот же —
+   *   Intl.NumberFormat("ru-RU") с двумя знаками после запятой.
+   *
+   * Отдельно ходить за суммой не нужно: она приходит в том же ответе
+   * карточки, который мы и так спрашиваем ради номера и статуса.
+   */
+  function priceText(value, symbol) {
+    const number = Number(value);
+    if (!Number.isFinite(number)) return "";
+    let text;
+    try {
+      text = new Intl.NumberFormat("ru-RU", {
+        maximumFractionDigits: 2,
+        minimumFractionDigits: 2
+      }).format(number);
+    } catch (_err) {
+      text = number.toFixed(2);
+    }
+    const sign = String(symbol || "").trim();
+    return sign ? `${text} ${sign}` : text;
+  }
+
+  function cardMoney(info) {
+    return {
+      price: priceText(info?.moneyPrice, info?.moneyCurrencySymbol),
+      fairPrice: priceText(info?.fairPrice, info?.fairCurrencySymbol)
+    };
+  }
+
   function readCard(response) {
     if (!response?.ok || !response.text) return null;
     try {
@@ -905,11 +939,16 @@
       if (!info) return null;
       return {
         number: String(info.postingName || info.name || ""),
-        status: String(info.stateName || "")
+        status: String(info.stateName || ""),
+        ...cardMoney(info)
       };
     } catch (_err) {
       return null;
     }
+  }
+
+  function emptyCard() {
+    return { number: "", status: "", price: "", fairPrice: "" };
   }
 
   /* Проверено ли, что карточка отдаётся и без склада оператора. */
@@ -933,10 +972,10 @@
      * отдаёт ли Hub карточку и без него: если да — номер и статус в отчёте
      * будут всегда, а не только когда повезло увидеть warehouse в адресе.
      */
-    if (placelessCard === false) return { number: "", status: "" };
+    if (placelessCard === false) return emptyCard();
     const card = readCard(await replay(boxesRequest(posting, 0), timeoutMs));
     placelessCard = Boolean(card);
-    return card || { number: "", status: "" };
+    return card || emptyCard();
   }
 
   async function nativeScan(job) {
@@ -1061,6 +1100,8 @@
     const card = await nativeCard(posting, Math.max(2000, Math.min(8000, deadline - Date.now())));
     report.number = card.number;
     report.status = card.status;
+    report.price = card.price;
+    report.fairPrice = card.fairPrice;
 
     return {
       ok: true,
@@ -1299,8 +1340,10 @@
 
   /* Номер отправления и статус — из карточки предмета, не из истории. */
   function extractCardFrom(json) {
-    const out = { number: "", status: "" };
+    const out = emptyCard();
     if (!json) return out;
+    const info = json?.items?.[0]?.postingInfo;
+    if (info) Object.assign(out, cardMoney(info));
     const match = JSON.stringify(json).match(POSTING_NUMBER_RE);
     if (match) out.number = match[0];
 
@@ -1326,7 +1369,7 @@
   }
 
   async function fetchCard(posting, timeoutMs) {
-    if (!cardRecipe) return { number: "", status: "" };
+    if (!cardRecipe) return emptyCard();
     const fromId = cardRecipe.itemId;
     const response = await replay(
       {
@@ -1337,11 +1380,11 @@
       },
       timeoutMs
     );
-    if (!response?.ok || !response.text) return { number: "", status: "" };
+    if (!response?.ok || !response.text) return emptyCard();
     try {
       return extractCardFrom(JSON.parse(response.text));
     } catch (_err) {
-      return { number: "", status: "" };
+      return emptyCard();
     }
   }
 
@@ -1571,23 +1614,18 @@
        * их регуляркой из ответа истории незачем: это тот же случай, что и с
        * колонками — можно поймать что угодно похожее.
        */
-      const card = { number: "", status: "" };
-      const known = await nativeCard(posting, left());
-      card.number = known.number;
-      card.status = known.status;
-      if (!card.number || !card.status) {
-        const extra = await fetchCard(posting, left());
-        card.number = card.number || extra.number;
-        card.status = card.status || extra.status;
-      }
+      const card = emptyCard();
+      const fill = (from) => {
+        for (const key of Object.keys(card)) card[key] = card[key] || from?.[key] || "";
+      };
+      fill(await nativeCard(posting, left()));
+      if (!card.number || !card.status) fill(await fetchCard(posting, left()));
       /* Совсем ничего не вышло — последняя попытка по самому ответу. */
-      if (!card.number || !card.status) {
-        const guess = extractCardFrom(firstJson);
-        card.number = card.number || guess.number;
-        card.status = card.status || guess.status;
-      }
+      if (!card.number || !card.status) fill(extractCardFrom(firstJson));
       report.number = card.number;
       report.status = card.status;
+      report.price = card.price;
+      report.fairPrice = card.fairPrice;
 
       return {
         ok: true,
@@ -2503,6 +2541,19 @@
     }
 
     const card = readItemCard();
+    /*
+     * Суммы на странице истории нет — она живёт только на карточке
+     * предмета. Спрашиваем её тем же запросом, что и быстрый путь, чтобы
+     * цена была в отчёте независимо от того, как прочитана история.
+     */
+    let money = { price: "", fairPrice: "" };
+    if (!dead()) {
+      try {
+        money = await nativeCard(job.posting, Math.max(1500, Math.min(6000, left())));
+      } catch (_err) {
+        money = { price: "", fairPrice: "" };
+      }
+    }
     const tableRows = keepTransitionRows(rowNodes(), foreignWords(), typeColumn());
     const report = {
       number: card.number,
@@ -2513,7 +2564,9 @@
          откатом на случай другой вёрстки. */
       warehouseAt: warehouseDate || (warehouseCells ? findDate(warehouseCells) : ""),
       warehouseCell:
-        warehouseFields?.["Ячейка"] || (warehouseCells ? findCell(warehouseCells) : "")
+        warehouseFields?.["Ячейка"] || (warehouseCells ? findCell(warehouseCells) : ""),
+      price: money.price || "",
+      fairPrice: money.fairPrice || ""
     };
 
     const loaded = seen.size;
@@ -2564,6 +2617,8 @@
       status: String(report.status || ""),
       warehouseAt: String(report.warehouseAt || ""),
       warehouseCell: String(report.warehouseCell || ""),
+      price: String(report.price || ""),
+      fairPrice: String(report.fairPrice || ""),
       columns: (Array.isArray(report.columns) ? report.columns : []).map((value) => String(value || "")),
       /* Режем длинные значения: в отчёт идут три строки, а не вся история. */
       lastRows: rows.map((row) =>

@@ -289,6 +289,12 @@ main {
   display: none !important;
 }
 
+/* Уходящий экран гаснет, а не пропадает рывком. */
+.screen.is-leaving {
+  animation: view-out 0.16s var(--ease) both;
+  pointer-events: none;
+}
+
 .layout,
 .scan-grid,
 .result-grid {
@@ -4270,7 +4276,72 @@ a.t-id__code:hover {
   .stats__table tbody tr,
   .spanel,
   .runs li,
-  .gauge__ticks i {
+  .gauge__ticks i,
+  .screen,
+  .screen.is-leaving,
+  .result-grid,
+  .detail,
+  .stats {
     animation: none !important;
   }
+}
+
+/* Сумма — колонкой цифр, поэтому равноширокие знаки и выравнивание вправо. */
+.t-price {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.kpi--money::after {
+  background: var(--cyan);
+}
+
+.kpi--money b {
+  font-size: 19px;
+  color: var(--cyan);
+}
+
+/* ================================================================== */
+/*  ничего не утаскивается                                             */
+/*                                                                     */
+/*  Картинки, иконки и графику мышью не оторвать: браузер по умолчанию  */
+/*  разрешает тащить их как файл, и это выглядит как поломка. Своё      */
+/*  перетаскивание живёт только там, где помечено draggable="true".     */
+/* ================================================================== */
+
+img,
+svg,
+picture,
+canvas,
+video {
+  -webkit-user-drag: none;
+  -khtml-user-drag: none;
+  -moz-user-drag: none;
+  user-drag: none;
+}
+
+/* Иконки и подписи-плашки не выделяются: выделение — первый шаг к
+   случайному перетаскиванию текста. */
+svg,
+.kbd,
+kbd,
+.badge,
+.tag,
+.chip,
+.step,
+.seg__btn,
+.hbar__value,
+.col__cap,
+.col__day,
+.gauge__head em,
+.lchip,
+.legend__item {
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* Заголовки столбцов — единственное, что тащится намеренно. */
+.stats__table th[draggable="true"] {
+  -webkit-user-drag: element;
+  user-drag: element;
 }
