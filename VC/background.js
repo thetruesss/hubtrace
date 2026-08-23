@@ -125,6 +125,9 @@ const state = {
   changeLabels: {},
   /* Один номер за прогон считается обоими путями — «урок». */
   lessonDone: false,
+  lessonTries: 0,
+  lessonBusy: false,
+  autoThreads: false,
   /* Типы изменений, которые показывает открываемая вкладка. Список берётся
      с запроса самой страницы, если он подсмотрен. */
   auditTypes: null,
@@ -987,19 +990,27 @@ function labelsByDate(rows) {
   return byDate;
 }
 
+/*
+ * Возвращает, полным ли вышло сведение: срезы совпали по длине, и каждая
+ * подпись легла к своему коду. Пока полного сведения не было, урок
+ * повторяется на следующих номерах — иначе один ранний урок (до того, как
+ * со страницы приехал список типов) навсегда оставил бы незнакомый код
+ * без подписи.
+ */
 function learnChangeLabels(api, dom) {
   const codes = api?.report?.codes;
   const apiRows = api?.report?.lastRows;
   const domRows = dom?.report?.lastRows;
-  if (!Array.isArray(codes) || !codes.length || !Array.isArray(domRows)) return;
+  if (!Array.isArray(codes) || !codes.length || !Array.isArray(domRows)) return false;
 
   /* Срезы совпали по длине — строки те же и в том же порядке, сводить по
      месту точнее всего. Разошлись — выручает дата. */
   const sameShape = codes.length === domRows.length;
   const byDate = sameShape ? null : labelsByDate(domRows);
-  if (!sameShape && (!byDate.size || !Array.isArray(apiRows))) return;
+  if (!sameShape && (!byDate.size || !Array.isArray(apiRows))) return false;
 
   let learned = 0;
+  let full = sameShape;
   codes.forEach((code, index) => {
     let label;
     if (sameShape) label = String(domRows[index]?.[0] || "").trim();
@@ -1007,12 +1018,14 @@ function learnChangeLabels(api, dom) {
       const at = String(apiRows[index]?.[1] || "").trim();
       label = at ? byDate.get(at) || "" : "";
     }
+    if (!label) full = false;
     if (!code || !label || state.changeLabels[code]) return;
     if (!CYRILLIC.test(label) || label.length > 40) return;
     state.changeLabels[code] = label;
     learned += 1;
   });
   if (learned) broadcastHints();
+  return full;
 }
 
 function broadcastHints() {
@@ -1077,8 +1090,12 @@ function watchDigest(item) {
  * поэтому один раз смотрим на строки обоих путей рядом и запоминаем
  * подписи. Заодно это сверка: сходятся ли пути в ответе про склад.
  */
+const LESSON_TRIES = 4;
+
+/* Пока один урок в работе, остальные воркеры идут быстрым путём: иначе до
+   конца первого урока каждый успевал бы взять свой. */
 function lessonDue() {
-  return !state.lessonDone;
+  return !state.lessonDone && !state.lessonBusy && state.lessonTries < LESSON_TRIES;
 }
 
 function spotCheckDue() {
@@ -1146,6 +1163,7 @@ function blockApi(reason, kind) {
   }
 
   notice("api", text);
+  retuneThreads();
   emitState(true);
 }
 
@@ -1216,6 +1234,7 @@ function calibrate(api, dom, index) {
       state.apiState = "trusted";
       state.apiRetries = 0;
       state.apiBlockKind = "";
+      retuneThreads();
       notice(
         "api",
         "Обход DOM не дочитывает список, сверять не с чем. Доверяю быстрому пути: он берёт итог из ответа сервера."
@@ -1237,6 +1256,7 @@ function calibrate(api, dom, index) {
       state.apiState = "trusted";
       state.apiRetries = 0;
       state.apiBlockKind = "";
+      retuneThreads();
       notice("api", "Быстрый путь включён: история читается напрямую.");
       emitState(true);
     }
@@ -1343,14 +1363,24 @@ async function processOne(worker, posting, index) {
       }
     } else {
       /* Урок и периодические сверки: считаем оба пути и сравниваем. */
-      state.lessonDone = true;
-      const api = await apiScan(worker, posting);
-      if (state.stopping) return failItem(posting, "stopped");
-      const dom = await domScanWithRetry(worker, posting);
-      learnChangeLabels(api, dom);
-      calibrate(api, dom, index);
-      const merged = mergeReports(dom, api);
-      return merged ? { ...dom, report: merged } : dom;
+      const lesson = lessonDue();
+      if (lesson) {
+        state.lessonBusy = true;
+        state.lessonTries += 1;
+      }
+      try {
+        const api = await apiScan(worker, posting);
+        if (state.stopping) return failItem(posting, "stopped");
+        const dom = await domScanWithRetry(worker, posting);
+        /* Урок засчитан, только когда сведение вышло полным: ранний урок —
+           до списка типов со страницы — видит у путей разные срезы. */
+        if (learnChangeLabels(api, dom) && lesson) state.lessonDone = true;
+        calibrate(api, dom, index);
+        const merged = mergeReports(dom, api);
+        return merged ? { ...dom, report: merged } : dom;
+      } finally {
+        if (lesson) state.lessonBusy = false;
+      }
     }
   }
 
@@ -1584,10 +1614,36 @@ function normalizeSettings(raw) {
   return {
     mode,
     threads: Math.max(1, Math.min(MAX_THREADS, Number(raw?.threads) || MODES[mode].threads)),
+    /* auto — пул вкладок подбирается сам: приложение всегда шлёт true,
+       явные настройки (например, из тестов) оставляют ручное число. */
+    auto: raw?.auto === true,
     focusMode: raw?.focusMode !== false,
     useApi: raw?.useApi !== false,
     uncheckCurrentOnly: raw?.uncheckCurrentOnly === true
   };
+}
+
+/*
+ * Сколько вкладок нужно сейчас. Пока работает быстрый путь, вкладки —
+ * лишь площадки для запросов, и четырёх хватает с запасом; ушли на обход
+ * страницы — пул расширяется. Меньше очереди не открываем.
+ */
+function autoThreadCount() {
+  const left = Math.max(1, state.postings.length - state.processed);
+  const apiOk = state.useApi && state.apiState !== "blocked";
+  const base = apiOk ? 4 : 8;
+  return Math.max(1, Math.min(base, left, MAX_THREADS));
+}
+
+function retuneThreads() {
+  if (!state.autoThreads || !state.running) return;
+  const next = autoThreadCount();
+  if (next === state.threads) return;
+  const before = state.threads;
+  state.threads = next;
+  for (const worker of state.workers.values()) worker.retire = worker.id > state.threads;
+  if (next > before && !state.paused) ensureWorkers();
+  emitState();
 }
 
 function validateScan(payload) {
@@ -1617,6 +1673,7 @@ async function runScan(payload, postings, warehouse) {
   state.processed = 0;
   state.mode = settings.mode;
   state.threads = settings.threads;
+  state.autoThreads = settings.auto;
   state.focusMode = settings.focusMode;
   state.useApi = settings.useApi;
   state.uncheckCurrentOnly = settings.uncheckCurrentOnly;
@@ -1631,6 +1688,7 @@ async function runScan(payload, postings, warehouse) {
    * (spotCheckEvery) и защита от одинаковых ответов.
    */
   state.apiState = "trusted";
+  if (state.autoThreads) state.threads = autoThreadCount();
   state.apiNote = "";
   /* Новый прогон — снова пробуем известные ручки: Hub мог и вернуться. */
   state.nativeApi = true;
@@ -1638,6 +1696,8 @@ async function runScan(payload, postings, warehouse) {
   state.apiProbe = [];
   state.changeLabels = {};
   state.lessonDone = false;
+  state.lessonTries = 0;
+  state.lessonBusy = false;
   state.auditTypes = null;
   state.apiNotReady = false;
   state.retryRound = 0;

@@ -26,9 +26,14 @@ const screens = {
   result: $("screen-result")
 };
 
+/*
+ * Настроек скорости в интерфейсе больше нет: движок сам решает, как
+ * проверять и сколько вкладок открыть. auto — тот самый флаг.
+ */
 const settings = {
   mode: "balance",
-  threads: 5,
+  threads: 4,
+  auto: true,
   focusMode: true,
   useApi: true
 };
@@ -62,8 +67,43 @@ const ui = {
   finished: null,
   reportSaved: false,
   recentWarehouses: [],
-  rates: {}
+  rates: {},
+  runsLog: [],
+  /* Замеры для живых графиков на экране прогона. */
+  rateLog: [],
+  etaLog: []
 };
+
+/* Плавность: там, где страница умеет, перерисовка идёт мягким переходом. */
+const REDUCED_MOTION = window.matchMedia("(prefers-reduced-motion: reduce)");
+
+function smooth(render) {
+  if (typeof document.startViewTransition === "function" && !REDUCED_MOTION.matches) {
+    document.startViewTransition(render);
+    return;
+  }
+  render();
+}
+
+/* Числа не прыгают, а докручиваются. */
+function animateNumber(node, to) {
+  const next = Number(to) || 0;
+  const from = Number(node.dataset.v);
+  node.dataset.v = String(next);
+  if (!Number.isFinite(from) || from === next || REDUCED_MOTION.matches || Math.abs(next - from) > 4000) {
+    node.textContent = String(next);
+    return;
+  }
+  const started = performance.now();
+  const DURATION = 260;
+  const step = (now) => {
+    const k = Math.min(1, (now - started) / DURATION);
+    const eased = 1 - Math.pow(1 - k, 3);
+    node.textContent = String(Math.round(from + (next - from) * eased));
+    if (k < 1 && node.isConnected) requestAnimationFrame(step);
+  };
+  requestAnimationFrame(step);
+}
 
 /* ------------------------------------------------------------------ */
 /* служебное                                                           */
@@ -208,6 +248,7 @@ function parsePostings(raw) {
 
 function mountDecks() {
   const template = $("tpl-deck");
+  if (!template) return;
   for (const mount of $$("[data-deck]")) {
     mount.innerHTML = "";
     mount.appendChild(template.content.cloneNode(true));
@@ -245,9 +286,6 @@ function writeDecks() {
     if (focus) focus.checked = settings.focusMode;
   }
 
-  const badge = $("live-mode-badge");
-  if (badge) badge.textContent = MODE_LABELS[settings.mode] || settings.mode;
-  renderApiBadge();
   renderBrief();
 }
 
@@ -277,27 +315,7 @@ async function setSetting(patch, { pushLive = true } = {}) {
   }
 }
 
-document.addEventListener("click", (event) => {
-  const btn = event.target.closest(".seg__btn[data-mode]");
-  if (!btn) return;
-  const mode = btn.dataset.mode;
-  if (mode === settings.mode) return;
-  void setSetting({ mode, threads: MODE_THREADS[mode] || settings.threads });
-  toast("ok", `Режим: ${MODE_LABELS[mode]}${ui.running ? " — применён на ходу" : ""}`);
-});
 
-document.addEventListener("input", (event) => {
-  const target = event.target;
-  if (target.matches('[data-ctl="threads"]')) {
-    void setSetting({ threads: Number(target.value) });
-  }
-});
-
-document.addEventListener("change", (event) => {
-  const target = event.target;
-  if (target.matches('[data-ctl="api"]')) void setSetting({ useApi: target.checked });
-  else if (target.matches('[data-ctl="focus"]')) void setSetting({ focusMode: target.checked });
-});
 
 /* ------------------------------------------------------------------ */
 /* тосты                                                               */
@@ -462,15 +480,7 @@ function renderFeed(item) {
   const code = document.createElement("code");
   code.textContent = item.posting;
 
-  const via = document.createElement("span");
-  via.className = `feed__via${item.via === "api" ? " feed__via--api" : ""}`;
-  via.textContent = item.via === "api" ? "api" : "dom";
-
-  const count = document.createElement("span");
-  count.className = "feed__count";
-  count.textContent = `${item.loaded || 0}/${item.expected || 0}`;
-
-  li.append(tag, code, via, count);
+  li.append(tag, code);
 
   const feed = $("feed");
   feed.prepend(li);
@@ -478,12 +488,13 @@ function renderFeed(item) {
   $("feed-empty").hidden = true;
 }
 
+/* Никаких внутренних терминов: вкладка либо открывает, либо проверяет. */
 const PHASE_LABELS = {
   idle: "ждёт",
   open: "открывает",
-  history: "история",
-  rows: "строки",
-  api: "запрос"
+  history: "проверяет",
+  rows: "проверяет",
+  api: "проверяет"
 };
 
 function renderLanes() {
@@ -499,7 +510,7 @@ function renderLanes() {
   for (const worker of ui.workers) {
     const li = document.createElement("li");
     const busy = worker.phase && worker.phase !== "idle";
-    li.className = `lane${busy ? " is-busy" : ""}${worker.via === "api" ? " is-api" : worker.via === "dom" ? " is-dom" : ""}`;
+    li.className = `lane${busy ? " is-busy" : ""}`;
 
     const id = document.createElement("span");
     id.className = "lane__id";
@@ -511,7 +522,7 @@ function renderLanes() {
 
     const phase = document.createElement("span");
     phase.className = "lane__phase";
-    phase.textContent = PHASE_LABELS[worker.phase] || worker.phase || "ждёт";
+    phase.textContent = PHASE_LABELS[worker.phase] || "проверяет";
 
     li.append(id, posting, phase);
     list.appendChild(li);
@@ -564,72 +575,11 @@ function scanMode() {
   return "idle";
 }
 
-function renderApiBadge() {
-  const badge = $("api-badge");
-  if (badge) {
-    const on = settings.useApi && ui.apiState === "trusted";
-    badge.hidden = !on;
-    badge.textContent = "быстрый путь";
-  }
-
-  /* Всплывашка живёт пять секунд, а знать состояние надо всё время. */
-  let text = "";
-  let tone = "";
-  if (!settings.useApi) {
-    text = "выключен вручную";
-  } else if (ui.apiState === "trusted") {
-    text = "включён — история читается запросом";
-    tone = "is-on";
-  } else if (ui.apiState === "blocked") {
-    text = ui.apiNote || ui.apiLastReason || "отключён, работаю через DOM";
-    tone = "is-off";
-  } else if (ui.running) {
-    text = "пробую первый запрос";
-  }
-
-  for (const el of $$("[data-api-state]")) {
-    el.hidden = !text;
-    el.textContent = text;
-    el.classList.toggle("is-on", tone === "is-on");
-    el.classList.toggle("is-off", tone === "is-off");
-  }
-
-  renderApiProbe();
-}
-
 /*
- * Что именно ответил Hub на каждый вариант запроса. Пока быстрый путь
- * работает, это лишний шум — показываем только когда он не завёлся или
- * когда пользователь сам раскрыл подробности.
+ * Состояние быстрого пути живёт в ui и в фоне, но на экран не выходит:
+ * человеку не нужно знать, каким путём прочитана история.
  */
-function renderApiProbe() {
-  const box = $("api-probe");
-  if (!box) return;
-
-  const lines = ui.apiProbe || [];
-  const failed = ui.apiState === "blocked" || (settings.useApi && !ui.apiTune && lines.length > 0);
-  const show = lines.length > 0 && failed;
-
-  box.hidden = !show;
-  if (!show) return;
-
-  box.innerHTML = "";
-  const title = document.createElement("b");
-  title.textContent = "Ответы Hub на быстрый путь";
-  box.appendChild(title);
-
-  const list = document.createElement("ul");
-  for (const line of lines.slice(0, 12)) {
-    const item = document.createElement("li");
-    item.textContent = line;
-    list.appendChild(item);
-  }
-  box.appendChild(list);
-
-  const hint = document.createElement("em");
-  hint.textContent = "Пришлите это разработчику — по строкам видно, что именно не принял сервер.";
-  box.appendChild(hint);
-}
+function renderApiBadge() {}
 
 function renderRunState() {
   const mode = scanMode();
@@ -648,13 +598,11 @@ function renderRunState() {
   status.textContent =
     mode === "live" ? "идёт" : mode === "paused" ? "пауза" : mode === "stopping" ? "стоп" : "ожидание";
 
-  const live = $("live");
-  live.hidden = !ui.running && !ui.hasResults;
-  live.classList.toggle("is-live", mode === "live");
-  live.classList.toggle("is-paused", mode === "paused");
-  live.classList.toggle("is-stopping", mode === "stopping");
-  $("live-state").textContent =
-    mode === "live" ? "проверяю" : mode === "paused" ? "на паузе" : mode === "stopping" ? "останавливаю" : "готово";
+  const gauges = $("gauges");
+  if (gauges) {
+    gauges.classList.toggle("is-live", mode === "live");
+    gauges.classList.toggle("is-paused", mode === "paused");
+  }
 
   const pause = $("btn-pause");
   pause.disabled = !ui.running || ui.stopping;
@@ -679,7 +627,7 @@ function renderRunState() {
   if (mode === "idle" && !ui.running) {
     $("scan-current").textContent = hasItems ? "Проверка не идёт" : "Сейчас ничего не проверяется";
   } else if (mode === "paused") {
-    $("scan-current").textContent = "Пауза — текущие вкладки дорабатывают";
+    $("scan-current").textContent = "Пауза — начатое доработается";
   }
 
   updateFormState();
@@ -690,17 +638,86 @@ function tickLive() {
   if (!ui.running) return;
   const drift = ui.paused ? 0 : Date.now() - ui.elapsedAt;
   const elapsed = ui.elapsedMs + drift;
-  $("live-elapsed").textContent = fmtDuration(elapsed);
+  setText($("gauge-elapsed"), fmtDuration(elapsed));
 
   const processed = ui.byIndex.size;
   const rate = elapsed > 1500 && processed ? (processed / elapsed) * 60000 : 0;
-  $("live-rate").textContent = fmtRate(rate);
-
   const left = ui.total - processed;
-  $("live-eta").textContent = ui.paused ? "пауза" : rate && left > 0 ? fmtDuration((left / rate) * 60000) : left <= 0 ? "0:00" : "—";
+  const etaMs = rate && left > 0 ? (left / rate) * 60000 : left <= 0 ? 0 : null;
+
+  setText($("gauge-rate"), rate ? fmtRate(rate) : "—");
+  setText($("gauge-eta"), ui.paused ? "пауза" : etaMs == null ? "—" : fmtDuration(etaMs));
+
+  if (!ui.paused && rate > 0) {
+    pushSample(ui.rateLog, rate);
+    if (etaMs != null) pushSample(ui.etaLog, etaMs);
+    renderGauges();
+  }
+  renderTicks(elapsed);
+}
+
+const SAMPLE_LIMIT = 96;
+
+function pushSample(log, value) {
+  log.push(value);
+  if (log.length > SAMPLE_LIMIT) log.shift();
+}
+
+/* Текст меняем только когда он правда изменился — иначе каждые полсекунды
+   дёргается вся строка и ломается плавность. */
+function setText(node, text) {
+  if (node && node.textContent !== text) node.textContent = text;
 }
 
 window.setInterval(tickLive, 500);
+
+/*
+ * Живые графики на экране прогона. Скорость и остаток времени рисуются
+ * своими линиями: цифра говорит «сколько сейчас», линия — «куда идёт».
+ */
+function drawSpark(lineId, fillId, samples, invert) {
+  const line = $(lineId);
+  const fill = $(fillId);
+  if (!line || !fill) return;
+
+  if (samples.length < 2) {
+    line.setAttribute("points", "");
+    fill.setAttribute("points", "");
+    return;
+  }
+
+  const max = Math.max(...samples) || 1;
+  const min = Math.min(...samples);
+  const span = Math.max(max - min, max * 0.08, 0.0001);
+  const points = samples
+    .map((value, index) => {
+      const x = (index / (samples.length - 1)) * 100;
+      const norm = (value - min) / span;
+      /* Остаток времени падает к нулю — рисуем его тем же «вниз хорошо». */
+      const y = 23 - (invert ? 1 - norm : norm) * 19;
+      return `${x.toFixed(2)},${y.toFixed(2)}`;
+    })
+    .join(" ");
+  line.setAttribute("points", points);
+  fill.setAttribute("points", `0,26 ${points} 100,26`);
+}
+
+function renderGauges() {
+  drawSpark("rate-line", "rate-fill", ui.rateLog, false);
+  drawSpark("eta-line", "eta-fill", ui.etaLog, true);
+}
+
+/* Ровные засечки времени: каждая — минута прогона, последняя дышит. */
+function renderTicks(elapsed) {
+  const host = $("gauge-ticks");
+  if (!host) return;
+  const want = Math.max(1, Math.min(12, Math.floor(elapsed / 60000) + 1));
+  while (host.children.length < want) host.appendChild(document.createElement("i"));
+  while (host.children.length > want) host.lastElementChild.remove();
+  for (let i = 0; i < host.children.length; i += 1) {
+    host.children[i].classList.toggle("is-now", i === host.children.length - 1);
+  }
+}
 
 function resetScanHud(total) {
   ui.byIndex = new Map();
@@ -711,6 +728,9 @@ function resetScanHud(total) {
   ui.workers = [];
   ui.elapsedMs = 0;
   ui.elapsedAt = Date.now();
+  ui.rateLog = [];
+  ui.etaLog = [];
+  renderGauges();
   resetRadarBlips();
   $("feed").innerHTML = "";
   $("scan-current").textContent = "Открываю историю…";
@@ -727,14 +747,11 @@ function renderBrief() {
   const list = $("brief");
   if (!list) return;
   const count = parsePostings(postingsEl.value).length;
-  const rate = Number(ui.rates[settings.mode]) || 0;
+  const rate = Number(ui.rates.auto) || Number(ui.rates[settings.mode]) || 0;
 
-  const rows = [
-    ["", `<b>${count}</b> ${plural(count, ["номер", "номера", "номеров"])} в очереди`],
-    ["", `<b>${settings.threads}</b> ${plural(settings.threads, ["вкладка", "вкладки", "вкладок"])} сразу`],
-    ["", `Режим <b>${MODE_LABELS[settings.mode]}</b>`]
-  ];
+  const rows = [["", `<b>${count}</b> ${plural(count, ["номер", "номера", "номеров"])} в очереди`]];
   if (count && rate) rows.push(["", `Примерно <b>${fmtDuration((count / rate) * 60000)}</b> по прошлым запускам`]);
+  rows.push(["", "Итог придёт списком, детализацией и аналитикой"]);
   rows.push([
     "is-hint",
     "<kbd>Ctrl</kbd><kbd>↵</kbd><i>старт</i><kbd>Space</kbd><i>пауза</i><kbd>Esc</kbd><i>стоп</i>"
@@ -854,7 +871,64 @@ function withLabels(report) {
   });
 }
 
-function renderResults(payload) {
+/* «Недавние проверки»: склад, итог и когда это было — одним кликом назад. */
+function fmtAgo(at) {
+  const diff = Date.now() - Number(at || 0);
+  if (!Number.isFinite(diff) || diff < 0) return "";
+  if (diff < 90000) return "только что";
+  if (diff < 3600000) return `${Math.round(diff / 60000)} мин назад`;
+  if (diff < 86400000) return `${Math.round(diff / 3600000)} ч назад`;
+  if (diff < 172800000) return "вчера";
+  const date = new Date(at);
+  return `${pad(date.getDate())}.${pad(date.getMonth() + 1)}`;
+}
+
+function renderRuns() {
+  const list = $("runs");
+  const empty = $("runs-empty");
+  if (!list) return;
+  list.innerHTML = "";
+  if (empty) empty.hidden = ui.runsLog.length > 0;
+  /* Пустая панель не должна раздуваться во всю колонку. */
+  list.closest(".panel")?.classList.toggle("is-empty", ui.runsLog.length === 0);
+  for (const run of ui.runsLog) {
+    const li = document.createElement("li");
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "run";
+    btn.title = "Подставить этот склад";
+    const name = document.createElement("b");
+    name.textContent = run.warehouse;
+    const meta = document.createElement("em");
+    meta.textContent = `${run.hits} из ${run.total} · ${fmtAgo(run.at)}`;
+    btn.append(name, meta);
+    btn.addEventListener("click", () => {
+      warehouseEl.value = run.warehouse;
+      updateFormState();
+      postingsEl.focus();
+    });
+    li.appendChild(btn);
+    list.appendChild(li);
+  }
+}
+
+function logRun(payload, results) {
+  const warehouse = String(payload?.warehouse || "").trim();
+  if (!warehouse || !results.length) return;
+  const entry = {
+    warehouse,
+    hits: ui.lists.hits.length,
+    total: payload?.inputCount || results.length,
+    at: Date.now()
+  };
+  ui.runsLog = [entry, ...ui.runsLog].slice(0, 6);
+  renderRuns();
+  void storageGet([STORAGE_SETTINGS]).then((saved) =>
+    storageSet({ [STORAGE_SETTINGS]: { ...(saved[STORAGE_SETTINGS] || {}), runsLog: ui.runsLog } })
+  );
+}
+
+function renderResults(payload, fresh) {
   const results = (payload?.results || []).filter(Boolean);
   changeLabels = payload?.changeLabels || {};
   ui.finished = payload || null;
@@ -877,9 +951,6 @@ function renderResults(payload) {
   if (payload?.durationMs && results.length) {
     chips.push(["Скорость", fmtRate((results.length / payload.durationMs) * 60000)]);
   }
-  if (payload?.mode) chips.push(["Режим", MODE_LABELS[payload.mode] || payload.mode]);
-  const apiCount = results.filter((item) => item?.via === "api").length;
-  if (apiCount) chips.push(["Быстрым путём", `${apiCount} из ${results.length}`]);
   if (payload?.stopped) chips.push(["Статус", "остановлено"]);
   for (const [label, value] of chips) {
     const chip = document.createElement("span");
@@ -909,17 +980,18 @@ function renderResults(payload) {
   /* Плашка сверху после финиша должна показывать итог, а не последний
      тик живого таймера. */
   const duration = Number(payload?.durationMs) || 0;
-  $("live-elapsed").textContent = duration ? fmtDuration(duration) : "—";
-  $("live-rate").textContent = fmtRate(duration && results.length ? (results.length / duration) * 60000 : 0);
-  $("live-eta").textContent = payload?.stopped ? "остановлено" : "—";
+  setText($("gauge-elapsed"), duration ? fmtDuration(duration) : "—");
+  setText($("gauge-rate"), fmtRate(duration && results.length ? (results.length / duration) * 60000 : 0));
+  setText($("gauge-eta"), payload?.stopped ? "стоп" : "0:00");
 
   ui.hasResults = true;
+  if (fresh) logRun(payload, results);
   updateFormState();
   setStep("result");
 
-  if (duration > 4000 && results.length >= 5 && payload?.mode && !payload?.stopped) {
+  if (duration > 4000 && results.length >= 5 && !payload?.stopped) {
     const measured = (results.length / duration) * 60000;
-    ui.rates = { ...ui.rates, [payload.mode]: measured };
+    ui.rates = { ...ui.rates, auto: measured };
     void storageGet([STORAGE_SETTINGS]).then((saved) =>
       storageSet({ [STORAGE_SETTINGS]: { ...(saved[STORAGE_SETTINGS] || {}), rates: ui.rates } })
     );
@@ -1215,17 +1287,6 @@ $("btn-clear").addEventListener("click", () => {
   updateCount();
 });
 
-$("btn-paste").addEventListener("click", async () => {
-  try {
-    const text = await navigator.clipboard.readText();
-    if (!text) return;
-    postingsEl.value = postingsEl.value.trim() ? `${postingsEl.value.trim()}\n${text}` : text;
-    updateCount();
-  } catch (_err) {
-    showError("Нет доступа к буферу обмена.");
-  }
-});
-
 $("btn-file").addEventListener("click", () => $("file-input").click());
 $("file-input").addEventListener("change", (event) => {
   const file = event.target.files?.[0];
@@ -1396,22 +1457,6 @@ function absorbState(next) {
   ui.elapsedAt = Date.now();
   if (next.total) ui.total = next.total;
 
-  const changed =
-    settings.mode !== next.mode ||
-    settings.threads !== next.threads ||
-    settings.focusMode !== next.focusMode ||
-    settings.useApi !== next.useApi;
-
-  if (changed && next.mode && Date.now() > settingsDirtyUntil) {
-    Object.assign(settings, {
-      mode: next.mode,
-      threads: next.threads,
-      focusMode: next.focusMode,
-      useApi: next.useApi
-    });
-    writeDecks();
-  }
-
   renderLanes();
   renderRunState();
   updateScanHud();
@@ -1439,18 +1484,18 @@ chrome.runtime.onMessage.addListener((message) => {
   }
 
   if (message?.action === "scanNotice") {
-    toast(message.level === "error" ? "error" : message.level === "api" ? "api" : "ok", message.text);
+    /* Служебные сообщения про пути и токены — внутренняя кухня движка. */
     if (message.level === "api") {
       ui.apiNote = message.text;
-      renderApiBadge();
+      return;
     }
+    toast(message.level === "error" ? "error" : "ok", message.text);
     return;
   }
 
   if (message?.action === "scanRevalidate") {
     for (const index of message.indexes || []) dropItem(index);
     updateScanHud();
-    toast("api", `Переснимаю ${message.indexes?.length || 0} номер(ов) обходом страницы`);
     return;
   }
 
@@ -1460,12 +1505,12 @@ chrome.runtime.onMessage.addListener((message) => {
     ui.stopping = false;
     renderRunState();
     if (message.finished?.results?.length) {
-      renderResults(message.finished);
+      renderResults(message.finished, true);
       return;
     }
     void storageGet([STORAGE_FINISHED]).then((saved) => {
       const finished = saved[STORAGE_FINISHED];
-      if (finished?.results?.length) renderResults(finished);
+      if (finished?.results?.length) renderResults(finished, true);
       else {
         $("scan-current").textContent = "Сейчас ничего не проверяется";
         syncSteps();
@@ -1480,12 +1525,19 @@ chrome.runtime.onMessage.addListener((message) => {
 
 function applySavedSettings(saved) {
   if (!saved) return;
-  Object.assign(settings, {
-    mode: MODE_LABELS[saved.mode] ? saved.mode : settings.mode,
-    threads: Math.max(1, Math.min(12, Number(saved.threads) || settings.threads)),
-    focusMode: saved.focusMode !== false,
-    useApi: saved.useApi !== false
-  });
+  /* Режим и вкладки движок выбирает сам — из хранилища их не читаем. */
+  if (Array.isArray(saved.runsLog)) ui.runsLog = saved.runsLog.slice(0, 6);
+  if (Array.isArray(saved.statsCols)) {
+    const cols = saved.statsCols.filter((key) => STATS_COLUMNS[key]);
+    if (cols.length) statsCols = [...new Set(cols)];
+  }
+  if (Array.isArray(saved.statsPanels)) {
+    const panels = saved.statsPanels
+      .filter((panel) => STATS_DIMS[panel?.dim] && STATS_VIZ[panel?.viz])
+      .map((panel) => ({ dim: panel.dim, viz: panel.viz }))
+      .slice(0, MAX_PANELS);
+    if (panels.length) statsPanels = panels;
+  }
   if (saved.warehouse) warehouseEl.value = saved.warehouse;
   if (Array.isArray(saved.recentWarehouses)) ui.recentWarehouses = saved.recentWarehouses;
   if (saved.rates && typeof saved.rates === "object") ui.rates = saved.rates;
@@ -1496,13 +1548,11 @@ async function boot() {
   mountDecks();
   ensureKeepAlive();
 
-  const version = chrome.runtime.getManifest?.()?.version;
-  if (version) $("app-version").textContent = `v${version}`;
-
   const saved = await storageGet([STORAGE_SETTINGS, STORAGE_FINISHED]);
   applySavedSettings(saved[STORAGE_SETTINGS]);
   writeDecks();
   renderRecentWarehouses();
+  renderRuns();
   updateCount();
 
   const live = await send({ action: "getScanState" });
@@ -1551,9 +1601,7 @@ let detailQuery = [];
 /* {item, hay} — строку для поиска собираем один раз на результат, а не на
    каждое нажатие клавиши. */
 let detailIndex = [];
-const detailFilters = { verdict: "", bucket: "", status: "", via: "" };
-
-const VIA_LABELS = { api: "запрос", dom: "страница" };
+const detailFilters = { verdict: "", bucket: "", status: "" };
 
 function haystackOf(item) {
   const report = item.report || {};
@@ -1567,7 +1615,6 @@ function haystackOf(item) {
     bucketOf(report.warehouseAt, Date.now()),
     kind === "hit" ? "есть склад" : kind === "miss" ? "нет склада" : "не вышло",
     CHECK_STATUS[item.status] || item.status,
-    VIA_LABELS[item.via] || item.via,
     ...(report.columns || []),
     ...withLabels(report).flat()
   ]
@@ -1616,7 +1663,6 @@ function fillFilterOptions() {
 
 function passesFilters(item) {
   if (detailFilters.verdict && classify(item) !== detailFilters.verdict) return false;
-  if (detailFilters.via && item.via !== detailFilters.via) return false;
   if (detailFilters.status && item.report?.status !== detailFilters.status) return false;
   if (detailFilters.bucket && bucketOf(item.report?.warehouseAt, Date.now()) !== detailFilters.bucket) return false;
   return true;
@@ -1883,7 +1929,6 @@ function mountDetail() {
   bind("filter-verdict", "verdict");
   bind("filter-bucket", "bucket");
   bind("filter-status", "status");
-  bind("filter-via", "via");
 
   $("filter-reset")?.addEventListener("click", () => {
     resetDetailFilters();
@@ -1896,7 +1941,7 @@ function resetDetailFilters() {
   for (const key of Object.keys(detailFilters)) detailFilters[key] = "";
   const search = $("detail-search");
   if (search) search.value = "";
-  for (const id of ["filter-verdict", "filter-bucket", "filter-status", "filter-via"]) {
+  for (const id of ["filter-verdict", "filter-bucket", "filter-status"]) {
     const select = $(id);
     if (select) select.value = "";
   }
@@ -1909,20 +1954,51 @@ mountDetail();
 /* ------------------------------------------------------------------ */
 
 /*
- * Третье пространство результата — дашборд по виновникам.
+ * Третье пространство результата — аналитика по последним ячейкам и
+ * предыдущим складам.
  *
  * Правило одно, и оно же написано в подзаголовках панелей: если искомый
  * склад в истории есть, проблема скорее всего в последней ячейке верхней
- * строки об этом складе; если склада нет — виноват верхний по движениям
- * склад. По этим виновникам и построены графики, фильтры и таблица.
+ * строки об этом складе — это его последняя ячейка; если склада нет,
+ * смотрим предыдущий склад: верхний по движениям. По этим двум разрезам
+ * и построены графики, фильтры и таблица.
  */
 let statsIndex = [];
 let statsQuery = [];
-const statsFilters = { verdict: "", cell: "", place: "", bucket: "", status: "", op: "", day: "" };
+const statsFilters = {
+  verdict: "",
+  cell: "",
+  place: "",
+  bucket: "",
+  status: "",
+  op: "",
+  day: "",
+  user: "",
+  hour: ""
+};
 let statsSort = { key: "at", dir: -1 };
-/* Вид графиков: гистограмма, график, диаграмма. Это не фильтр — «Сбросить»
-   его не трогает, а выбранный вид переживает новый прогон. */
-let statsMode = "bars";
+
+/*
+ * Набор панелей собирает сам пользователь: в каждой — что показывать
+ * (измерение) и в каком виде (гистограмма, столбики, график, диаграмма).
+ * Раскладка хранится в настройках и переживает перезапуск; «Сбросить»
+ * фильтров её не трогает.
+ */
+const STATS_VIZ = { bars: "Гистограмма", cols: "Столбики", line: "График", donut: "Диаграмма" };
+const DEFAULT_PANELS = [
+  { dim: "cell", viz: "bars" },
+  { dim: "place", viz: "bars" },
+  { dim: "day", viz: "cols" },
+  { dim: "status", viz: "bars" }
+];
+const MAX_PANELS = 8;
+let statsPanels = DEFAULT_PANELS.map((panel) => ({ ...panel }));
+
+function persistStatsPanels() {
+  void storageGet([STORAGE_SETTINGS]).then((saved) =>
+    storageSet({ [STORAGE_SETTINGS]: { ...(saved[STORAGE_SETTINGS] || {}), statsPanels } })
+  );
+}
 
 const STATS_SELECTS = {
   verdict: "stats-verdict",
@@ -1947,7 +2023,7 @@ function lastCellOf(raw) {
 /*
  * Верхний склад по движениям: идём по строкам сверху вниз, внутри строки
  * разбираем «Местоположение: …», стороны переезда смотрим с конца (самое
- * свежее место). Рейсы пропускаем — виноват склад; если складов не
+ * свежее место). Рейсы пропускаем — нужен именно склад; если складов не
  * встретилось вовсе, берём первое попавшееся место без пометки.
  */
 function topPlaceOf(rows) {
@@ -1998,6 +2074,16 @@ function blameOf(item) {
 
 const BLAME_TAGS = { cell: "ячейка", place: "склад" };
 
+/* Колонка «Пользователь» верхней строки — кто делал последнюю операцию. */
+function topUserOf(report) {
+  const rows = report?.lastRows;
+  if (!Array.isArray(rows) || !rows.length) return "";
+  const columns = report.columns || [];
+  let at = columns.findIndex((title) => /^польз/i.test(String(title || "")));
+  if (at < 0) at = 2;
+  return String(rows[0]?.[at] || "").trim();
+}
+
 function buildStatsIndex(results) {
   const now = Date.now();
   statsIndex = results.map((item) => {
@@ -2005,14 +2091,18 @@ function buildStatsIndex(results) {
     const stamp = parseHubDate(blame.at);
     /* Последняя операция — тип верхней строки истории, словами Hub. */
     const op = String(withLabels(item.report)[0]?.[0] || "").trim();
+    const user = topUserOf(item.report);
+    const hour = stamp ? `${pad(stamp.getHours())}:00` : "";
     return {
       item,
       blame,
       op,
+      user,
+      hour,
       bucket: bucketOf(item.report?.warehouseAt, now),
       day: stamp ? `${pad(stamp.getDate())}.${pad(stamp.getMonth() + 1)}` : "",
       dayTs: stamp ? new Date(stamp.getFullYear(), stamp.getMonth(), stamp.getDate()).getTime() : 0,
-      hay: [haystackOf(item), blame.value, BLAME_TAGS[blame.kind] || ""].join(" ").toLowerCase()
+      hay: [haystackOf(item), blame.value, BLAME_TAGS[blame.kind] || "", user, hour].join(" ").toLowerCase()
     };
   });
   assignStatsColors();
@@ -2034,6 +2124,8 @@ function passesStats(entry, skip) {
     if (entry.blame.kind !== "place" || entry.blame.value !== statsFilters.place) return false;
   }
   if (!s.has("day") && statsFilters.day && entry.day !== statsFilters.day) return false;
+  if (!s.has("user") && statsFilters.user && entry.user !== statsFilters.user) return false;
+  if (!s.has("hour") && statsFilters.hour && entry.hour !== statsFilters.hour) return false;
   if (statsQuery.length && !statsQuery.some((needle) => entry.hay.includes(needle))) return false;
   return true;
 }
@@ -2138,8 +2230,8 @@ function renderStatsKpis(shown) {
     { label: "Склад есть", value: hits, mod: "hit" },
     { label: "Склада нет", value: misses, mod: "miss" },
     { label: "Не вышло", value: issues, mod: "issue" },
-    { label: "Виновных ячеек", value: cells.size, mod: "cell" },
-    { label: "Виновных складов", value: places.size, mod: "place" }
+    { label: "Последних ячеек", value: cells.size, mod: "cell" },
+    { label: "Предыдущих складов", value: places.size, mod: "place" }
   ];
 
   host.innerHTML = "";
@@ -2159,79 +2251,147 @@ function chartEmpty(host, text) {
 }
 
 /*
- * Полосы — фасетные: каждая панель считается по срезу без собственного
- * фильтра, выбранное значение подсвечено, остальные пригашены. Так после
- * клика по полосе распределение остаётся на месте, и с него можно
- * переключиться на соседнее значение одним кликом.
- */
-function renderBarChart(hostId, rows, options) {
-  const host = $(hostId);
-  if (!host) return;
-  host.innerHTML = "";
-
-  if (!rows.length) {
-    chartEmpty(host, options.empty || "Под фильтры ничего не попало.");
-    return;
-  }
-
-  const top = rows.slice(0, 10);
-  const max = top[0][1] || 1;
-  for (const [value, count] of top) {
-    const active = options.active;
-    const row = document.createElement("button");
-    row.type = "button";
-    row.className = `hbar${active === value ? " is-on" : active ? " is-dim" : ""}`;
-    row.title = active === value ? "Снять фильтр" : "Показать все ID с этим виновником";
-    row.addEventListener("click", () => options.pick(value));
-
-    const label = el("span", "hbar__label", value);
-    label.title = value;
-    const track = el("span", "hbar__track");
-    const fill = el("i", "hbar__fill");
-    fill.style.width = `${Math.max(3, (count / max) * 100)}%`;
-    if (options.color) fill.style.background = options.color;
-    track.appendChild(fill);
-    const num = el("span", "hbar__value", String(count));
-
-    row.append(label, track, num);
-    host.appendChild(row);
-  }
-
-  const feet = [];
-  if (rows.length > top.length) {
-    const rest = rows.slice(top.length).reduce((sum, [, count]) => sum + count, 0);
-    feet.push(`за десяткой ещё ${rows.length - top.length} — на них ${rest} ID`);
-  }
-  if (options.foot) feet.push(options.foot);
-  if (feet.length) host.appendChild(el("p", "bars__foot", feet.join(" · ")));
-}
-
-/*
- * Один и тот же срез — три вида. Цвет закреплён за значением на весь
- * прогон (по полному списку, а не по текущему рангу): фильтр не должен
- * перекрашивать выживших. Палитры проверены валидатором на тёмной
- * поверхности: категориальная пятёрка и порядковая синяя лента для дней.
+ * Измерения и рисовалки.
+ *
+ * Цвет закреплён за значением на весь прогон (по полному списку, а не по
+ * текущему рангу): фильтр не должен перекрашивать выживших. Палитры
+ * проверены валидатором на тёмной поверхности: категориальная пятёрка,
+ * тройка есть/нет/не вышло для слоёв и порядковая синяя лента.
  */
 const STATS_CAT = ["#3987e5", "#d95926", "#199e70", "#c98500", "#d55181"];
 const STATS_REST = "#5b6478";
 const DAY_RAMP = ["#9ec4ff", "#63a3ef", "#3987e5", "#2262b8", "#184f95"];
+const VERDICT_COLORS = { hit: "var(--viz-hit)", miss: "var(--viz-miss)", issue: "#e66767" };
+const VERDICT_WORDS = { hit: "склад есть", miss: "склада нет", issue: "не вышло" };
 
-let statsColors = { cell: new Map(), place: new Map(), status: new Map() };
+/*
+ * Что можно показать в панели. of() возвращает значение фильтра («» —
+ * записи в этом измерении нет), label() — подпись для человека; filter —
+ * какой фильтр ставит клик; ordered — как сортировать значения по природе
+ * измерения, а не по счёту.
+ */
+const STATS_DIMS = {
+  cell: {
+    title: "Последняя ячейка",
+    sub: "склад найден — последняя ячейка верхней строки о нём",
+    filter: "cell",
+    hue: "var(--viz-hit)",
+    of: (entry) => (entry.blame.kind === "cell" ? entry.blame.value : "")
+  },
+  place: {
+    title: "Предыдущий склад",
+    sub: "склада нет — верхний склад по движениям",
+    filter: "place",
+    hue: "var(--viz-miss)",
+    of: (entry) => (entry.blame.kind === "place" ? entry.blame.value : "")
+  },
+  verdict: {
+    title: "Результат проверки",
+    sub: "есть / нет / не вышло",
+    filter: "verdict",
+    of: (entry) => classify(entry.item),
+    label: (value) => VERDICT_WORDS[value] || value,
+    color: (value) => VERDICT_COLORS[value] || STATS_REST
+  },
+  status: {
+    title: "Статусы отправлений",
+    sub: "как в карточке Hub",
+    filter: "status",
+    of: (entry) => entry.item.report?.status || ""
+  },
+  op: {
+    title: "Последние операции",
+    sub: "тип верхней строки истории",
+    filter: "op",
+    of: (entry) => entry.op
+  },
+  user: {
+    title: "Кто делал операцию",
+    sub: "пользователь верхней строки",
+    filter: "user",
+    of: (entry) => entry.user
+  },
+  day: {
+    title: "По дням",
+    sub: "дата верхней операции",
+    filter: "day",
+    ordered: "day",
+    of: (entry) => entry.day
+  },
+  hour: {
+    title: "По часам",
+    sub: "час верхней операции",
+    filter: "hour",
+    ordered: "hour",
+    of: (entry) => entry.hour
+  },
+  bucket: {
+    title: "Корзинки",
+    sub: "возраст верхней строки о складе",
+    filter: "bucket",
+    ordered: "bucket",
+    of: (entry) => entry.bucket
+  }
+};
+
+let statsColors = {};
 
 function assignStatsColors() {
-  const dims = {
-    cell: (entry) => (entry.blame.kind === "cell" ? entry.blame.value : ""),
-    place: (entry) => (entry.blame.kind === "place" ? entry.blame.value : ""),
-    status: (entry) => entry.item.report?.status || ""
-  };
   statsColors = {};
-  for (const [dim, keyOf] of Object.entries(dims)) {
+  for (const dim of ["cell", "place", "status", "op", "user"]) {
     const map = new Map();
-    tallyBy(statsIndex, keyOf).forEach(([value], index) => {
+    tallyBy(statsIndex, STATS_DIMS[dim].of).forEach(([value], index) => {
       map.set(value, STATS_CAT[index] || STATS_REST);
     });
     statsColors[dim] = map;
   }
+}
+
+/* Порядок значений упорядоченного измерения — по его природе. */
+function dimOrderKey(dimKey, entry) {
+  if (dimKey === "day") return entry.dayTs;
+  if (dimKey === "hour") return Number(entry.hour.slice(0, 2));
+  if (dimKey === "bucket") {
+    const at = BUCKET_ORDER.indexOf(entry.bucket);
+    return at < 0 ? BUCKET_ORDER.length : at;
+  }
+  return 0;
+}
+
+/* Строки панели: [значение, счёт], упорядоченные по природе измерения
+   или по убыванию счёта. */
+function dimRows(dimKey, slice) {
+  const dim = STATS_DIMS[dimKey];
+  const rows = tallyBy(slice, dim.of);
+  if (!dim.ordered) return rows;
+  const order = new Map();
+  for (const entry of slice) {
+    const value = dim.of(entry);
+    if (value && !order.has(value)) order.set(value, dimOrderKey(dimKey, entry));
+  }
+  return rows.sort((a, b) => (order.get(a[0]) || 0) - (order.get(b[0]) || 0));
+}
+
+/* Цвет значения в измерении — для линий, долей и слоёв. */
+function dimColorOf(dimKey, slice) {
+  const dim = STATS_DIMS[dimKey];
+  if (dim.color) return dim.color;
+  if (dim.ordered) {
+    const values = dimRows(dimKey, slice).map(([value]) => value);
+    const shade = new Map(
+      values.map((value, index) => [
+        value,
+        DAY_RAMP[values.length === 1 ? 2 : Math.round((index * (DAY_RAMP.length - 1)) / (values.length - 1))]
+      ])
+    );
+    return (value) => shade.get(value) || STATS_REST;
+  }
+  const map = statsColors[dimKey] || new Map();
+  return (value) => map.get(value) || STATS_REST;
+}
+
+function dimLabelOf(dimKey) {
+  return STATS_DIMS[dimKey].label || ((value) => value);
 }
 
 /* Дни среза по порядку времени (не больше 16 последних). */
@@ -2248,7 +2408,7 @@ function statsDays(entries) {
 }
 
 /* Ряды для «Графика»: по каждому значению — счёт на каждый день. */
-function seriesByDay(entries, keyOf, colorOf, topN) {
+function seriesByDay(entries, keyOf, colorOf, labelOf, topN) {
   const days = statsDays(entries);
   const at = new Map(days.map((day, index) => [day.day, index]));
   const names = tallyBy(entries, keyOf).slice(0, topN);
@@ -2259,20 +2419,20 @@ function seriesByDay(entries, keyOf, colorOf, topN) {
       const index = at.get(entry.day);
       if (index != null) points[index] += 1;
     }
-    return { name, total, points, color: colorOf(name) };
+    return { name, label: labelOf(name), total, points, color: colorOf(name) };
   });
   return { days, series };
 }
 
-function legendChip(name, total, color, state, pick) {
+function legendChip(label, total, color, state, pick) {
   const chip = document.createElement("button");
   chip.type = "button";
   chip.className = `lchip${state}`;
   chip.title = state === " is-on" ? "Снять фильтр" : "Показать все ID с этим значением";
   const mark = el("i");
   mark.style.background = color;
-  chip.append(mark, el("span", null, name), el("b", null, String(total)));
-  chip.addEventListener("click", () => pick(name));
+  chip.append(mark, el("span", null, label), el("b", null, String(total)));
+  chip.addEventListener("click", pick);
   return chip;
 }
 
@@ -2280,14 +2440,135 @@ function chipState(active, name) {
   return active === name ? " is-on" : active ? " is-dim" : "";
 }
 
-function renderLineChart(hostId, data, options) {
-  const host = $(hostId);
-  if (!host) return;
-  host.innerHTML = "";
+/* ---- гистограмма: горизонтальные полосы ---- */
 
+function renderBarChart(host, rows, options) {
+  host.innerHTML = "";
+  if (!rows.length) {
+    chartEmpty(host, options.empty);
+    return;
+  }
+
+  const top = rows.slice(0, 10);
+  const max = Math.max(...top.map(([, count]) => count)) || 1;
+  for (const [value, count] of top) {
+    const active = options.active;
+    const row = document.createElement("button");
+    row.type = "button";
+    row.className = `hbar${chipState(active, value)}`;
+    row.title = active === value ? "Снять фильтр" : "Показать все ID с этим значением";
+    row.addEventListener("click", () => options.pick(value));
+
+    const label = el("span", "hbar__label", options.labelOf(value));
+    label.title = options.labelOf(value);
+    const track = el("span", "hbar__track");
+    const fill = el("i", "hbar__fill");
+    fill.style.width = `${Math.max(3, (count / max) * 100)}%`;
+    fill.style.background = options.colorPerValue ? options.colorPerValue(value) : options.color;
+    track.appendChild(fill);
+    const num = el("span", "hbar__value", String(count));
+
+    row.append(label, track, num);
+    host.appendChild(row);
+  }
+
+  const feet = [];
+  if (rows.length > top.length) {
+    const rest = rows.slice(top.length).reduce((sum, [, count]) => sum + count, 0);
+    feet.push(`за десяткой ещё ${rows.length - top.length} — на них ${rest} ID`);
+  }
+  if (options.foot) feet.push(options.foot);
+  if (feet.length) host.appendChild(el("p", "bars__foot", feet.join(" · ")));
+}
+
+/* ---- столбики: слои есть / нет / не вышло, зазор 2px ---- */
+
+function renderColsChart(host, slice, dimKey, options) {
+  host.innerHTML = "";
+  const dim = STATS_DIMS[dimKey];
+  const labelOf = dimLabelOf(dimKey);
+  const rows = dimRows(dimKey, slice);
+  const top = rows.length > 12 && !dim.ordered ? rows.slice(0, 12) : rows.slice(0, 16);
+  if (!top.length) {
+    chartEmpty(host, options.empty);
+    return;
+  }
+
+  const split = new Map(top.map(([value]) => [value, { hit: 0, miss: 0, issue: 0 }]));
+  for (const entry of slice) {
+    const bucket = split.get(dim.of(entry));
+    if (bucket) bucket[classify(entry.item)] += 1;
+  }
+
+  let totals = { hit: 0, miss: 0, issue: 0 };
+  for (const counts of split.values()) {
+    totals.hit += counts.hit;
+    totals.miss += counts.miss;
+    totals.issue += counts.issue;
+  }
+
+  const legend = el("div", "legend");
+  const key = (color, text) => {
+    const item = el("span", "legend__item", text);
+    const mark = el("i");
+    mark.style.background = color;
+    item.prepend(mark);
+    legend.appendChild(item);
+  };
+  key(VERDICT_COLORS.hit, `склад есть · ${totals.hit}`);
+  key(VERDICT_COLORS.miss, `склада нет · ${totals.miss}`);
+  if (totals.issue) key(VERDICT_COLORS.issue, `не вышло · ${totals.issue}`);
+  host.appendChild(legend);
+
+  const cols = el("div", "cols");
+  const PLOT = 108;
+  const max = Math.max(...top.map(([value]) => {
+    const counts = split.get(value);
+    return counts.hit + counts.miss + counts.issue;
+  })) || 1;
+
+  for (const [value] of top) {
+    const counts = split.get(value);
+    const total = counts.hit + counts.miss + counts.issue;
+    const active = options.active;
+    const col = document.createElement("button");
+    col.type = "button";
+    col.className = `col${chipState(active, value)}`;
+    col.title = active === value ? "Снять фильтр" : `Показать все ID: ${labelOf(value)}`;
+    col.addEventListener("click", () => options.pick(value));
+
+    col.appendChild(el("span", "col__cap", String(total)));
+    const stack = el("span", "col__stack");
+    /* Сверху вниз: не вышло, склада нет, склад есть — жёлтое у основания. */
+    const parts = [
+      [VERDICT_COLORS.issue, counts.issue],
+      [VERDICT_COLORS.miss, counts.miss],
+      [VERDICT_COLORS.hit, counts.hit]
+    ];
+    for (const [color, count] of parts) {
+      if (!count) continue;
+      const seg = el("i", "col__seg");
+      seg.style.background = color;
+      seg.style.height = `${Math.max(3, Math.round((count / max) * PLOT))}px`;
+      stack.appendChild(seg);
+    }
+    col.appendChild(stack);
+    col.appendChild(el("span", "col__day", labelOf(value)));
+    cols.appendChild(col);
+  }
+  host.appendChild(cols);
+  if (rows.length > top.length) {
+    host.appendChild(el("p", "bars__foot", `показаны первые ${top.length} из ${rows.length}`));
+  }
+}
+
+/* ---- график: линии по дням ---- */
+
+function renderLineChart(host, data, options) {
+  host.innerHTML = "";
   const { days, series } = data;
   if (!days.length || !series.length) {
-    chartEmpty(host, options.empty || "Под фильтры ничего не попало.");
+    chartEmpty(host, options.empty);
     return;
   }
 
@@ -2318,7 +2599,7 @@ function renderLineChart(hostId, data, options) {
       dot.style.left = `${xOf(index)}%`;
       dot.style.top = `${yOf(value)}%`;
       dot.style.background = line.color;
-      dot.title = `${line.name} · ${days[index].day}: ${value}`;
+      dot.title = `${line.label} · ${days[index].day}: ${value}`;
       plot.appendChild(dot);
     });
   }
@@ -2331,30 +2612,37 @@ function renderLineChart(hostId, data, options) {
 
   const legend = el("div", "lchips");
   for (const line of series) {
-    legend.appendChild(legendChip(line.name, line.total, line.color, chipState(options.active, line.name), options.pick));
+    legend.appendChild(
+      legendChip(line.label, line.total, line.color, chipState(options.active, line.name), () => options.pick(line.name))
+    );
   }
   box.appendChild(legend);
   if (options.foot) box.appendChild(el("p", "bars__foot", options.foot));
   host.appendChild(box);
 }
 
-function renderDonutChart(hostId, rows, options) {
-  const host = $(hostId);
-  if (!host) return;
-  host.innerHTML = "";
+/* ---- диаграмма: доли кольцом ---- */
 
+function renderDonutChart(host, rows, options) {
+  host.innerHTML = "";
   if (!rows.length) {
-    chartEmpty(host, options.empty || "Под фильтры ничего не попало.");
+    chartEmpty(host, options.empty);
     return;
   }
 
   const top = rows.slice(0, 5);
   const rest = rows.slice(5);
   const restCount = rest.reduce((sum, [, count]) => sum + count, 0);
-  const segments = [...top.map(([name, count], index) => ({
-    name, count, color: options.colorOf(name, index), pickable: true
-  }))];
-  if (restCount) segments.push({ name: `остальные · ${rest.length}`, count: restCount, color: STATS_REST, pickable: false });
+  const segments = top.map(([name, count]) => ({
+    name,
+    label: options.labelOf(name),
+    count,
+    color: options.colorOf(name),
+    pickable: true
+  }));
+  if (restCount) {
+    segments.push({ name: "", label: `остальные · ${rest.length}`, count: restCount, color: STATS_REST, pickable: false });
+  }
 
   const total = segments.reduce((sum, seg) => sum + seg.count, 0) || 1;
   const box = el("div", "donut");
@@ -2379,7 +2667,7 @@ function renderDonutChart(hostId, rows, options) {
     circle.setAttribute("stroke-dashoffset", String(-offset));
     circle.setAttribute("transform", "rotate(-90 60 60)");
     const title = document.createElementNS("http://www.w3.org/2000/svg", "title");
-    title.textContent = `${seg.name}: ${seg.count}`;
+    title.textContent = `${seg.label}: ${seg.count}`;
     circle.appendChild(title);
     if (seg.pickable) circle.addEventListener("click", () => options.pick(seg.name));
     svg.appendChild(circle);
@@ -2396,19 +2684,21 @@ function renderDonutChart(hostId, rows, options) {
   centerLabel.setAttribute("x", "60");
   centerLabel.setAttribute("y", "74");
   centerLabel.setAttribute("class", "donut__label");
-  centerLabel.textContent = options.centerLabel || "ID";
+  centerLabel.textContent = "ID";
   svg.appendChild(centerLabel);
   box.appendChild(svg);
 
   const legend = el("div", "lchips lchips--column");
   for (const seg of segments) {
     if (seg.pickable) {
-      legend.appendChild(legendChip(seg.name, seg.count, seg.color, chipState(options.active, seg.name), options.pick));
+      legend.appendChild(
+        legendChip(seg.label, seg.count, seg.color, chipState(options.active, seg.name), () => options.pick(seg.name))
+      );
     } else {
       const still = el("span", "lchip is-rest");
       const mark = el("i");
       mark.style.background = seg.color;
-      still.append(mark, el("span", null, seg.name), el("b", null, String(seg.count)));
+      still.append(mark, el("span", null, seg.label), el("b", null, String(seg.count)));
       legend.appendChild(still);
     }
   }
@@ -2416,232 +2706,355 @@ function renderDonutChart(hostId, rows, options) {
   host.appendChild(box);
 }
 
-function renderStatsCharts() {
-  const cellSlice = statsIndex.filter(
-    (entry) => passesStats(entry, new Set(["cell"])) && entry.blame.kind === "cell" && entry.blame.value
-  );
-  const placeSlice = statsIndex.filter(
-    (entry) => passesStats(entry, new Set(["place"])) && entry.blame.kind === "place" && entry.blame.value
-  );
-  const statusSlice = statsIndex.filter((entry) => passesStats(entry, new Set(["status"])));
-  const daySlice = statsIndex.filter((entry) => passesStats(entry, new Set(["day"])) && entry.day);
+/* ---- сами панели ---- */
 
-  const dims = [
-    {
-      host: "chart-cells",
-      slice: cellSlice,
-      keyOf: (entry) => entry.blame.value,
-      colors: statsColors.cell,
-      barColor: "var(--viz-hit)",
-      key: "cell",
-      empty: "Ни одного ID с найденным складом под фильтрами."
-    },
-    {
-      host: "chart-places",
-      slice: placeSlice,
-      keyOf: (entry) => entry.blame.value,
-      colors: statsColors.place,
-      barColor: "var(--viz-miss)",
-      key: "place",
-      empty: "Ни одного ID без склада под фильтрами."
-    },
-    {
-      host: "chart-status",
-      slice: statusSlice,
-      keyOf: (entry) => entry.item.report?.status || "",
-      colors: statsColors.status,
-      barColor: "var(--viz-blue)",
-      key: "status",
-      empty: "Статусы не прочитались."
-    }
-  ];
+/*
+ * Заголовок панели — он же выбор измерения: стрелка вниз показывает, что
+ * название можно сменить. Раньше рядом с заголовком стоял селект с тем же
+ * словом, и название дублировалось.
+ */
+function panelTitle(value, entries, onChange) {
+  const box = el("div", "ptitle");
+  const button = el("button", "ptitle__btn");
+  button.type = "button";
+  button.title = "Выбрать, что показывать";
+  const label = entries.find(([key]) => key === value)?.[1] || value;
+  button.appendChild(el("h3", null, label));
+  const caret = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  caret.setAttribute("viewBox", "0 0 12 12");
+  caret.setAttribute("class", "ptitle__caret");
+  caret.setAttribute("aria-hidden", "true");
+  const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+  path.setAttribute("d", "M2.5 4.5 6 8l3.5-3.5");
+  path.setAttribute("fill", "none");
+  path.setAttribute("stroke", "currentColor");
+  path.setAttribute("stroke-width", "1.6");
+  path.setAttribute("stroke-linecap", "round");
+  path.setAttribute("stroke-linejoin", "round");
+  caret.appendChild(path);
+  button.appendChild(caret);
 
-  for (const dim of dims) {
-    const active = statsFilters[dim.key];
-    const pick = (value) => toggleStatsFilter(dim.key, value);
-    const colorOf = (name) => dim.colors.get(name) || STATS_REST;
-
-    if (statsMode === "line") {
-      renderLineChart(dim.host, seriesByDay(dim.slice, dim.keyOf, colorOf, 3), {
-        active,
-        pick,
-        empty: dim.empty,
-        foot: tallyBy(dim.slice, dim.keyOf).length > 3 ? "линии — три самых частых значения; остальное в гистограмме" : ""
-      });
-      continue;
-    }
-    if (statsMode === "donut") {
-      renderDonutChart(dim.host, tallyBy(dim.slice, dim.keyOf), {
-        active,
-        pick,
-        colorOf,
-        empty: dim.empty
-      });
-      continue;
-    }
-
-    const rows = tallyBy(dim.slice, dim.keyOf);
-    const missing =
-      dim.key === "cell"
-        ? statsIndex.filter((entry) => passesStats(entry, new Set(["cell"])) && entry.blame.kind === "cell" && !entry.blame.value).length
-        : dim.key === "place"
-          ? statsIndex.filter((entry) => passesStats(entry, new Set(["place"])) && entry.blame.kind === "place" && !entry.blame.value).length
-          : 0;
-    renderBarChart(dim.host, rows, {
-      color: dim.barColor,
-      active,
-      pick,
-      foot: missing ? `${dim.key === "cell" ? "ячейка" : "склад"} не прочиталась: ${missing}` : "",
-      empty: dim.empty
-    });
+  /* Настоящий select лежит поверх кнопки прозрачным слоем: так работают и
+     клавиатура, и родное меню системы, а рисуем мы своё. */
+  const select = document.createElement("select");
+  select.className = "ptitle__select";
+  select.setAttribute("aria-label", "Что показывать");
+  for (const [key, title] of entries) {
+    const option = document.createElement("option");
+    option.value = key;
+    option.textContent = title;
+    select.appendChild(option);
   }
+  select.value = value;
+  select.addEventListener("change", () => onChange(select.value));
 
-  renderDaysPanel(daySlice);
+  box.append(button, select);
+  return box;
 }
 
-/* «По дням»: столбики, две линии есть/нет или доли дней синей лентой. */
-function renderDaysPanel(slice) {
-  const legend = $("stats-legend");
-
-  if (statsMode === "line") {
-    if (legend) legend.innerHTML = "";
-    const data = seriesByDay(
-      slice.filter((entry) => classify(entry.item) !== "issue"),
-      (entry) => (classify(entry.item) === "hit" ? "склад есть" : "склада нет"),
-      (name) => (name === "склад есть" ? "var(--viz-hit)" : "var(--viz-miss)"),
-      2
-    );
-    renderLineChart("chart-days", data, {
-      active: statsFilters.verdict === "hit" ? "склад есть" : statsFilters.verdict === "miss" ? "склада нет" : "",
-      pick: (name) => toggleStatsFilter("verdict", name === "склад есть" ? "hit" : "miss"),
-      empty: "Дат верхних операций не нашлось."
-    });
-    return;
+function panelSelect(value, entries, onChange) {
+  const pick = el("label", "pick pick--panel");
+  const select = document.createElement("select");
+  for (const [key, title] of entries) {
+    const option = document.createElement("option");
+    option.value = key;
+    option.textContent = title;
+    select.appendChild(option);
   }
-
-  if (statsMode === "donut") {
-    if (legend) legend.innerHTML = "";
-    const days = statsDays(slice);
-    const shade = new Map(
-      days.map((day, index) => [
-        day.day,
-        DAY_RAMP[days.length === 1 ? 2 : Math.round((index * (DAY_RAMP.length - 1)) / (days.length - 1))]
-      ])
-    );
-    renderDonutChart("chart-days", tallyBy(slice, (entry) => entry.day), {
-      active: statsFilters.day,
-      pick: (value) => toggleStatsFilter("day", value),
-      colorOf: (name) => shade.get(name) || STATS_REST,
-      centerLabel: "ID",
-      empty: "Дат верхних операций не нашлось."
-    });
-    return;
-  }
-
-  renderDaysChart(slice);
+  select.value = value;
+  select.addEventListener("change", () => onChange(select.value));
+  pick.appendChild(select);
+  return pick;
 }
 
-/* Колонки по дням: снизу «склад есть», сверху «склада нет», зазор 2px. */
-function renderDaysChart(slice) {
-  const host = $("chart-days");
-  const legend = $("stats-legend");
-  if (!host) return;
-  host.innerHTML = "";
+function updatePanel(index, patch) {
+  statsPanels[index] = { ...statsPanels[index], ...patch };
+  persistStatsPanels();
+  renderStats();
+}
 
-  const byDay = new Map();
-  for (const entry of slice) {
-    const bucket = byDay.get(entry.day) || { day: entry.day, ts: entry.dayTs, hit: 0, miss: 0 };
-    bucket.ts = Math.min(bucket.ts, entry.dayTs);
-    const kind = classify(entry.item);
-    if (kind === "hit") bucket.hit += 1;
-    else if (kind === "miss") bucket.miss += 1;
-    byDay.set(entry.day, bucket);
+/*
+ * Панели фасетные: каждая считается по срезу без собственного фильтра,
+ * поэтому клик по значению не схлопывает картину, а подсвечивает выбранное
+ * и пригашает остальное; повторный клик снимает фильтр.
+ */
+function renderStatsPanel(panel, index) {
+  const dim = STATS_DIMS[panel.dim];
+  const section = el("section", "panel glass spanel");
+  section.dataset.dim = panel.dim;
+  section.dataset.viz = panel.viz;
+
+  const head = el("div", "spanel__head");
+  head.appendChild(
+    panelTitle(panel.dim, Object.entries(STATS_DIMS).map(([key, entry]) => [key, entry.title]), (next) =>
+      updatePanel(index, { dim: next })
+    )
+  );
+  const tools = el("div", "spanel__tools");
+  tools.appendChild(
+    panelSelect(panel.viz, Object.entries(STATS_VIZ), (next) => updatePanel(index, { viz: next }))
+  );
+  if (statsPanels.length > 1) {
+    const drop = el("button", "spanel__drop", "×");
+    drop.type = "button";
+    drop.title = "Убрать панель";
+    drop.addEventListener("click", () => {
+      statsPanels.splice(index, 1);
+      persistStatsPanels();
+      renderStats();
+    });
+    tools.appendChild(drop);
   }
+  head.appendChild(tools);
+  section.appendChild(head);
+  if (dim.sub) section.appendChild(el("p", "spanel__note", dim.sub));
 
-  let days = [...byDay.values()].sort((a, b) => a.ts - b.ts);
-  if (days.length > 16) days = days.slice(-16);
+  const chart = el("div", panel.viz === "bars" ? "bars" : "pchart");
+  section.appendChild(chart);
 
-  let hits = 0;
-  let misses = 0;
-  for (const day of days) {
-    hits += day.hit;
-    misses += day.miss;
-  }
-  if (legend) {
-    legend.innerHTML = "";
-    const key = (color, text) => {
-      const item = el("span", "legend__item", text);
-      const mark = el("i");
-      mark.style.background = color;
-      item.prepend(mark);
-      legend.appendChild(item);
-    };
-    key("var(--viz-hit)", `склад есть · ${hits}`);
-    key("var(--viz-miss)", `склада нет · ${misses}`);
-  }
+  const slice = statsIndex.filter(
+    (entry) => passesStats(entry, new Set([dim.filter])) && dim.of(entry)
+  );
+  const active = statsFilters[dim.filter];
+  const pick = (value) => toggleStatsFilter(dim.filter, value);
+  const labelOf = dimLabelOf(panel.dim);
+  const colorOf = dimColorOf(panel.dim, slice);
+  const empty = "Под фильтры ничего не попало.";
 
-  if (!days.length) {
-    chartEmpty(host, "Дат верхних операций не нашлось.");
-    return;
-  }
-
-  const PLOT = 108;
-  const max = Math.max(...days.map((day) => day.hit + day.miss)) || 1;
-  for (const day of days) {
-    const active = statsFilters.day;
-    const col = document.createElement("button");
-    col.type = "button";
-    col.className = `col${active === day.day ? " is-on" : active ? " is-dim" : ""}`;
-    col.title = active === day.day ? "Снять фильтр" : `Показать все ID за ${day.day}`;
-    col.addEventListener("click", () => toggleStatsFilter("day", day.day));
-
-    col.appendChild(el("span", "col__cap", String(day.hit + day.miss)));
-    const stack = el("span", "col__stack");
-    /* Сверху вниз: «склада нет», потом «склад есть» — жёлтое у основания. */
-    const parts = [
-      ["col__seg col__seg--miss", day.miss],
-      ["col__seg col__seg--hit", day.hit]
-    ];
-    for (const [className, count] of parts) {
-      if (!count) continue;
-      const seg = el("i", className);
-      seg.style.height = `${Math.max(3, Math.round((count / max) * PLOT))}px`;
-      stack.appendChild(seg);
+  if (panel.viz === "line") {
+    if (panel.dim === "day") {
+      /* Дни по дням выродились бы в диагональ — рисуем линии есть/нет. */
+      const data = seriesByDay(
+        slice.filter((entry) => classify(entry.item) !== "issue"),
+        (entry) => classify(entry.item),
+        (value) => VERDICT_COLORS[value],
+        (value) => VERDICT_WORDS[value],
+        2
+      );
+      renderLineChart(chart, data, {
+        active: statsFilters.verdict,
+        pick: (value) => toggleStatsFilter("verdict", value),
+        empty
+      });
+    } else {
+      const rows = tallyBy(slice, dim.of);
+      renderLineChart(chart, seriesByDay(slice, dim.of, colorOf, labelOf, 3), {
+        active,
+        pick,
+        empty,
+        foot: rows.length > 3 ? "линии — три самых частых значения; остальное в гистограмме" : ""
+      });
     }
-    col.appendChild(stack);
-    col.appendChild(el("span", "col__day", day.day));
-    host.appendChild(col);
+    return section;
   }
+
+  if (panel.viz === "donut") {
+    renderDonutChart(chart, dimRows(panel.dim, slice), { active, pick, colorOf, labelOf, empty });
+    return section;
+  }
+
+  if (panel.viz === "cols") {
+    renderColsChart(chart, slice, panel.dim, { active, pick, empty });
+    return section;
+  }
+
+  const missing =
+    panel.dim === "cell" || panel.dim === "place"
+      ? statsIndex.filter(
+          (entry) =>
+            passesStats(entry, new Set([dim.filter])) && entry.blame.kind === panel.dim && !entry.blame.value
+        ).length
+      : 0;
+  renderBarChart(chart, dimRows(panel.dim, slice), {
+    color: dim.hue || "var(--viz-blue)",
+    colorPerValue: dim.color || null,
+    labelOf,
+    active,
+    pick,
+    empty,
+    foot: missing ? `${panel.dim === "cell" ? "ячейка" : "склад"} не прочиталась: ${missing}` : ""
+  });
+  return section;
+}
+
+function renderStatsPanels() {
+  const grid = $("stats-panels");
+  if (!grid) return;
+  grid.innerHTML = "";
+  statsPanels.forEach((panel, index) => {
+    if (!STATS_DIMS[panel.dim] || !STATS_VIZ[panel.viz]) return;
+    grid.appendChild(renderStatsPanel(panel, index));
+  });
+  const addBtn = $("stats-add");
+  if (addBtn) addBtn.disabled = statsPanels.length >= MAX_PANELS;
 }
 
 /* ---- таблица ---- */
 
-const STATS_SORT_VALUES = {
-  id: (entry) => entry.item.posting,
-  number: (entry) => entry.item.report?.number || "",
-  verdict: (entry) => {
-    const kind = classify(entry.item);
-    return kind === "hit" ? 0 : kind === "miss" ? 1 : 2;
+/*
+ * Столбцы таблицы — набор, который собирает пользователь: какие показать и
+ * в каком порядке. Каждый умеет три вещи: значение для сортировки, текст
+ * для выгрузки и разметку для страницы. Excel забирает ровно то же, что
+ * видно на экране, — те же столбцы, тот же порядок, те же фильтры.
+ */
+const STATS_COLUMNS = {
+  id: {
+    title: "ID",
+    width: 26,
+    sort: (entry) => entry.item.posting,
+    text: (entry) => entry.item.posting,
+    link: (entry) => hubUrl(entry.item.posting),
+    cell: (entry, td) => {
+      td.className = "t-id";
+      /* Сам ID и есть ссылка в Hub — и в таблице, и в выгрузке. */
+      const link = el("a", "t-id__code", entry.item.posting);
+      link.href = hubUrl(entry.item.posting);
+      link.target = "_blank";
+      link.rel = "noopener noreferrer";
+      link.title = "Открыть отправление в Hub";
+      td.appendChild(link);
+      const open = el("button", "t-open", "детализация");
+      open.type = "button";
+      open.title = "Открыть этот ID в детализации";
+      open.dataset.posting = entry.item.posting;
+      td.appendChild(open);
+    }
   },
-  blame: (entry) => entry.blame.value || "",
-  at: (entry) => {
-    const date = parseHubDate(entry.blame.at);
-    return date ? date.getTime() : 0;
+  number: {
+    title: "Номер",
+    width: 22,
+    sort: (entry) => entry.item.report?.number || "",
+    text: (entry) => entry.item.report?.number || "",
+    cell: (entry, td) => {
+      td.className = "t-number";
+      td.textContent = entry.item.report?.number || "—";
+    }
   },
-  bucket: (entry) => {
-    const at = BUCKET_ORDER.indexOf(entry.bucket);
-    return at < 0 ? BUCKET_ORDER.length : at;
+  verdict: {
+    title: "Результат",
+    width: 14,
+    sort: (entry) => {
+      const kind = classify(entry.item);
+      return kind === "hit" ? 0 : kind === "miss" ? 1 : 2;
+    },
+    text: (entry) => verdictOf(entry.item).text,
+    cell: (entry, td) => {
+      const verdict = verdictOf(entry.item);
+      td.appendChild(el("span", `card__verdict ${verdict.className}`, verdict.text));
+    }
   },
-  status: (entry) => entry.item.report?.status || "",
-  op: (entry) => entry.op || ""
+  blame: {
+    title: "Ячейка / склад",
+    width: 34,
+    sort: (entry) => entry.blame.value || "",
+    text: (entry) => entry.blame.value || "",
+    cell: (entry, td) => {
+      if (entry.blame.kind === "none") {
+        td.appendChild(el("span", "t-none", "—"));
+        return;
+      }
+      if (!entry.blame.value) {
+        td.appendChild(el("span", "t-none", `${BLAME_TAGS[entry.blame.kind]} не прочиталась`));
+        return;
+      }
+      const chip = el("button", `t-blame t-blame--${entry.blame.kind}`);
+      chip.type = "button";
+      chip.title = "Показать все ID с этим значением";
+      chip.dataset.kind = entry.blame.kind;
+      chip.dataset.value = entry.blame.value;
+      chip.appendChild(el("i", null, BLAME_TAGS[entry.blame.kind]));
+      chip.appendChild(el("span", null, entry.blame.value));
+      td.appendChild(chip);
+    }
+  },
+  kind: {
+    title: "Что это",
+    width: 14,
+    sort: (entry) => BLAME_TAGS[entry.blame.kind] || "",
+    text: (entry) => BLAME_TAGS[entry.blame.kind] || "",
+    cell: (entry, td) => {
+      td.textContent = BLAME_TAGS[entry.blame.kind] || "—";
+    }
+  },
+  at: {
+    title: "Когда",
+    width: 22,
+    sort: (entry) => {
+      const date = parseHubDate(entry.blame.at);
+      return date ? date.getTime() : 0;
+    },
+    text: (entry) => entry.blame.at || "",
+    cell: (entry, td) => {
+      td.className = "t-when";
+      td.textContent = entry.blame.at || "—";
+    }
+  },
+  bucket: {
+    title: "Корзинка",
+    width: 13,
+    sort: (entry) => {
+      const at = BUCKET_ORDER.indexOf(entry.bucket);
+      return at < 0 ? BUCKET_ORDER.length : at;
+    },
+    text: (entry) => entry.bucket || "",
+    cell: (entry, td) => {
+      td.textContent = entry.bucket || "—";
+    }
+  },
+  status: {
+    title: "Статус",
+    width: 26,
+    sort: (entry) => entry.item.report?.status || "",
+    text: (entry) => entry.item.report?.status || "",
+    cell: (entry, td) => {
+      td.textContent = entry.item.report?.status || "—";
+    }
+  },
+  op: {
+    title: "Операция",
+    width: 20,
+    sort: (entry) => entry.op || "",
+    text: (entry) => entry.op || "",
+    cell: (entry, td) => {
+      td.textContent = entry.op || "—";
+    }
+  },
+  user: {
+    title: "Пользователь",
+    width: 32,
+    sort: (entry) => entry.user || "",
+    text: (entry) => entry.user || "",
+    cell: (entry, td) => {
+      td.textContent = entry.user || "—";
+    }
+  },
+  hour: {
+    title: "Час",
+    width: 10,
+    sort: (entry) => Number(String(entry.hour).slice(0, 2)) || 0,
+    text: (entry) => entry.hour || "",
+    cell: (entry, td) => {
+      td.className = "t-when";
+      td.textContent = entry.hour || "—";
+    }
+  }
 };
 
+const DEFAULT_STATS_COLS = ["id", "number", "verdict", "blame", "at", "bucket", "status", "op"];
+let statsCols = DEFAULT_STATS_COLS.slice();
+
+function persistStatsCols() {
+  void storageGet([STORAGE_SETTINGS]).then((saved) =>
+    storageSet({ [STORAGE_SETTINGS]: { ...(saved[STORAGE_SETTINGS] || {}), statsCols } })
+  );
+}
+
 function sortStats(entries) {
-  const value = STATS_SORT_VALUES[statsSort.key] || STATS_SORT_VALUES.at;
+  const column = STATS_COLUMNS[statsSort.key] || STATS_COLUMNS.at;
   const dir = statsSort.dir;
   return [...entries].sort((a, b) => {
-    const left = value(a);
-    const right = value(b);
+    const left = column.sort(a);
+    const right = column.sort(b);
     const cmp =
       typeof left === "number" && typeof right === "number"
         ? left - right
@@ -2652,86 +3065,175 @@ function sortStats(entries) {
 
 const STATS_ROW_LIMIT = 500;
 
+/* ---- шапка: заголовки, сортировка, перетаскивание ---- */
+
+let dragCol = "";
+
+function renderStatsHead() {
+  const head = $("stats-head");
+  if (!head) return;
+  head.innerHTML = "";
+
+  statsCols.forEach((key) => {
+    const column = STATS_COLUMNS[key];
+    if (!column) return;
+    const th = document.createElement("th");
+    th.dataset.sort = key;
+    th.draggable = true;
+    th.textContent = column.title;
+    th.title = "Клик — сортировка, перетаскиванием — порядок столбцов";
+    th.classList.toggle("is-sorted", key === statsSort.key);
+    th.classList.toggle("is-desc", key === statsSort.key && statsSort.dir < 0);
+
+    th.addEventListener("dragstart", (event) => {
+      dragCol = key;
+      th.classList.add("is-dragging");
+      event.dataTransfer.effectAllowed = "move";
+      /* Firefox не начинает перетаскивание без данных. */
+      event.dataTransfer.setData("text/plain", key);
+    });
+    th.addEventListener("dragend", () => {
+      dragCol = "";
+      for (const cell of $$("#stats-head th")) cell.classList.remove("is-dragging", "is-over");
+    });
+    th.addEventListener("dragover", (event) => {
+      if (!dragCol || dragCol === key) return;
+      event.preventDefault();
+      th.classList.add("is-over");
+    });
+    th.addEventListener("dragleave", () => th.classList.remove("is-over"));
+    th.addEventListener("drop", (event) => {
+      event.preventDefault();
+      th.classList.remove("is-over");
+      if (!dragCol || dragCol === key) return;
+      const from = statsCols.indexOf(dragCol);
+      const to = statsCols.indexOf(key);
+      if (from < 0 || to < 0) return;
+      statsCols.splice(to, 0, ...statsCols.splice(from, 1));
+      persistStatsCols();
+      smooth(renderStats);
+    });
+
+    head.appendChild(th);
+  });
+}
+
+/* ---- меню столбцов ---- */
+
+function renderColMenu() {
+  const box = $("stats-colmenu");
+  if (!box) return;
+  box.innerHTML = "";
+
+  const hint = el("p", "colmenu__hint", "Отметьте столбцы; порядок меняется перетаскиванием заголовков.");
+  box.appendChild(hint);
+
+  const list = el("div", "colmenu__list");
+  for (const [key, column] of Object.entries(STATS_COLUMNS)) {
+    const on = statsCols.includes(key);
+    const row = el("label", `colmenu__row${on ? " is-on" : ""}`);
+    const box2 = document.createElement("input");
+    box2.type = "checkbox";
+    box2.checked = on;
+    box2.addEventListener("change", () => {
+      if (box2.checked) {
+        if (!statsCols.includes(key)) statsCols.push(key);
+      } else {
+        if (statsCols.length <= 1) {
+          box2.checked = true;
+          return;
+        }
+        statsCols = statsCols.filter((name) => name !== key);
+        if (statsSort.key === key) statsSort = { key: statsCols[0], dir: 1 };
+      }
+      persistStatsCols();
+      smooth(renderStats);
+    });
+    row.append(box2, el("span", null, column.title));
+    list.appendChild(row);
+  }
+  box.appendChild(list);
+
+  const reset = el("button", "btn btn--ghost btn--sm", "Стандартные столбцы");
+  reset.type = "button";
+  reset.addEventListener("click", () => {
+    statsCols = DEFAULT_STATS_COLS.slice();
+    statsSort = { key: "at", dir: -1 };
+    persistStatsCols();
+    smooth(renderStats);
+  });
+  box.appendChild(reset);
+}
+
 function renderStatsTable(shown) {
   const body = $("stats-rows");
   if (!body) return;
   body.innerHTML = "";
 
-  for (const th of $$("#stats-table th[data-sort]")) {
-    th.classList.toggle("is-sorted", th.dataset.sort === statsSort.key);
-    th.classList.toggle("is-desc", th.dataset.sort === statsSort.key && statsSort.dir < 0);
-  }
+  renderStatsHead();
 
   const rows = sortStats(shown);
   const count = $("stats-table-count");
   if (count) {
     count.textContent =
-      rows.length > STATS_ROW_LIMIT ? `показаны первые ${STATS_ROW_LIMIT} из ${rows.length}` : `${rows.length} строк`;
+      rows.length > STATS_ROW_LIMIT ? `первые ${STATS_ROW_LIMIT} из ${rows.length}` : `${rows.length} строк`;
   }
 
   if (!rows.length) {
     const tr = document.createElement("tr");
     const td = el("td", "t-none", "Под фильтры ничего не попало — смягчите их или очистите поиск.");
-    td.colSpan = 9;
+    td.colSpan = Math.max(1, statsCols.length);
     tr.appendChild(td);
     body.appendChild(tr);
     return;
   }
 
   for (const entry of rows.slice(0, STATS_ROW_LIMIT)) {
-    const item = entry.item;
-    const report = item.report || {};
     const tr = document.createElement("tr");
-
-    /* Кнопка перехода в детализацию живёт прямо около ID. */
-    const idCell = el("td", "t-id");
-    idCell.appendChild(el("span", "t-id__code", item.posting));
-    const open = el("button", "t-open", "детализация");
-    open.type = "button";
-    open.title = "Открыть этот ID в детализации";
-    open.dataset.posting = item.posting;
-    idCell.appendChild(open);
-    tr.appendChild(idCell);
-
-    tr.appendChild(el("td", "t-number", report.number || "—"));
-
-    const verdictCell = document.createElement("td");
-    const verdict = verdictOf(item);
-    verdictCell.appendChild(el("span", `card__verdict ${verdict.className}`, verdict.text));
-    tr.appendChild(verdictCell);
-
-    const blameCell = document.createElement("td");
-    if (entry.blame.kind === "none") {
-      blameCell.appendChild(el("span", "t-none", "—"));
-    } else if (!entry.blame.value) {
-      blameCell.appendChild(el("span", "t-none", `${BLAME_TAGS[entry.blame.kind]} не прочиталась`));
-    } else {
-      const chip = el("button", `t-blame t-blame--${entry.blame.kind}`);
-      chip.type = "button";
-      chip.title = "Показать все ID с этим виновником";
-      chip.dataset.kind = entry.blame.kind;
-      chip.dataset.value = entry.blame.value;
-      chip.appendChild(el("i", null, BLAME_TAGS[entry.blame.kind]));
-      chip.appendChild(el("span", null, entry.blame.value));
-      blameCell.appendChild(chip);
+    for (const key of statsCols) {
+      const column = STATS_COLUMNS[key];
+      if (!column) continue;
+      const td = document.createElement("td");
+      column.cell(entry, td);
+      tr.appendChild(td);
     }
-    tr.appendChild(blameCell);
-
-    tr.appendChild(el("td", "t-when", entry.blame.at || "—"));
-    tr.appendChild(el("td", null, entry.bucket || "—"));
-    tr.appendChild(el("td", null, report.status || "—"));
-    tr.appendChild(el("td", null, entry.op || "—"));
-
-    const hubCell = el("td", "t-hub");
-    const link = el("a", null, "Hub ↗");
-    link.href = hubUrl(item.posting);
-    link.target = "_blank";
-    link.rel = "noopener noreferrer";
-    hubCell.appendChild(link);
-    tr.appendChild(hubCell);
-
     body.appendChild(tr);
   }
+}
+
+/* ---- выгрузка ровно того, что на экране ---- */
+
+function statsRowsForExport() {
+  return sortStats(statsIndex.filter((entry) => passesStats(entry)));
+}
+
+function buildStatsXlsx() {
+  const cols = statsCols.filter((key) => STATS_COLUMNS[key]);
+  const rows = [cols.map((key) => ({ text: STATS_COLUMNS[key].title, style: xlsxStyles.STYLE_HEAD }))];
+
+  for (const entry of statsRowsForExport()) {
+    rows.push(
+      cols.map((key) => {
+        const column = STATS_COLUMNS[key];
+        const cell = { text: column.text(entry) };
+        if (column.link) cell.link = column.link(entry);
+        return cell;
+      })
+    );
+  }
+
+  return buildXlsxBlob({
+    sheets: [
+      {
+        name: "Аналитика",
+        columns: cols.map((key) => ({ title: STATS_COLUMNS[key].title, width: STATS_COLUMNS[key].width })),
+        rows,
+        headRow: 0,
+        freeze: 1,
+        autoFilter: true
+      }
+    ]
+  });
 }
 
 /* ---- фишки активных фильтров ---- */
@@ -2743,7 +3245,9 @@ function renderStatsChips() {
   const chips = [
     ["cell", "ячейка"],
     ["place", "склад"],
-    ["day", "день"]
+    ["day", "день"],
+    ["hour", "час"],
+    ["user", "пользователь"]
   ];
   for (const [key, label] of chips) {
     const value = statsFilters[key];
@@ -2766,16 +3270,6 @@ function renderStats() {
   if (!host) return;
 
   syncStatsControls();
-
-  const mode = $("stats-mode");
-  if (mode) {
-    const buttons = $$(".seg__btn", mode);
-    const at = buttons.findIndex((btn) => btn.dataset.viz === statsMode);
-    mode.style.setProperty("--seg-index", String(Math.max(0, at)));
-    mode.style.setProperty("--seg-count", String(buttons.length || 1));
-    for (const btn of buttons) btn.classList.toggle("is-on", btn.dataset.viz === statsMode);
-  }
-
   const shown = statsIndex.filter((entry) => passesStats(entry));
 
   const count = $("stats-count");
@@ -2788,7 +3282,7 @@ function renderStats() {
   if (reset) reset.hidden = !statsFiltersActive();
 
   renderStatsKpis(shown);
-  renderStatsCharts();
+  renderStatsPanels();
   renderStatsTable(shown);
   renderStatsChips();
 }
@@ -2841,10 +3335,42 @@ function mountStats() {
     renderStats();
   });
 
-  $("stats-mode")?.addEventListener("click", (event) => {
-    const btn = event.target.closest("[data-viz]");
-    if (!btn || btn.dataset.viz === statsMode) return;
-    statsMode = btn.dataset.viz;
+  $("stats-cols")?.addEventListener("click", () => {
+    const box = $("stats-colmenu");
+    const btn = $("stats-cols");
+    if (!box) return;
+    const open = box.hidden;
+    if (open) renderColMenu();
+    box.hidden = false;
+    /* Кадр на раскладку, потом класс — иначе перехода не будет. */
+    requestAnimationFrame(() => box.classList.toggle("is-open", open));
+    btn?.classList.toggle("is-on", open);
+    if (!open) window.setTimeout(() => { box.hidden = true; }, 240);
+  });
+
+  $("stats-xlsx")?.addEventListener("click", (event) => {
+    if (!statsIndex.length) return;
+    try {
+      saveBlob(buildStatsXlsx(), exportName("xlsx"));
+      flashCopied(event.currentTarget);
+    } catch (error) {
+      toast("error", `Не получилось собрать файл: ${String(error?.message || error)}`);
+    }
+  });
+
+  $("stats-add")?.addEventListener("click", () => {
+    if (statsPanels.length >= MAX_PANELS) return;
+    /* Новая панель — первое измерение, которого ещё нет на экране. */
+    const used = new Set(statsPanels.map((panel) => panel.dim));
+    const dim = Object.keys(STATS_DIMS).find((key) => !used.has(key)) || "verdict";
+    statsPanels.push({ dim, viz: "bars" });
+    persistStatsPanels();
+    renderStats();
+  });
+
+  $("stats-default")?.addEventListener("click", () => {
+    statsPanels = DEFAULT_PANELS.map((panel) => ({ ...panel }));
+    persistStatsPanels();
     renderStats();
   });
 
@@ -2866,6 +3392,8 @@ function mountStats() {
         const key = th.dataset.sort;
         if (statsSort.key === key) statsSort.dir = -statsSort.dir;
         else statsSort = { key, dir: key === "at" ? -1 : 1 };
+        /* Плавность здесь даёт сама таблица: строки въезжают своей
+           анимацией. Переход всей страницы тут только тормозил бы отклик. */
         renderStats();
       }
     });
@@ -2938,5 +3466,31 @@ function mountCredit() {
 }
 
 mountCredit();
+
+/* ------------------------------------------------------------------ */
+/* приветствие                                                         */
+/*                                                                     */
+/* Один оборот луча, одна найденная отметка, подпись — и приложение.   */
+/* Показываем раз за открытие вкладки и никогда не задерживаем работу: */
+/* приветствие живёт поверх, а загрузка идёт своим чередом.            */
+/* ------------------------------------------------------------------ */
+
+const SPLASH_MS = 2600;
+
+function playSplash() {
+  const splash = $("splash");
+  if (!splash) return;
+  if (REDUCED_MOTION.matches) {
+    splash.remove();
+    return;
+  }
+  splash.classList.add("is-on");
+  window.setTimeout(() => {
+    splash.classList.add("is-out");
+    window.setTimeout(() => splash.remove(), 700);
+  }, SPLASH_MS);
+}
+
+playSplash();
 
 void boot();
