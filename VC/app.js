@@ -1287,17 +1287,6 @@ $("btn-clear").addEventListener("click", () => {
   updateCount();
 });
 
-$("btn-paste").addEventListener("click", async () => {
-  try {
-    const text = await navigator.clipboard.readText();
-    if (!text) return;
-    postingsEl.value = postingsEl.value.trim() ? `${postingsEl.value.trim()}\n${text}` : text;
-    updateCount();
-  } catch (_err) {
-    showError("Нет доступа к буферу обмена.");
-  }
-});
-
 $("btn-file").addEventListener("click", () => $("file-input").click());
 $("file-input").addEventListener("change", (event) => {
   const file = event.target.files?.[0];
@@ -2917,7 +2906,13 @@ const STATS_COLUMNS = {
     link: (entry) => hubUrl(entry.item.posting),
     cell: (entry, td) => {
       td.className = "t-id";
-      td.appendChild(el("span", "t-id__code", entry.item.posting));
+      /* Сам ID и есть ссылка в Hub — и в таблице, и в выгрузке. */
+      const link = el("a", "t-id__code", entry.item.posting);
+      link.href = hubUrl(entry.item.posting);
+      link.target = "_blank";
+      link.rel = "noopener noreferrer";
+      link.title = "Открыть отправление в Hub";
+      td.appendChild(link);
       const open = el("button", "t-open", "детализация");
       open.type = "button";
       open.title = "Открыть этот ID в детализации";
@@ -3025,7 +3020,7 @@ const STATS_COLUMNS = {
     }
   },
   user: {
-    title: "Кто делал",
+    title: "Пользователь",
     width: 32,
     sort: (entry) => entry.user || "",
     text: (entry) => entry.user || "",
@@ -3042,25 +3037,10 @@ const STATS_COLUMNS = {
       td.className = "t-when";
       td.textContent = entry.hour || "—";
     }
-  },
-  hub: {
-    title: "Hub",
-    width: 12,
-    sort: (entry) => entry.item.posting,
-    text: (entry) => hubUrl(entry.item.posting),
-    link: (entry) => hubUrl(entry.item.posting),
-    cell: (entry, td) => {
-      td.className = "t-hub";
-      const link = el("a", null, "Hub ↗");
-      link.href = hubUrl(entry.item.posting);
-      link.target = "_blank";
-      link.rel = "noopener noreferrer";
-      td.appendChild(link);
-    }
   }
 };
 
-const DEFAULT_STATS_COLS = ["id", "number", "verdict", "blame", "at", "bucket", "status", "op", "hub"];
+const DEFAULT_STATS_COLS = ["id", "number", "verdict", "blame", "at", "bucket", "status", "op"];
 let statsCols = DEFAULT_STATS_COLS.slice();
 
 function persistStatsCols() {
