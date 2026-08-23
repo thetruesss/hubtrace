@@ -1916,12 +1916,14 @@ mountDetail();
 /* ------------------------------------------------------------------ */
 
 /*
- * Третье пространство результата — дашборд по виновникам.
+ * Третье пространство результата — аналитика по последним ячейкам и
+ * предыдущим складам.
  *
  * Правило одно, и оно же написано в подзаголовках панелей: если искомый
  * склад в истории есть, проблема скорее всего в последней ячейке верхней
- * строки об этом складе; если склада нет — виноват верхний по движениям
- * склад. По этим виновникам и построены графики, фильтры и таблица.
+ * строки об этом складе — это его последняя ячейка; если склада нет,
+ * смотрим предыдущий склад: верхний по движениям. По этим двум разрезам
+ * и построены графики, фильтры и таблица.
  */
 let statsIndex = [];
 let statsQuery = [];
@@ -1983,7 +1985,7 @@ function lastCellOf(raw) {
 /*
  * Верхний склад по движениям: идём по строкам сверху вниз, внутри строки
  * разбираем «Местоположение: …», стороны переезда смотрим с конца (самое
- * свежее место). Рейсы пропускаем — виноват склад; если складов не
+ * свежее место). Рейсы пропускаем — нужен именно склад; если складов не
  * встретилось вовсе, берём первое попавшееся место без пометки.
  */
 function topPlaceOf(rows) {
@@ -2190,8 +2192,8 @@ function renderStatsKpis(shown) {
     { label: "Склад есть", value: hits, mod: "hit" },
     { label: "Склада нет", value: misses, mod: "miss" },
     { label: "Не вышло", value: issues, mod: "issue" },
-    { label: "Виновных ячеек", value: cells.size, mod: "cell" },
-    { label: "Виновных складов", value: places.size, mod: "place" }
+    { label: "Последних ячеек", value: cells.size, mod: "cell" },
+    { label: "Предыдущих складов", value: places.size, mod: "place" }
   ];
 
   host.innerHTML = "";
@@ -2232,15 +2234,15 @@ const VERDICT_WORDS = { hit: "склад есть", miss: "склада нет",
  */
 const STATS_DIMS = {
   cell: {
-    title: "Виновные ячейки",
+    title: "Последняя ячейка",
     sub: "склад найден — последняя ячейка верхней строки о нём",
     filter: "cell",
     hue: "var(--viz-hit)",
     of: (entry) => (entry.blame.kind === "cell" ? entry.blame.value : "")
   },
   place: {
-    title: "Виновные склады",
-    sub: "склада нет — виноват верхний склад по движениям",
+    title: "Предыдущий склад",
+    sub: "склада нет — верхний склад по движениям",
     filter: "place",
     hue: "var(--viz-miss)",
     of: (entry) => (entry.blame.kind === "place" ? entry.blame.value : "")
@@ -2900,7 +2902,7 @@ function renderStatsTable(shown) {
     } else {
       const chip = el("button", `t-blame t-blame--${entry.blame.kind}`);
       chip.type = "button";
-      chip.title = "Показать все ID с этим виновником";
+      chip.title = "Показать все ID с этим значением";
       chip.dataset.kind = entry.blame.kind;
       chip.dataset.value = entry.blame.value;
       chip.appendChild(el("i", null, BLAME_TAGS[entry.blame.kind]));
