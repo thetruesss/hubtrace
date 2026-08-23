@@ -2056,6 +2056,30 @@ function closeFilterBox(name) {
   }, 200);
 }
 
+/*
+ * Поповер прижат к правому краю кнопки. На узком окне строка фильтров
+ * переносится, кнопка уезжает влево — и широкий поповер вылезал за экран.
+ * После раскладки двигаем его ровно настолько, чтобы он поместился.
+ */
+function fitFilterBox(pop) {
+  pop.style.setProperty("--shift", "0px");
+  /*
+   * Меряем по раскладке, а не по getBoundingClientRect: закрытый поповер
+   * ещё уменьшен анимацией появления, и рамка вышла бы на 9 пикселей
+   * правее настоящей.
+   */
+  const parent = pop.offsetParent;
+  const base = parent ? parent.getBoundingClientRect().left : 0;
+  const left = base + pop.offsetLeft;
+  const right = left + pop.offsetWidth;
+  const pad = 12;
+
+  let shift = 0;
+  if (left < pad) shift = pad - left;
+  else if (right > window.innerWidth - pad) shift = window.innerWidth - pad - right;
+  if (shift) pop.style.setProperty("--shift", `${Math.round(shift)}px`);
+}
+
 function openFilterBox(name) {
   for (const other of filterBoxes.keys()) if (other !== name) closeFilterBox(other);
   const box = filterBoxes.get(name);
@@ -2065,6 +2089,7 @@ function openFilterBox(name) {
   box.pop.hidden = false;
   box.btn.classList.add("is-on");
   box.btn.setAttribute("aria-expanded", "true");
+  fitFilterBox(box.pop);
   /* Кадр на раскладку, потом класс — иначе перехода не будет. */
   requestAnimationFrame(() => box.pop.classList.add("is-open"));
 }
@@ -2085,9 +2110,20 @@ function mountFilterBox(name, btnId, popId, countId) {
   pop.addEventListener("click", (event) => event.stopPropagation());
 }
 
+/*
+ * Счётчик на кнопке и подсветка выбранных фильтров.
+ *
+ * Значение выбрано или нет — знает сам select; раньше это пытался решать
+ * CSS правилом .pick:has(select:not([value=""])), но у select нет атрибута
+ * value, и правило не срабатывало никогда.
+ */
 function renderFilterCount(name, active) {
   const box = filterBoxes.get(name);
-  if (!box?.count) return;
+  if (!box) return;
+  for (const select of box.pop.querySelectorAll("select")) {
+    select.closest(".pick")?.classList.toggle("is-set", Boolean(select.value));
+  }
+  if (!box.count) return;
   box.count.hidden = !active;
   box.count.textContent = String(active);
   box.btn.classList.toggle("has-filters", active > 0);
@@ -2095,6 +2131,9 @@ function renderFilterCount(name, active) {
 
 document.addEventListener("click", () => {
   for (const name of filterBoxes.keys()) closeFilterBox(name);
+});
+window.addEventListener("resize", () => {
+  for (const box of filterBoxes.values()) if (box.open) fitFilterBox(box.pop);
 });
 document.addEventListener("keydown", (event) => {
   if (event.key !== "Escape") return;
