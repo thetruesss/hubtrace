@@ -1,17 +1,7 @@
-/*
- * Hub Trace · сборка .xlsx без внешних библиотек.
- *
- * Почему не CSV: в CSV ссылку можно задать только формулой
- * =HYPERLINK("...";"..."), а Excel при импорте текста разбирает имена
- * функций на языке интерфейса — в русском Excel такая ячейка станет #ИМЯ?.
- * В xlsx ссылка живёт в отношениях листа и открывается в любой локали.
- *
- * Поддерживаются несколько листов и два вида ссылок:
- *   { text, link }   — наружу (на карточку в Hub);
- *   { text, anchor } — внутрь книги, вида "Лист2!A25". Именно так сделана
- *                      кнопка «смотреть» в отчёте: макросов в xlsx нет,
- *                      а внутренняя ссылка даёт тот же переход одним кликом.
- */
+// Пишем .xlsx сами, без библиотек. CSV не годится: ссылка там только через
+// =HYPERLINK, а Excel разбирает имя функции по локали и выдаёт #ИМЯ?.
+// Внутренние ссылки ("Лист2!A25") — это переход между листами одним кликом,
+// макросов в xlsx всё равно нет.
 (() => {
   const CRC_TABLE = (() => {
     const table = new Uint32Array(256);
@@ -29,7 +19,7 @@
     return (c ^ 0xffffffff) >>> 0;
   }
 
-  /* Пакуем без сжатия: файл небольшой, а deflate тянуть неоткуда. */
+  // без сжатия: файл мелкий, а deflate тянуть неоткуда
   function zipStore(entries, mimeType) {
     const encoder = new TextEncoder();
     const parts = [];
@@ -120,7 +110,7 @@
     return name;
   }
 
-  /* Excel не пускает в имя листа : \ / ? * [ ] и держит предел в 31 символ. */
+  // Excel не пускает в имя листа : \ / ? * [ ] и режет до 31 символа
   function sheetTitle(name, index) {
     const clean = String(name || `Лист${index + 1}`).replace(/[\\/?*[\]:]/g, " ").trim();
     return (clean || `Лист${index + 1}`).slice(0, 31);
@@ -131,11 +121,8 @@
   const NS_R = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
   const NS_PKG = "http://schemas.openxmlformats.org/package/2006/relationships";
 
-  /*
-   * Стили: 0 обычный, 1 шапка, 2 ссылка, 3 подзаголовок блока,
-   * 4 приглушённый, 5 переход «смотреть» (крупно, по центру ячейки),
-   * 6 переход «к отчёту» (крупно, по левому краю).
-   */
+  // 0 обычный, 1 шапка, 2 ссылка, 3 подзаголовок, 4 приглушённый,
+  // 5 переход «смотреть», 6 переход «к отчёту»
   const STYLE_PLAIN = 0;
   const STYLE_HEAD = 1;
   const STYLE_LINK = 2;
@@ -233,10 +220,8 @@
     return { xml, rels };
   }
 
-  /*
-   * Вход: { sheets: [{ name, columns, rows, headRow, freeze, autoFilter }] }
-   * Ячейка — строка/число либо { text, number, link, anchor, style }.
-   */
+  // { sheets: [{ name, columns, rows, headRow, freeze, autoFilter }] }
+  // ячейка — строка/число либо { text, number, link, anchor, style }
   function buildXlsxBlob(input) {
     const encoder = new TextEncoder();
     const sheets = (input && input.sheets ? input.sheets : [input || {}]).map((sheet, index) => ({
@@ -268,7 +253,6 @@
       `<font><u/><sz val="11"/><color rgb="FF0563C1"/><name val="Calibri"/><family val="2"/><scheme val="minor"/></font>` +
       `<font><b/><sz val="12"/><color rgb="FF1F3864"/><name val="Calibri"/><family val="2"/><scheme val="minor"/></font>` +
       `<font><sz val="10"/><color rgb="FF808080"/><name val="Calibri"/><family val="2"/><scheme val="minor"/></font>` +
-      /* Переходы между листами: их надо видеть сразу, поэтому крупно и жирно. */
       `<font><b/><u/><sz val="14"/><color rgb="FF0563C1"/><name val="Calibri"/><family val="2"/><scheme val="minor"/></font>` +
       `</fonts>` +
       `<fills count="3">` +
