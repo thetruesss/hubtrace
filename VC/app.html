@@ -79,11 +79,15 @@
           <span class="splash__wave"></span>
           <span class="splash__wave splash__wave--late"></span>
 
-          <!-- Радиус меряется от центра радара; тарелка кончается на 42 %. -->
-          <span class="splash__blip" style="--a: 40deg; --r: 29%; --d: 0.45s"><i></i></span>
-          <span class="splash__blip splash__blip--miss" style="--a: 116deg; --r: 36%; --d: 0.735s"><i></i></span>
-          <span class="splash__blip" style="--a: 203deg; --r: 21%; --d: 1.061s"><i></i></span>
-          <span class="splash__blip splash__blip--miss" style="--a: 295deg; --r: 33%; --d: 1.406s"><i></i></span>
+          <!--
+            У отметки два числа. --turn — доля оборота луча: из неё считаются
+            и угол, и момент вспышки, поэтому разъехаться они не могут.
+            --r — радиус от центра; тарелка кончается на 42 %.
+          -->
+          <span class="splash__blip" style="--turn: 0.11; --r: 29%"><i></i></span>
+          <span class="splash__blip splash__blip--miss" style="--turn: 0.32; --r: 36%"><i></i></span>
+          <span class="splash__blip" style="--turn: 0.565; --r: 21%"><i></i></span>
+          <span class="splash__blip splash__blip--miss" style="--turn: 0.82; --r: 33%"><i></i></span>
         </div>
 
         <div class="splash__word">
@@ -381,6 +385,10 @@
                   <span class="filterbox__count" id="detail-filters-count" hidden>0</span>
                 </button>
                 <div class="filterbox__pop" id="detail-filters-pop" hidden>
+                  <div class="filterbox__head">
+                    <h4>Фильтры</h4>
+                    <button id="filter-reset" class="btn btn--ghost btn--sm" type="button" hidden>Сбросить всё</button>
+                  </div>
                   <div class="filterbox__grid">
                     <label class="pick">
                       <span>Результат</span>
@@ -404,7 +412,6 @@
                       </select>
                     </label>
                   </div>
-                  <button id="filter-reset" class="btn btn--ghost btn--sm" type="button" hidden>Сбросить всё</button>
                 </div>
               </div>
               <div class="detail__chips" id="detail-chips"></div>
@@ -441,6 +448,10 @@
                   <span class="filterbox__count" id="stats-filters-count" hidden>0</span>
                 </button>
                 <div class="filterbox__pop filterbox__pop--wide" id="stats-filters-pop" hidden>
+                  <div class="filterbox__head">
+                    <h4>Фильтры</h4>
+                    <button id="stats-reset" class="btn btn--ghost btn--sm" type="button" hidden>Сбросить всё</button>
+                  </div>
                   <div class="filterbox__grid">
                     <label class="pick">
                       <span>Результат</span>
@@ -488,7 +499,6 @@
                       </select>
                     </label>
                   </div>
-                  <button id="stats-reset" class="btn btn--ghost btn--sm" type="button" hidden>Сбросить всё</button>
                 </div>
               </div>
               <div class="detail__chips" id="stats-chips"></div>
