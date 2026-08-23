@@ -135,13 +135,17 @@
                 <p class="hint hint--tight">Как в Hub: целиком или кусок названия.</p>
               </section>
 
-              <section class="panel glass panel--runs">
+              <section class="panel glass panel--last" id="last-run">
                 <div class="panel__head">
-                  <h2>Склады прошлых проверок</h2>
+                  <div class="panel__title">
+                    <h2>Прошлые прогоны</h2>
+                    <span id="runs-count" class="badge glass glass--inset" hidden>0</span>
+                  </div>
                 </div>
-                <p class="hint hint--tight">Клик подставит склад в поле выше — набирать заново не нужно.</p>
-                <ul class="runs" id="runs"></ul>
-                <p class="runs__empty" id="runs-empty">Пусто: здесь останутся склады, которые вы уже проверяли.</p>
+                <div class="runs" id="runs"></div>
+                <p class="last__empty" id="runs-empty">
+                  Пусто: здесь останутся последние пять проверок — с итогом и кнопкой вернуться к разбору.
+                </p>
               </section>
 
               <section class="panel glass panel--brief">
