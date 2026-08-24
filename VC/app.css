@@ -3185,23 +3185,28 @@ input[type="number"] {
   flex-direction: column;
 }
 
-/* высоту делим между строками поровну, их число приходит из JS в --bar-rows */
+/* Высоту делим между строками поровну, их число приходит из JS в --bar-rows.
+   Промежуток небольшой: на десяти строках шестипиксельные съедали столько, что
+   на саму строку оставалось меньше, чем занимает её текст, и он вылезал наружу —
+   отсюда и рамка выделения не по содержимому, и наезд на подпись снизу. */
 .bars__rows {
+  --bar-gap: 3px;
   flex: 1 1 auto;
   display: grid;
   grid-template-rows: repeat(var(--bar-rows, 1), minmax(0, 1fr));
-  gap: 6px;
+  gap: var(--bar-gap);
   min-height: 0;
 }
 
 .hbar {
+  position: relative;
   display: grid;
   grid-template-columns: minmax(80px, 46%) minmax(0, 1fr) auto;
   align-items: center;
   gap: 10px;
   border: 0;
   background: none;
-  padding: 2px 0;
+  padding: 0;
   font: inherit;
   text-align: left;
   color: inherit;
@@ -3216,6 +3221,8 @@ input[type="number"] {
 
 .hbar__label {
   font-size: 11.5px;
+  /* плотная строка: с обычной высотой текст не помещался в свою же строку сетки */
+  line-height: 1.15;
   color: var(--text-dim);
   white-space: nowrap;
   overflow: hidden;
@@ -3241,6 +3248,7 @@ input[type="number"] {
 
 .hbar__value {
   font-size: 11.5px;
+  line-height: 1.15;
   font-weight: 650;
   color: var(--text);
   font-variant-numeric: tabular-nums;
@@ -3268,10 +3276,13 @@ input[type="number"] {
   box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.22);
 }
 
+/* «показаны 10 самых частых…»: двух пикселей до последней строки не хватало,
+   подпись и строка читались как одна строка текста */
 .bars__foot {
   flex: 0 0 auto;
-  margin: 2px 0 0;
+  margin: 10px 0 0;
   font-size: 10.5px;
+  line-height: 1.35;
   color: var(--faint);
 }
 
@@ -3312,6 +3323,7 @@ input[type="number"] {
 }
 
 .col {
+  position: relative;
   flex: 1 1 0;
   min-width: 0;
   max-width: 96px;
@@ -5057,12 +5069,30 @@ kbd,
   font-weight: 650;
 }
 
-/* захваченное читается как сплошной блок: одной подсветки подписи мало,
-   чтобы с одного взгляда понять, что попадёт в фильтр */
-.hbar.is-sweep,
-.col.is-sweep {
+/* Захваченное читается как сплошной блок: одной подсветки подписи мало, чтобы с
+   одного взгляда понять, что попадёт в фильтр. Рисуем отдельным слоем и с запасом
+   наружу: строка сетки узкая, и рамка по её краю резала бы подпись и полосу.
+   По вертикали запас — половина промежутка, поэтому соседние выбранные строки
+   складываются в одну полосу без нахлёста. */
+.hbar.is-sweep::before,
+.col.is-sweep::before {
+  content: "";
+  position: absolute;
+  inset: calc(var(--bar-gap, 4px) / -2) -6px;
+  border-radius: var(--r-xs);
   background: rgba(103, 160, 255, 0.16);
   box-shadow: inset 0 0 0 1px rgba(126, 178, 255, 0.55);
+  pointer-events: none;
+}
+
+/* содержимое поднимаем над подсветкой: без этого слой лёг бы поверх текста */
+.hbar > *,
+.col > * {
+  position: relative;
+}
+
+.col.is-sweep::before {
+  inset: -4px -3px;
 }
 
 .hbar.is-sweep .hbar__track,
