@@ -1357,7 +1357,11 @@ function coverageOf(item) {
   if (item.found) return 1;
   const expected = Number(item.expected) || 0;
   const loaded = Number(item.loaded) || 0;
-  if (!expected) return loaded > 0 ? 1 : 0;
+  // Ноль из нуля читался как «ничего не прочли», хотя это «читать было нечего»:
+  // у отправления просто нет перемещений. Такой номер уходил во все три круга и
+  // каждый раз возвращался тем же нулём — вместе с полным обходом страницы.
+  // Отличаем по тому, сам ли путь сказал, что дочитал список.
+  if (!expected) return loaded > 0 || (item.ok && item.status === "complete") ? 1 : 0;
   return Math.min(1, loaded / expected);
 }
 

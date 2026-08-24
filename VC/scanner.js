@@ -2108,29 +2108,36 @@
     return false;
   }
 
-  const HISTORY_LABELS = ["перемещения", "история перемещений", "история"];
+  // Нужен именно срез перемещений. «История» его содержит, но открывается на «Все»,
+  // поэтому её можно кликнуть по дороге, а принять за цель — нельзя.
+  const TRANSITION_LABELS = ["перемещения", "история перемещений"];
+  const HISTORY_LABELS = ["история"];
 
-  // «уже открыта» и «не нашлось» — разные ответы: спутаешь, и на открытых «Перемещениях»
-  // пойдёшь дальше по списку и кликнешь «Все»
-  function clickHistoryTab() {
-    for (const wanted of HISTORY_LABELS) {
-      const state = clickTabLabelled(wanted);
-      if (state === "active") return false;
-      if (state === "clicked") return true;
-    }
-    return false;
-  }
-
-  function clickTabLabelled(wanted) {
+  function findTabLabelled(wanted) {
     for (const el of document.querySelectorAll(HUB.tab)) {
       const label = textOf(el).toLowerCase();
-      if (label !== wanted && !label.startsWith(wanted)) continue;
-      // активную вкладку Hub помечает на вложенном узле, а активную фишку фильтра —
-      // классом filled и атрибутом disabled
-      if (el.getAttribute("aria-selected") === "true") return "active";
-      if (el.disabled) return "active";
-      if (/active|filled/i.test(String(el.className))) return "active";
-      if (el.querySelector(HUB.tabActive)) return "active";
+      if (label === wanted || label.startsWith(wanted)) return el;
+    }
+    return null;
+  }
+
+  // активную вкладку Hub помечает на вложенном узле, а активную фишку фильтра —
+  // классом filled и атрибутом disabled
+  function tabIsActive(el) {
+    if (el.getAttribute("aria-selected") === "true") return true;
+    if (el.disabled) return true;
+    if (/active|filled/i.test(String(el.className))) return true;
+    return Boolean(el.querySelector(HUB.tabActive));
+  }
+
+  // «уже открыта», «только что нажали» и «такой вкладки нет» — три разных ответа:
+  // спутаешь, и на открытых «Перемещениях» пойдёшь дальше по списку и кликнешь «Все»
+  function pickTab(labels, lookOnly) {
+    for (const wanted of labels) {
+      const el = findTabLabelled(wanted);
+      if (!el) continue;
+      if (tabIsActive(el)) return "active";
+      if (lookOnly) return "waiting";
       el.click();
       return "clicked";
     }
@@ -2212,11 +2219,45 @@
 
     reportPhase("history", job.posting);
 
-    let tabClicked = false;
+    // Раньше здесь первым стоял historyReady(), а он спрашивает только «есть ли на
+    // странице таблица» — и на уже отрисованных «Все» ожидание заканчивалось, не успев
+    // ничего переключить. На «Все» приходится домотать всю историю предмета, а в отчёт
+    // попадают чужие виды изменений, поэтому сначала добиваемся среза перемещений.
+    //
+    // Ждём не бесконечно и по-разному: нажатой вкладке даём время отметиться, а если
+    // такой вкладки в Hub нет вовсе — ждём только пока дорисовывается страница, иначе
+    // каждый номер платил бы полным ожиданием впустую. Отсчёт от готовности списка:
+    // до неё страница и так грузится.
+    const TAB_SWITCH_MS = 4000;
+    const TAB_LOOK_MS = 800;
+    let tabSettled = false;
+    let clickedOwn = false;
+    let openedHistory = false;
+    let gridAt = 0;
+
     const ready = await waitFor(() => {
-      if (historyReady()) return true;
-      if (!tabClicked && document.body) tabClicked = clickHistoryTab();
-      return false;
+      const grid = historyReady();
+      if (grid && !gridAt) gridAt = Date.now();
+      if (tabSettled || !document.body) return grid;
+
+      // повторно жать не надо: нажатую вкладку ждём, а не кликаем каждые 40 мс
+      const own = pickTab(TRANSITION_LABELS, clickedOwn);
+      if (own === "active") {
+        tabSettled = true;
+        return grid;
+      }
+      if (own === "clicked") {
+        clickedOwn = true;
+        return false;
+      }
+      // «Перемещения» лежат внутри «Истории»: её открываем по дороге, но целью не считаем
+      if (!own && !openedHistory && pickTab(HISTORY_LABELS) === "clicked") {
+        openedHistory = true;
+        return false;
+      }
+      if (!gridAt || Date.now() - gridAt < (own ? TAB_SWITCH_MS : TAB_LOOK_MS)) return false;
+      tabSettled = true;
+      return grid;
     }, Math.min(20000, left()));
 
     if (!ready) {
