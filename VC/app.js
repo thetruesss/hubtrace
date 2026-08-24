@@ -2402,6 +2402,7 @@ function renderStatsKpis(shown) {
     box.appendChild(el("span", null, tile.label));
     box.appendChild(el("b", null, tile.text != null ? tile.text : String(tile.value)));
     if (tile.sub) box.appendChild(el("em", null, tile.sub));
+    markValue(box, tile.text != null ? tile.text : tile.value, tile.label);
     host.appendChild(box);
   }
 }
@@ -2667,6 +2668,7 @@ function legendChip(label, total, color, state, pick) {
   mark.style.background = color;
   chip.append(mark, el("span", null, label), el("b", null, String(total)));
   chip.addEventListener("click", pick);
+  markValue(chip, label, null, total);
   return chip;
 }
 
@@ -2714,6 +2716,7 @@ function renderBarChart(host, rows, options) {
     track.appendChild(fill);
     const num = el("span", "hbar__value", String(count));
 
+    markValue(row, options.labelOf(value), null, count);
     row.append(label, track, num);
     rowsBox.appendChild(row);
   }
@@ -2818,6 +2821,7 @@ function renderColsChart(host, slice, dimKey, options) {
     plot.appendChild(stack);
     col.appendChild(plot);
     col.appendChild(el("span", "col__day", labelOf(value)));
+    markValue(col, labelOf(value), null, total);
     cols.appendChild(col);
   }
   host.appendChild(cols);
@@ -2972,6 +2976,7 @@ function renderDonutChart(host, rows, options) {
       const mark = el("i");
       mark.style.background = seg.color;
       still.append(mark, el("span", null, seg.label), el("b", null, String(seg.count)));
+      markValue(still, seg.label, null, seg.count);
       legend.appendChild(still);
     }
   }
@@ -3500,6 +3505,8 @@ function renderStatsTable(shown) {
       column.cell(entry, td);
       tr.appendChild(td);
     }
+    // из разметки строку уже не собрать: в ячейке ID лежит ещё и кнопка
+    statsRowEntry.set(tr, entry);
     body.appendChild(tr);
   }
 }
@@ -3547,6 +3554,7 @@ function renderStats() {
 
   // элемент под курсором сейчас исчезнет, pointerleave по нему не придёт
   hideVizTip();
+  closeCopyMenu();
   syncStatsControls();
   const shown = statsIndex.filter((entry) => passesStats(entry));
 
@@ -3561,6 +3569,235 @@ function renderStats() {
   renderStatsChips();
   renderFab();
 }
+
+/* Своё меню по правой кнопке в Аналитике: значения тут смотрят, а не редактируют,
+   и системное меню браузера для них бесполезно. */
+
+const statsRowEntry = new WeakMap();
+
+// Что копировать, из разметки уже не вытащить: у столбика подпись и число лежат
+// в разных узлах, а в ячейке ID к номеру примешана кнопка. Помечаем при отрисовке.
+function markValue(node, value, label, extra) {
+  if (!node) return node;
+  const text = oneLine(value);
+  if (!text) return node;
+  node.dataset.copyValue = text;
+  const title = oneLine(label);
+  if (title) node.dataset.copyLabel = title;
+  const more = oneLine(extra);
+  if (more) node.dataset.copyExtra = more;
+  return node;
+}
+
+function oneLine(value) {
+  return String(value == null ? "" : value).replace(/\s+/g, " ").trim();
+}
+
+// поля ввода отдаём системному меню: там нужны «вставить» и «отменить»
+const FIELD_TAGS = new Set(["INPUT", "TEXTAREA", "SELECT"]);
+const LOOSE_LIMIT = 200;
+
+function visibleStatsCols() {
+  return statsCols.filter((key) => STATS_COLUMNS[key]);
+}
+
+function columnText(key, entry) {
+  const column = STATS_COLUMNS[key];
+  if (!column) return "";
+  return oneLine(column.text ? column.text(entry) : "");
+}
+
+// подпись графика без хвоста вроде «остальные · 4» читается лучше, но копировать
+// человек хочет ровно то, что видит
+function looseValue(node, root) {
+  for (let at = node; at && at !== root; at = at.parentElement) {
+    if (FIELD_TAGS.has(at.tagName)) return "";
+    const text = oneLine(at.textContent);
+    if (!text) continue;
+    // Первый же непустой узел — самый глубокий, то есть самый близкий к тому,
+    // куда целились. Выше текста только больше, поэтому длинный не спасаем.
+    return text.length <= LOOSE_LIMIT ? text : "";
+  }
+  return "";
+}
+
+function statsCopyItems(target) {
+  const items = [];
+  const head = target.closest("#stats-head th");
+  const cell = target.closest("#stats-rows td");
+  const cols = visibleStatsCols();
+
+  if (head?.dataset.sort) {
+    const key = head.dataset.sort;
+    const rows = statsRowsForExport();
+    items.push({
+      label: "Копировать столбец",
+      hint: `${rows.length} ${plural(rows.length, ["значение", "значения", "значений"])}`,
+      text: rows.map((entry) => columnText(key, entry)).join("\n"),
+      said: `Столбец «${STATS_COLUMNS[key].title}» скопирован`
+    });
+    return items;
+  }
+
+  if (cell) {
+    const row = cell.parentElement;
+    const entry = statsRowEntry.get(row);
+    const at = [...row.children].indexOf(cell);
+    const key = cols[at];
+    const value = entry && key ? columnText(key, entry) : oneLine(cell.textContent);
+    const title = key ? STATS_COLUMNS[key].title : "";
+    if (value) {
+      items.push({ label: "Копировать", hint: value, text: value });
+      if (title) items.push({ label: "Копировать с подписью", text: `${title}: ${value}` });
+    }
+    if (entry) {
+      items.push({
+        label: "Копировать строку",
+        hint: `${cols.length} ${plural(cols.length, ["столбец", "столбца", "столбцов"])}`,
+        // через табуляцию: так строка ложится в Excel по колонкам
+        text: cols.map((name) => columnText(name, entry)).join("\t"),
+        said: "Строка скопирована"
+      });
+    }
+    if (key) {
+      const rows = statsRowsForExport();
+      items.push({
+        label: "Копировать столбец",
+        hint: `${rows.length} ${plural(rows.length, ["значение", "значения", "значений"])}`,
+        text: rows.map((one) => columnText(key, one)).join("\n"),
+        said: `Столбец «${title}» скопирован`
+      });
+    }
+    return items;
+  }
+
+  const marked = target.closest("[data-copy-value]");
+  const value = marked ? marked.dataset.copyValue : looseValue(target, $("result-stats"));
+  if (!value) return items;
+
+  items.push({ label: "Копировать", hint: value, text: value });
+  const label = marked?.dataset.copyLabel;
+  const extra = marked?.dataset.copyExtra;
+  if (label) items.push({ label: "Копировать с подписью", text: `${label}: ${value}` });
+  else if (extra) items.push({ label: "Копировать со значением", text: `${value} — ${extra}` });
+  return items;
+}
+
+let copyMenuEl = null;
+
+function copyMenu() {
+  if (copyMenuEl?.isConnected) return copyMenuEl;
+  copyMenuEl = el("div", "cmenu glass");
+  copyMenuEl.hidden = true;
+  copyMenuEl.setAttribute("role", "menu");
+  // по правой кнопке внутри самого меню системное тоже не нужно
+  copyMenuEl.addEventListener("contextmenu", (event) => event.preventDefault());
+  document.body.appendChild(copyMenuEl);
+  return copyMenuEl;
+}
+
+function closeCopyMenu() {
+  if (!copyMenuEl || copyMenuEl.hidden) return;
+  reveal(copyMenuEl, false);
+}
+
+function placeCopyMenu(x, y) {
+  const menu = copyMenuEl;
+  const pad = 10;
+  // offset-размеры не считают transform, а гашение как раз двигает узел
+  const width = menu.offsetWidth;
+  const height = menu.offsetHeight;
+  const left = Math.min(Math.max(pad, x), Math.max(pad, window.innerWidth - width - pad));
+  // под курсором места нет — раскрываем вверх, а потом всё равно вгоняем в окно:
+  // у нижнего края одного разворота вверх не хватает
+  const up = y + height + pad > window.innerHeight;
+  const top = Math.min(
+    Math.max(pad, up ? y - height : y),
+    Math.max(pad, window.innerHeight - height - pad)
+  );
+  menu.style.left = `${Math.round(left)}px`;
+  menu.style.top = `${Math.round(top)}px`;
+}
+
+async function copyValue(text, said) {
+  if (!text) return;
+  try {
+    await navigator.clipboard.writeText(text);
+    toast("ok", said || "Скопировано");
+  } catch (_err) {
+    toast("error", "Буфер обмена недоступен");
+  }
+}
+
+function openCopyMenu(x, y, items) {
+  const menu = copyMenu();
+  menu.replaceChildren();
+  for (const item of items) {
+    const button = el("button", "cmenu__item");
+    button.type = "button";
+    button.setAttribute("role", "menuitem");
+    button.appendChild(el("span", "cmenu__label", item.label));
+    if (item.hint) button.appendChild(el("em", "cmenu__hint", item.hint));
+    button.addEventListener("click", () => {
+      closeCopyMenu();
+      void copyValue(item.text, item.said);
+    });
+    menu.appendChild(button);
+  }
+  reveal(menu, true);
+  placeCopyMenu(x, y);
+  // без preventScroll браузер подкручивает контейнер под ушедший фокус, а прокрутка
+  // у нас закрывает меню — оно захлопывалось в тот же кадр, что и открылось
+  menu.firstElementChild?.focus({ preventScroll: true });
+  openedAt = Date.now();
+}
+
+// Меню несёт своё значение в подсказке, поэтому от прокрутки оно не устаревает —
+// закрываем только на осознанное колесо, а не на любое событие scroll: страница
+// подкручивается и сама (перевод фокуса, доводка вида), и меню захлопывалось в тот
+// же кадр, в котором открылось.
+const SETTLE_MS = 120;
+let openedAt = 0;
+
+function closeOnMove() {
+  if (Date.now() - openedAt < SETTLE_MS) return;
+  closeCopyMenu();
+}
+
+function mountCopyMenu() {
+  const host = $("result-stats");
+  if (!host) return;
+
+  host.addEventListener("contextmenu", (event) => {
+    if (FIELD_TAGS.has(event.target.tagName)) return;
+    const items = statsCopyItems(event.target);
+    if (!items.length) return;
+    event.preventDefault();
+    hideVizTip();
+    openCopyMenu(event.clientX, event.clientY, items);
+  });
+
+  document.addEventListener("click", closeCopyMenu);
+  document.addEventListener("wheel", closeOnMove, { capture: true, passive: true });
+  window.addEventListener("resize", closeOnMove);
+  window.addEventListener("blur", closeOnMove);
+  document.addEventListener("keydown", (event) => {
+    if (!copyMenuEl || copyMenuEl.hidden) return;
+    if (event.key === "Escape") {
+      event.stopPropagation();
+      closeCopyMenu();
+      return;
+    }
+    if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+    event.preventDefault();
+    const all = [...copyMenuEl.querySelectorAll(".cmenu__item")];
+    const at = all.indexOf(document.activeElement);
+    const next = event.key === "ArrowDown" ? at + 1 : at - 1;
+    all[(next + all.length) % all.length]?.focus();
+  });
+}
+
+mountCopyMenu();
 
 function resetStatsFilters() {
   statsQuery = [];

@@ -104,6 +104,12 @@
   --r-xs: 8px;
 
   --gap: 14px;
+  /* Рамка страницы одна на все четыре стороны: раньше по бокам уходило до 52 px,
+     и на широком экране под содержимое оставалось меньше окна. */
+  --edge: clamp(12px, 1.2vw, 20px);
+  /* Панель этапов висит поверх страницы, поэтому нижнюю строку прокручиваемых
+     областей надо уметь вывести из-под неё. */
+  --steps-clear: 64px;
   --ease: cubic-bezier(0.22, 0.61, 0.36, 1);
   --sp: cubic-bezier(0.34, 1.3, 0.5, 1);
 
@@ -246,7 +252,8 @@ select {
   display: grid;
   grid-template-rows: minmax(0, 1fr);
   gap: var(--gap);
-  padding: clamp(14px, 2vh, 24px) clamp(16px, 3.2vw, 52px) 62px;
+  /* снизу больше ничего не резервируем: этапы не занимают полосу, а висят над ней */
+  padding: var(--edge);
 }
 
 main,
@@ -347,7 +354,7 @@ main {
 .steps {
   position: fixed;
   left: 50%;
-  bottom: 18px;
+  bottom: var(--edge);
   z-index: 30;
   transform: translateX(-50%);
   display: grid;
@@ -802,6 +809,7 @@ input[type="number"] {
   flex-direction: column;
   gap: var(--gap);
   padding-right: 2px;
+  scroll-padding-bottom: var(--steps-clear);
 }
 
 .side__foot {
@@ -1616,7 +1624,7 @@ input[type="number"] {
 .feed {
   list-style: none;
   margin: 4px 0 0;
-  padding: 0 2px 0 0;
+  padding: 0 2px var(--steps-clear) 0;
   overflow: auto;
   display: grid;
   gap: 6px;
@@ -2311,6 +2319,8 @@ input[type="number"] {
   flex-direction: column;
   gap: var(--gap);
   padding-right: 4px;
+  /* панель этапов висит поверх страницы — последнюю карточку надо уметь вывести из-под неё */
+  padding-bottom: var(--steps-clear);
 }
 
 /* колонка в flex-контейнере ужимается под высоту родителя и режет содержимое */
@@ -2907,15 +2917,19 @@ input[type="number"] {
 }
 
 @media (max-width: 1080px) {
+  /* колонки схлопнулись в одну и экран прокручивается целиком — значит запас
+     под панель этапов нужен уже ему, а не отдельным областям внутри */
   .layout,
   .result-grid {
     grid-template-columns: 1fr;
     overflow-y: auto;
+    padding-bottom: var(--steps-clear);
   }
   .scan-grid {
     grid-template-columns: 1fr;
     grid-template-rows: auto auto;
     overflow-y: auto;
+    padding-bottom: var(--steps-clear);
   }
   .panel--live,
   .radar-card {
@@ -2987,7 +3001,8 @@ input[type="number"] {
   flex-direction: column;
   gap: var(--gap);
   padding-right: 4px;
-  padding-bottom: 84px;
+  /* снизу и кнопка выгрузки, и панель этапов; берём больший запас */
+  padding-bottom: max(84px, var(--steps-clear));
 }
 
 .stats__scroll > * {
@@ -4938,4 +4953,78 @@ kbd,
   .last__row {
     animation: none !important;
   }
+}
+
+/* ------------------------------------------------------------------ */
+/*  меню по правой кнопке в Аналитике                                  */
+
+.cmenu {
+  position: fixed;
+  z-index: 60;
+  min-width: 218px;
+  max-width: min(360px, 92vw);
+  padding: 5px;
+  border-radius: var(--r-sm);
+  display: grid;
+  gap: 2px;
+  transform-origin: top left;
+  /* меню читают, а не любуются им: полупрозрачное стекло панелей просвечивало
+     строками таблицы насквозь, поэтому фон здесь почти сплошной — как у фильтров */
+  background: rgba(11, 16, 26, 0.985);
+  border-color: var(--stroke);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.07),
+    0 22px 52px rgba(0, 0, 0, 0.58);
+}
+
+/* своё гашение: меню должно вырастать из точки нажатия, а не наезжать сверху */
+.cmenu.reveal {
+  transition:
+    opacity 0.14s var(--ease),
+    transform 0.18s var(--sp);
+}
+
+.cmenu.reveal.is-out {
+  opacity: 0;
+  transform: scale(0.95) translateY(-2px);
+}
+
+.cmenu__item {
+  display: grid;
+  gap: 1px;
+  justify-items: start;
+  text-align: left;
+  padding: 7px 10px;
+  border: 0;
+  border-radius: var(--r-xs);
+  background: transparent;
+  color: var(--text-dim);
+  font-family: inherit;
+  font-size: 12.5px;
+  line-height: 1.25;
+  cursor: pointer;
+  transition: background 0.16s var(--ease), color 0.16s var(--ease);
+}
+
+.cmenu__item:hover,
+.cmenu__item:focus-visible {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text);
+  outline: none;
+}
+
+.cmenu__label {
+  font-weight: 600;
+}
+
+/* подсказка — само значение: длинное обрезаем, иначе меню растянется на пол-экрана */
+.cmenu__hint {
+  max-width: 100%;
+  font-style: normal;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--faint);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
