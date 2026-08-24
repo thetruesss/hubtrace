@@ -1,5 +1,7 @@
-// Достаём из файла только ID. Признак у Hub жёсткий: 10+ цифр подряд, последние три — нули.
+// Достаём из файла только ID. Признак у Hub — 10+ цифр подряд, обычно с хвостом из нулей.
 // Со столбцами берём тот, где таких значений больше: иначе примешаются ID ячеек и контейнеров.
+// Хвост из нулей — признак строгий, поэтому он идёт первым, но не последним: файл, где ни одно
+// число под него не подошло, лучше разобрать по длине, чем вернуть пустой список.
 (function () {
   "use strict";
 
@@ -10,11 +12,18 @@
     return /^[0-9]{10,}$/.test(value) && value.endsWith("000");
   }
 
+  // Мягкий признак — просто длинное число. Хвост из нулей у ID сборный, но не
+  // обязательный, и по строгому признаку номер вроде 551373007622001 терялся.
+  function looksLikeNumber(value) {
+    return /^[0-9]{10,}$/.test(value);
+  }
+
   // ID внутри текста: Lozon:501895529761000, ссылка на Hub и прочее
-  function idsIn(text) {
+  function idsIn(text, loose) {
+    const fits = loose ? looksLikeNumber : looksLikeId;
     const out = [];
     for (const match of String(text == null ? "" : text).matchAll(ID_RE)) {
-      if (looksLikeId(match[0])) out.push(match[0]);
+      if (fits(match[0])) out.push(match[0]);
     }
     return out;
   }
@@ -31,18 +40,27 @@
   }
 
   function extractIds(text) {
-    return uniq(idsIn(text));
+    const strict = uniq(idsIn(text));
+    return strict.length ? strict : uniq(idsIn(text, true));
   }
 
-  // колонка, где ID больше всего; при равенстве побеждает та, что левее
-  function idsFromCells(cells) {
+  function columnsOf(cells, loose) {
     const byColumn = new Map();
     for (const cell of cells) {
-      const ids = idsIn(cell.value);
+      const ids = idsIn(cell.value, loose);
       if (!ids.length) continue;
       if (!byColumn.has(cell.key)) byColumn.set(cell.key, []);
       byColumn.get(cell.key).push(...ids);
     }
+    return byColumn;
+  }
+
+  // колонка, где ID больше всего; при равенстве побеждает та, что левее
+  function idsFromCells(cells) {
+    // строгий признак первым: он отсекает ID ячеек и контейнеров, а без единого
+    // попадания выбирать не из чего — тогда сгодится любое длинное число
+    let byColumn = columnsOf(cells, false);
+    if (!byColumn.size) byColumn = columnsOf(cells, true);
     if (!byColumn.size) return { ids: [], columns: 0 };
 
     let best = null;
@@ -200,5 +218,12 @@
     return { ids: found.ids, columns: found.columns, column: found.column, text, kind: "text" };
   }
 
-  globalThis.sheetReader = { readIdsFromFile, extractIds, idsIn, looksLikeId, readDelimited };
+  globalThis.sheetReader = {
+    readIdsFromFile,
+    extractIds,
+    idsIn,
+    looksLikeId,
+    looksLikeNumber,
+    readDelimited
+  };
 })();

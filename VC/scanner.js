@@ -368,14 +368,65 @@
     return json;
   }
 
+  // Так ручка отвечает на номер, которого нет или который ей не по формату. Это её
+  // ответ про номер, а не поломка: страница по такому номеру показала бы «не найден».
+  const POSTING_REJECT = new Set([400, 404, 422]);
+
+  function rejectsPosting(response) {
+    return Boolean(response) && !response.error && POSTING_REJECT.has(Number(response.status));
+  }
+
+  // Столько цифр подряд по опечатке не наберёшь: такой номер похож на настоящий,
+  // и отказ по нему стоит перепроверить страницей. А набранное руками «фигня»
+  // ручка заворачивает по делу — на него отвечаем сразу.
+  function looksLikeItemId(value) {
+    return /^[0-9]{10,}$/.test(String(value || ""));
+  }
+
+  // Столько отказов подряд — дело уже не в номерах, а в самом запросе.
+  const REJECT_STREAK = 8;
+  // 200 не тем телом: возможно, ручка сменила формат и подбор пора пересобрать.
+  const ODD_ANSWER_STREAK = 3;
+  // Столько номеров подряд не дали собрать запрос — теперь дело точно в ручке.
+  const PROBE_REJECT_STREAK = 3;
+
+  let rejectStreak = 0;
+  let oddStreak = 0;
+  let probeRejects = 0;
+  // номер, на который ручка точно отвечала историей: на нём и пересобираем запрос,
+  // иначе подбор пойдёт по мусорному номеру и «не подошёл» окажется ни при чём
+  let lastGoodPosting = "";
+
+  // Номера нет — это готовый ответ, а не сбой. Обходить страницей нечего.
+  function missingPosting() {
+    return {
+      ok: true,
+      via: "api",
+      status: "missing",
+      found: false,
+      expected: 0,
+      loaded: 0,
+      complete: true,
+      sample: "",
+      digest: "",
+      report: null
+    };
+  }
+
   // успех — не просто 200, а ответ со списком
   const PROBE_ATTEMPT_MS = 4000;
+
+  // Подбор идёт на номере из списка, и мусорный номер завернёт все варианты подряд.
+  // Отличаем «ручка не та» от «номер не тот»: во втором случае хоронить нечего.
+  let probeOnlyRejects = false;
 
   async function tuneApi(posting, budgetMs) {
     if (apiTune) return { tune: apiTune, json: null };
     readBuildVars();
     apiProbeLog = [];
+    probeOnlyRejects = false;
     const until = Date.now() + Math.max(4000, budgetMs);
+    let onlyRejects = true;
 
     for (const tune of variants()) {
       if (abortFlag) return null;
@@ -391,11 +442,13 @@
         apiProbeLog.push(`${describe(tune)} → ${snippet(response)}`);
         // 401 не про вариант запроса, а про сессию
         if (response && (response.status === 401 || response.status === 403)) return null;
+        if (!rejectsPosting(response)) onlyRejects = false;
         continue;
       }
       // пустая страница при непустом итоге — нумерация не та
       if (!json.records.length && Number(json.totalCount) > 0) {
         apiProbeLog.push(`${describe(tune)} → 200, но список пуст при итоге ${json.totalCount}`);
+        onlyRejects = false;
         continue;
       }
 
@@ -404,6 +457,7 @@
       void toBackground({ ...hintPayload(), probe: apiProbeLog.slice() });
       return { tune: apiTune, json, text: response.text, posting };
     }
+    probeOnlyRejects = onlyRejects;
     return null;
   }
 
@@ -902,15 +956,19 @@
 
     let primed = null;
     if (!apiTune) {
-      const tuned = await tuneApi(posting, Math.floor((deadline - Date.now()) * 0.6));
+      const tuned = await tuneApi(lastGoodPosting || posting, Math.floor((deadline - Date.now()) * 0.6));
       if (!tuned) {
-        return {
-          ok: false,
-          missing: true,
-          reason: apiProbeLog.length ? apiProbeLog[apiProbeLog.length - 1] : "ручка не отвечает",
-          probe: apiProbeLog.slice()
-        };
+        const reason = apiProbeLog.length ? apiProbeLog[apiProbeLog.length - 1] : "ручка не отвечает";
+        // Все варианты завернул сам номер — значит проверять надо номер, а не ручку.
+        // Признаём её мёртвой, только когда так себя ведут несколько номеров подряд.
+        if (probeOnlyRejects && probeRejects < PROBE_REJECT_STREAK) {
+          probeRejects += 1;
+          return { ok: false, reason };
+        }
+        probeRejects = 0;
+        return { ok: false, missing: true, reason, probe: apiProbeLog.slice() };
       }
+      probeRejects = 0;
       if (tuned.json && tuned.posting === posting) primed = tuned;
     }
 
@@ -947,7 +1005,7 @@
         if (!retuned) {
           retuned = true;
           apiTune = null;
-          const again = await tuneApi(posting, Math.floor((deadline - Date.now()) * 0.5));
+          const again = await tuneApi(lastGoodPosting || posting, Math.floor((deadline - Date.now()) * 0.5));
           if (again) {
             primed = again.json && again.posting === posting ? again : null;
             size = apiTune.pageSize;
@@ -960,9 +1018,33 @@
 
       const json = readAudit(response);
       if (!json) {
-        apiTune = null;
-        return { ok: false, missing: true, reason: snippet(response) };
+        // Раньше любой неудобный ответ хоронил ручку целиком: один мусорный номер в списке —
+        // и весь прогон доезжал обходом DOM. Разбираем, чей это отказ.
+        // Отказ посреди листания — не про номер: его первые страницы уже прочитаны.
+        if (page === 0 && rejectsPosting(response)) {
+          rejectStreak += 1;
+          // отказывает всем подряд — верить перестаём, номера уйдут на страницу
+          if (rejectStreak >= REJECT_STREAK) {
+            apiTune = null;
+            rejectStreak = 0;
+            return { ok: false, reason: snippet(response) };
+          }
+          if (!looksLikeItemId(posting)) return missingPosting();
+          return { ok: false, reason: snippet(response) };
+        }
+        if (response.ok) {
+          oddStreak += 1;
+          if (oddStreak >= ODD_ANSWER_STREAK) {
+            apiTune = null;
+            oddStreak = 0;
+          }
+        }
+        // 5xx, обрыв, HTML вместо JSON — беда разовая, подбор остаётся при нас
+        return { ok: false, reason: snippet(response) };
       }
+      rejectStreak = 0;
+      oddStreak = 0;
+      lastGoodPosting = posting;
 
       const raw = Array.isArray(json.records) ? json.records : [];
       const records = keepTransitions(raw);
@@ -1329,7 +1411,17 @@
     return report;
   }
 
-  let nativeOff = false;
+  // Ручку хороним на время, а не насовсем: она пропадает и от разовой выкатки Hub,
+  // а без неё прогон доезжает медленным путём до самого конца.
+  const NATIVE_RETRY_MS = 120000;
+  let nativeOffAt = 0;
+
+  function nativeOff() {
+    if (!nativeOffAt) return false;
+    if (Date.now() - nativeOffAt < NATIVE_RETRY_MS) return true;
+    nativeOffAt = 0;
+    return false;
+  }
 
   function withNative(result, nativeReport) {
     if (!result || result.ok) return result;
@@ -1338,10 +1430,10 @@
 
   async function apiScan(job) {
     let nativeFail = null;
-    if (!nativeOff) {
+    if (!nativeOff()) {
       const native = await nativeScan(job);
       if (native.ok || native.auth) return native;
-      if (native.missing) nativeOff = true;
+      if (native.missing) nativeOffAt = Date.now();
       nativeFail = native;
     }
 
@@ -1400,6 +1492,12 @@
               { ok: false, auth: true, status: response.status, reason: `ответ ${response.status}` },
               nativeReport
             );
+          } else if (page === 0 && rejectsPosting(response)) {
+            // ответ про номер, а не про запрос: перебирать размеры страницы незачем
+            rejectStreak += 1;
+            if (rejectStreak >= REJECT_STREAK) rejectStreak = 0;
+            else if (!looksLikeItemId(posting)) return missingPosting();
+            failure = `ответ ${response.status}`;
           } else if (!response.ok) failure = `ответ ${response.status || "?"}`;
           else failure = "пустой ответ";
           failed = true;
@@ -1421,6 +1519,7 @@
           failed = true;
           break;
         }
+        rejectStreak = 0;
 
         const rows = keepTransitions(raw);
         if (rows.length !== raw.length) filtered = true;
@@ -2302,7 +2401,8 @@
     if (!raw) return { status: "script_error", found: false, expected: 0, loaded: 0, ok: false };
     if (raw.via === "api") {
       return {
-        status: raw.complete ? "complete" : "partial",
+        // «нет такого номера» ручка говорит прямо, гадать по полноте выборки тут нечего
+        status: raw.status || (raw.complete ? "complete" : "partial"),
         via: "api",
         found: Boolean(raw.found),
         expected: Number(raw.expected) || 0,
@@ -2381,8 +2481,9 @@
       if (message.appVersion && !appVersion) appVersion = String(message.appVersion);
       if (message.placeId && !placeId) placeId = String(message.placeId);
       // content script поднимается заново после каждой загрузки и без этого
-      // ходил бы за мёртвой ручкой снова
-      if (message.nativeApi === false) nativeOff = true;
+      // ходил бы за мёртвой ручкой снова; фон же и говорит, когда она ожила
+      if (message.nativeApi === false && !nativeOffAt) nativeOffAt = Date.now();
+      else if (message.nativeApi === true) nativeOffAt = 0;
       if (message.apiTune && !apiTune) apiTune = message.apiTune;
       if (typeof message.cardPlaceless === "boolean" && cardPlaceless == null) {
         cardPlaceless = message.cardPlaceless;
