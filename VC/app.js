@@ -2071,18 +2071,46 @@ mountDetail();
 // предыдущий склад по движениям.
 let statsIndex = [];
 let statsQuery = [];
+// Фильтр держит не одно значение, а список: по графику можно протянуть и выбрать
+// сразу несколько. Пустой список означает «любое».
 const statsFilters = {
-  verdict: "",
-  cell: "",
-  place: "",
-  bucket: "",
-  status: "",
-  op: "",
-  day: "",
-  user: "",
-  hour: "",
-  priceBand: ""
+  verdict: [],
+  cell: [],
+  place: [],
+  bucket: [],
+  status: [],
+  op: [],
+  day: [],
+  user: [],
+  hour: [],
+  priceBand: []
 };
+
+function filterList(key) {
+  return statsFilters[key] || [];
+}
+
+function filterOn(key) {
+  return filterList(key).length > 0;
+}
+
+function filterFits(key, value) {
+  const list = filterList(key);
+  return !list.length || list.includes(value);
+}
+
+function setStatsFilter(key, values) {
+  statsFilters[key] = [...new Set(values.filter(Boolean))];
+  renderStats();
+}
+
+// Клик оставляет одно значение — как было; списком набирают протягиванием и Ctrl.
+function toggleStatsFilter(key, value, add) {
+  const list = filterList(key);
+  const has = list.includes(value);
+  if (add) setStatsFilter(key, has ? list.filter((one) => one !== value) : [...list, value]);
+  else setStatsFilter(key, has && list.length === 1 ? [] : [value]);
+}
 let statsSort = { key: "at", dir: -1 };
 
 const STATS_VIZ = { bars: "Гистограмма", cols: "Столбики", line: "График", donut: "Диаграмма" };
@@ -2259,26 +2287,26 @@ const STATS_NO_SKIP = new Set();
 function passesStats(entry, skip) {
   const s = skip || STATS_NO_SKIP;
   const item = entry.item;
-  if (!s.has("verdict") && statsFilters.verdict && classify(item) !== statsFilters.verdict) return false;
-  if (!s.has("op") && statsFilters.op && entry.op !== statsFilters.op) return false;
-  if (!s.has("status") && statsFilters.status && (item.report?.status || "") !== statsFilters.status) return false;
-  if (!s.has("bucket") && statsFilters.bucket && entry.bucket !== statsFilters.bucket) return false;
-  if (!s.has("cell") && statsFilters.cell) {
-    if (entry.blame.kind !== "cell" || entry.blame.value !== statsFilters.cell) return false;
+  if (!s.has("verdict") && !filterFits("verdict", classify(item))) return false;
+  if (!s.has("op") && !filterFits("op", entry.op)) return false;
+  if (!s.has("status") && !filterFits("status", item.report?.status || "")) return false;
+  if (!s.has("bucket") && !filterFits("bucket", entry.bucket)) return false;
+  if (!s.has("cell") && filterOn("cell")) {
+    if (entry.blame.kind !== "cell" || !filterFits("cell", entry.blame.value)) return false;
   }
-  if (!s.has("place") && statsFilters.place) {
-    if (entry.blame.kind !== "place" || entry.blame.value !== statsFilters.place) return false;
+  if (!s.has("place") && filterOn("place")) {
+    if (entry.blame.kind !== "place" || !filterFits("place", entry.blame.value)) return false;
   }
-  if (!s.has("day") && statsFilters.day && entry.day !== statsFilters.day) return false;
-  if (!s.has("user") && statsFilters.user && entry.user !== statsFilters.user) return false;
-  if (!s.has("hour") && statsFilters.hour && entry.hour !== statsFilters.hour) return false;
-  if (!s.has("priceBand") && statsFilters.priceBand && entry.priceBand !== statsFilters.priceBand) return false;
+  if (!s.has("day") && !filterFits("day", entry.day)) return false;
+  if (!s.has("user") && !filterFits("user", entry.user)) return false;
+  if (!s.has("hour") && !filterFits("hour", entry.hour)) return false;
+  if (!s.has("priceBand") && !filterFits("priceBand", entry.priceBand)) return false;
   if (statsQuery.length && !statsQuery.some((needle) => entry.hay.includes(needle))) return false;
   return true;
 }
 
 function statsFiltersActive() {
-  return Object.values(statsFilters).some(Boolean) || statsQuery.length > 0;
+  return Object.values(statsFilters).some((list) => list.length) || statsQuery.length > 0;
 }
 
 function tallyBy(entries, keyOf) {
@@ -2343,16 +2371,31 @@ function fillStatsOptions() {
   fill("stats-price", bands, "любая");
 }
 
+// В списке выбора одна строка, а фильтр умеет несколько — показываем это прямо,
+// иначе выбранное протягиванием выглядело бы как «фильтра нет».
+const MULTI_VALUE = "\u0001multi";
+
 function syncStatsControls() {
   for (const [key, id] of Object.entries(STATS_SELECTS)) {
     const select = $(id);
-    if (select && select.value !== statsFilters[key]) select.value = statsFilters[key];
+    if (!select) continue;
+    const list = filterList(key);
+    let multi = select.querySelector("option[data-multi]");
+    if (list.length > 1) {
+      if (!multi) {
+        multi = document.createElement("option");
+        multi.dataset.multi = "1";
+        multi.value = MULTI_VALUE;
+        select.appendChild(multi);
+      }
+      multi.textContent = `выбрано: ${list.length}`;
+      if (select.value !== MULTI_VALUE) select.value = MULTI_VALUE;
+      continue;
+    }
+    if (multi) multi.remove();
+    const want = list[0] || "";
+    if (select.value !== want) select.value = want;
   }
-}
-
-function toggleStatsFilter(key, value) {
-  statsFilters[key] = statsFilters[key] === value ? "" : value;
-  renderStats();
 }
 
 function renderStatsKpis(shown) {
@@ -2407,6 +2450,135 @@ function renderStatsKpis(shown) {
   }
 }
 
+/* Выбор нескольких значений протягиванием по графику. Клик оставляет одно
+   значение, Ctrl добавляет по одному, протягивание берёт диапазон между тем,
+   где нажали, и тем, где отпустили. */
+
+function markPickGroup(node, key) {
+  if (node && key) node.dataset.pickGroup = key;
+  return node;
+}
+
+function markPick(node, value) {
+  const text = String(value == null ? "" : value);
+  if (node && text) node.dataset.pick = text;
+  return node;
+}
+
+function addKey(event) {
+  return Boolean(event && (event.ctrlKey || event.metaKey));
+}
+
+// столько пикселей — ещё клик, дальше уже протягивание
+const SWEEP_SLOP = 5;
+let sweep = null;
+let sweepSwallow = false;
+
+function sweepingNow() {
+  return Boolean(sweep && sweep.moved);
+}
+
+function sweepItems(group) {
+  return [...group.querySelectorAll("[data-pick]")];
+}
+
+function paintSweep(items, from, to) {
+  const lo = Math.min(from, to);
+  const hi = Math.max(from, to);
+  items.forEach((node, at) => node.classList.toggle("is-sweep", at >= lo && at <= hi));
+}
+
+function endSweep(apply) {
+  if (!sweep) return;
+  const done = sweep;
+  sweep = null;
+  for (const node of done.items) node.classList.remove("is-sweep");
+  done.host.classList.remove("is-sweeping");
+  if (done.host.hasPointerCapture?.(done.id)) done.host.releasePointerCapture(done.id);
+  if (!done.moved) return;
+  // клик после протягивания пришёл бы на элемент, где отпустили, и затёр бы выбор
+  sweepSwallow = true;
+  if (!apply) return;
+  const lo = Math.min(done.from, done.to);
+  const hi = Math.max(done.from, done.to);
+  const values = done.items.slice(lo, hi + 1).map((node) => node.dataset.pick);
+  setStatsFilter(done.key, done.add ? [...filterList(done.key), ...values] : values);
+}
+
+function mountStatsSweep() {
+  const host = $("stats-panels");
+  if (!host) return;
+
+  host.addEventListener("pointerdown", (event) => {
+    sweepSwallow = false;
+    // пальцем протягивают, чтобы прокрутить, — там оставляем обычное касание
+    if (event.button !== 0 || event.pointerType === "touch") return;
+    const node = event.target.closest?.("[data-pick]");
+    const group = node?.closest?.("[data-pick-group]");
+    if (!node || !group?.dataset.pickGroup) return;
+    const items = sweepItems(group);
+    const at = items.indexOf(node);
+    if (at < 0) return;
+    sweep = {
+      host,
+      group,
+      items,
+      key: group.dataset.pickGroup,
+      from: at,
+      to: at,
+      x: event.clientX,
+      y: event.clientY,
+      moved: false,
+      // с Ctrl протягивание добавляет к уже выбранному, как и клик
+      add: addKey(event),
+      id: event.pointerId
+    };
+  });
+
+  host.addEventListener("pointermove", (event) => {
+    if (!sweep || event.pointerId !== sweep.id) return;
+    if (!sweep.moved) {
+      if (Math.hypot(event.clientX - sweep.x, event.clientY - sweep.y) < SWEEP_SLOP) return;
+      sweep.moved = true;
+      host.classList.add("is-sweeping");
+      // Захват берём только здесь, а не на нажатии: пока он висит, Chromium уводит
+      // на контейнер и mouseup, а click тогда считается от общего предка — и обычный
+      // клик по столбику до его обработчика уже не доходил.
+      host.setPointerCapture?.(event.pointerId);
+      // подсказка бежала бы за курсором через весь график
+      hideVizTip();
+    }
+    // захват увёл события на контейнер, поэтому цель ищем по координатам
+    const under = document.elementFromPoint(event.clientX, event.clientY);
+    const node = under?.closest?.("[data-pick]");
+    if (node && sweep.group.contains(node)) {
+      const at = sweep.items.indexOf(node);
+      if (at >= 0) sweep.to = at;
+    }
+    paintSweep(sweep.items, sweep.from, sweep.to);
+  });
+
+  host.addEventListener("pointerup", (event) => {
+    if (sweep && event.pointerId === sweep.id) endSweep(true);
+  });
+  host.addEventListener("pointercancel", (event) => {
+    if (sweep && event.pointerId === sweep.id) endSweep(false);
+  });
+
+  host.addEventListener(
+    "click",
+    (event) => {
+      if (!sweepSwallow) return;
+      sweepSwallow = false;
+      event.stopPropagation();
+      event.preventDefault();
+    },
+    true
+  );
+}
+
+mountStatsSweep();
+
 function chartEmpty(host, text) {
   host.appendChild(el("p", "bars__none", text));
 }
@@ -2441,6 +2613,8 @@ function hideVizTip() {
 }
 
 function showVizTip(event, content) {
+  // во время протягивания подсказка бежала бы за курсором через весь график
+  if (sweepingNow()) return;
   const data = typeof content === "function" ? content() : content;
   if (!data) return;
   const tip = vizTip();
@@ -2489,7 +2663,10 @@ function shareText(count, total) {
 }
 
 function pickFoot(active, value) {
-  return active === value ? "Клик — снять фильтр" : "Клик — оставить только эти ID";
+  const list = asList(active);
+  if (list.includes(value)) return "Клик — снять, Ctrl — убрать из выбора";
+  if (list.length) return "Клик — оставить только эти, Ctrl — добавить к выбору";
+  return "Клик — оставить только эти ID, протянуть — выбрать несколько";
 }
 
 // цвет закреплён за значением на весь прогон: фильтр не перекрашивает выживших
@@ -2658,7 +2835,7 @@ function seriesByDay(entries, keyOf, colorOf, labelOf, topN) {
   return { days, series };
 }
 
-function legendChip(label, total, color, state, pick) {
+function legendChip(label, total, color, state, pick, value) {
   const chip = document.createElement("button");
   chip.type = "button";
   chip.className = `lchip${state}`;
@@ -2667,13 +2844,21 @@ function legendChip(label, total, color, state, pick) {
   const mark = el("i");
   mark.style.background = color;
   chip.append(mark, el("span", null, label), el("b", null, String(total)));
-  chip.addEventListener("click", pick);
+  markPick(chip, value == null ? label : value);
+  chip.addEventListener("click", (event) => pick(addKey(event)));
   markValue(chip, label, null, total);
   return chip;
 }
 
+function asList(active) {
+  if (Array.isArray(active)) return active;
+  return active ? [active] : [];
+}
+
 function chipState(active, name) {
-  return active === name ? " is-on" : active ? " is-dim" : "";
+  const list = asList(active);
+  if (list.includes(name)) return " is-on";
+  return list.length ? " is-dim" : "";
 }
 
 function renderBarChart(host, rows, options) {
@@ -2689,12 +2874,14 @@ function renderBarChart(host, rows, options) {
   // число строк отдаём в CSS: по нему высота делится поровну
   const rowsBox = el("div", "bars__rows");
   rowsBox.style.setProperty("--bar-rows", String(top.length));
+  markPickGroup(rowsBox, options.filterKey);
   for (const [value, count] of top) {
     const active = options.active;
     const row = document.createElement("button");
     row.type = "button";
     row.className = `hbar${chipState(active, value)}`;
-    row.addEventListener("click", () => options.pick(value));
+    markPick(row, value);
+    row.addEventListener("click", (event) => options.pick(value, addKey(event)));
 
     const hue = options.colorPerValue ? options.colorPerValue(value) : options.color;
     bindVizTip(row, {
@@ -2773,6 +2960,7 @@ function renderColsChart(host, slice, dimKey, options) {
   host.appendChild(legend);
 
   const cols = el("div", "cols");
+  markPickGroup(cols, options.filterKey);
   const max = Math.max(...top.map(([value]) => {
     const counts = split.get(value);
     return counts.hit + counts.miss + counts.issue;
@@ -2785,7 +2973,8 @@ function renderColsChart(host, slice, dimKey, options) {
     const col = document.createElement("button");
     col.type = "button";
     col.className = `col${chipState(active, value)}`;
-    col.addEventListener("click", () => options.pick(value));
+    markPick(col, value);
+    col.addEventListener("click", (event) => options.pick(value, addKey(event)));
 
     const grand = totals.hit + totals.miss + totals.issue;
     const tipRows = [["всего ID", total]];
@@ -2885,9 +3074,11 @@ function renderLineChart(host, data, options) {
   box.appendChild(labels);
 
   const legend = el("div", "lchips");
+  markPickGroup(legend, options.filterKey);
   for (const line of series) {
     legend.appendChild(
-      legendChip(line.label, line.total, line.color, chipState(options.active, line.name), () => options.pick(line.name))
+      legendChip(line.label, line.total, line.color, chipState(options.active, line.name),
+        (add) => options.pick(line.name, add), line.name)
     );
   }
   box.appendChild(legend);
@@ -2921,6 +3112,7 @@ function renderDonutChart(host, rows, options) {
   const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
   svg.setAttribute("viewBox", "0 0 120 120");
   svg.setAttribute("class", "donut__ring");
+  markPickGroup(svg, options.filterKey);
 
   const R = 44;
   const LEN = 2 * Math.PI * R;
@@ -2946,7 +3138,10 @@ function renderDonutChart(host, rows, options) {
       ],
       foot: seg.pickable ? pickFoot(options.active, seg.name) : ""
     });
-    if (seg.pickable) circle.addEventListener("click", () => options.pick(seg.name));
+    if (seg.pickable) {
+      markPick(circle, seg.name);
+      circle.addEventListener("click", (event) => options.pick(seg.name, addKey(event)));
+    }
     svg.appendChild(circle);
     offset += share;
   }
@@ -2966,10 +3161,12 @@ function renderDonutChart(host, rows, options) {
   box.appendChild(svg);
 
   const legend = el("div", "lchips lchips--column");
+  markPickGroup(legend, options.filterKey);
   for (const seg of segments) {
     if (seg.pickable) {
       legend.appendChild(
-        legendChip(seg.label, seg.count, seg.color, chipState(options.active, seg.name), () => options.pick(seg.name))
+        legendChip(seg.label, seg.count, seg.color, chipState(options.active, seg.name),
+          (add) => options.pick(seg.name, add), seg.name)
       );
     } else {
       const still = el("span", "lchip is-rest");
@@ -3100,8 +3297,8 @@ function renderStatsPanel(panel, index) {
   const slice = statsIndex.filter(
     (entry) => passesStats(entry, new Set([dim.filter])) && dim.of(entry)
   );
-  const active = statsFilters[dim.filter];
-  const pick = (value) => toggleStatsFilter(dim.filter, value);
+  const active = filterList(dim.filter);
+  const pick = (value, add) => toggleStatsFilter(dim.filter, value, add);
   const labelOf = dimLabelOf(panel.dim);
   const colorOf = dimColorOf(panel.dim, slice);
   const empty = "Под фильтры ничего не попало.";
@@ -3117,8 +3314,9 @@ function renderStatsPanel(panel, index) {
         2
       );
       renderLineChart(chart, data, {
-        active: statsFilters.verdict,
-        pick: (value) => toggleStatsFilter("verdict", value),
+        active: filterList("verdict"),
+        pick: (value, add) => toggleStatsFilter("verdict", value, add),
+        filterKey: "verdict",
         empty
       });
     } else {
@@ -3126,6 +3324,7 @@ function renderStatsPanel(panel, index) {
       renderLineChart(chart, seriesByDay(slice, dim.of, colorOf, labelOf, 3), {
         active,
         pick,
+        filterKey: dim.filter,
         empty,
         foot: rows.length > 3 ? "линии — три самых частых значения; остальное в гистограмме" : ""
       });
@@ -3134,12 +3333,19 @@ function renderStatsPanel(panel, index) {
   }
 
   if (panel.viz === "donut") {
-    renderDonutChart(chart, dimRows(panel.dim, slice), { active, pick, colorOf, labelOf, empty });
+    renderDonutChart(chart, dimRows(panel.dim, slice), {
+      active,
+      pick,
+      filterKey: dim.filter,
+      colorOf,
+      labelOf,
+      empty
+    });
     return section;
   }
 
   if (panel.viz === "cols") {
-    renderColsChart(chart, slice, panel.dim, { active, pick, empty });
+    renderColsChart(chart, slice, panel.dim, { active, pick, filterKey: dim.filter, empty });
     return section;
   }
 
@@ -3156,6 +3362,7 @@ function renderStatsPanel(panel, index) {
     labelOf,
     active,
     pick,
+    filterKey: dim.filter,
     empty,
     foot: missing ? `без значения: ${missing} ${plural(missing, ["ID", "ID", "ID"])}` : ""
   });
@@ -3526,7 +3733,11 @@ function renderStatsChips() {
     ["user", "пользователь"],
     ["priceBand", "цена"]
   ];
-  const active = chips.filter(([key]) => statsFilters[key]);
+  // по фишке на каждое выбранное значение: снимать их хочется поодиночке
+  const active = [];
+  for (const [key, label] of chips) {
+    for (const value of filterList(key)) active.push({ key, label, value });
+  }
   box.closest(".detail__bar")?.classList.toggle("has-chips", active.length > 0);
   if (!active.length) {
     emptyLater(box);
@@ -3534,14 +3745,13 @@ function renderStatsChips() {
   }
 
   emptyNow(box);
-  for (const [key, label] of active) {
-    const chip = el("span", "detail__chip", `${label}: ${statsFilters[key]}`);
+  for (const { key, label, value } of active) {
+    const chip = el("span", "detail__chip", `${label}: ${value}`);
     const drop = el("button", null, "×");
     drop.type = "button";
     drop.title = "Снять фильтр";
     drop.addEventListener("click", () => {
-      statsFilters[key] = "";
-      renderStats();
+      setStatsFilter(key, filterList(key).filter((one) => one !== value));
     });
     chip.appendChild(drop);
     box.appendChild(chip);
@@ -3559,7 +3769,7 @@ function renderStats() {
   const shown = statsIndex.filter((entry) => passesStats(entry));
 
   renderTally("stats-count", shown.length, statsIndex.length);
-  renderFilterCount("stats", countActive(Object.values(statsFilters)));
+  renderFilterCount("stats", countActive(Object.values(statsFilters).map((list) => list.length)));
   const reset = $("stats-reset");
   reveal(reset, statsFiltersActive());
 
@@ -3801,14 +4011,15 @@ mountCopyMenu();
 
 function resetStatsFilters() {
   statsQuery = [];
-  for (const key of Object.keys(statsFilters)) statsFilters[key] = "";
+  for (const key of Object.keys(statsFilters)) statsFilters[key] = [];
   const search = $("stats-search");
   if (search) search.value = "";
   for (const id of Object.values(STATS_SELECTS)) {
     const select = $(id);
-    if (select) select.value = "";
+    if (!select) continue;
+    select.querySelector("option[data-multi]")?.remove();
+    select.value = "";
   }
-  statsFilters.day = "";
 }
 
 function jumpToDetail(posting) {
@@ -3837,8 +4048,9 @@ function mountStats() {
     const select = $(id);
     if (!select) continue;
     select.addEventListener("change", () => {
-      statsFilters[key] = select.value;
-      renderStats();
+      // «выбрано: N» — это отражение состояния, а не вариант выбора
+      if (select.value === MULTI_VALUE) return;
+      setStatsFilter(key, select.value ? [select.value] : []);
     });
   }
 
