@@ -174,53 +174,57 @@ function plural(count, forms) {
   return forms[2];
 }
 
+// Колонки Excel и CSV разделены табом или «;», список в одну строку — пробелами.
+const CELL_SPLIT_RE = /[\t;,]/;
+// Похоже на номер, даже если это не он: буквы, цифры и знаки из ссылок Hub.
+const TOKEN_RE = /^[A-Za-z0-9:_-]+$/;
+
+function splitCells(line) {
+  const by = CELL_SPLIT_RE.test(line) ? CELL_SPLIT_RE : /\s+/;
+  return line.split(by).map((part) => part.trim()).filter(Boolean);
+}
+
+// Что бы ни стояло в строке, до проверки она должна дойти: угадывать за
+// человека, какая часть «настоящая», мы можем только когда видим ID.
+function tokenize(line) {
+  const cells = splitCells(line);
+  // в строке из Excel колонок несколько и ID далеко не первый
+  const id = cells.find(sheetReader.looksLikeId) || cells.find(sheetReader.looksLikeNumber);
+  if (id) return [id];
+  // ID не видно, выбирать не из чего: список коротких номеров разбираем по частям,
+  // а всё остальное отдаём строкой целиком — иначе от ввода останется первое слово
+  if (cells.length > 1 && cells.every((cell) => TOKEN_RE.test(cell))) return cells;
+  return [line];
+}
+
 function parsePostings(raw) {
   const lines = String(raw || "")
     .split(/\r?\n/)
     .map((line) => line.trim())
     .filter(Boolean);
 
-  // в строке из Excel колонок несколько и ID далеко не первый
-  const firstId = (parts) => parts.find((part) => sheetReader.looksLikeId(part));
-
-  const tokens = [];
-  for (const line of lines) {
-    if (line.includes("\t")) {
-      const parts = line.split("\t").map((part) => part.trim()).filter(Boolean);
-      tokens.push(firstId(parts) || parts[0] || "");
-      continue;
-    }
-    if (/[,;]/.test(line)) {
-      const parts = line.split(/[,;]+/).map((part) => part.trim()).filter(Boolean);
-      const id = firstId(parts);
-      if (id) tokens.push(id);
-      else tokens.push(...parts);
-      continue;
-    }
-    const parts = line.split(/\s+/);
-    const id = firstId(parts);
-    if (id) tokens.push(id);
-    else if (parts.length > 1 && parts.every((part) => /^[A-Za-z0-9:_-]+$/.test(part))) tokens.push(...parts);
-    else tokens.push(parts[0]);
-  }
-
   const out = [];
   const seen = new Set();
   let duplicates = 0;
-  for (let token of tokens) {
-    const fromUrl = token.match(/stock\/item\/Lozon:([^?&#/]+)/i);
-    if (fromUrl) token = decodeURIComponent(fromUrl[1]);
-    token = token.replace(/^Lozon:/i, "").trim();
-    if (!token) continue;
-    const key = token.toLowerCase();
-    if (seen.has(key)) {
-      duplicates += 1;
-      continue;
+  let odd = 0;
+  for (const line of lines) {
+    for (let token of tokenize(line)) {
+      const fromUrl = token.match(/stock\/item\/Lozon:([^?&#/]+)/i);
+      if (fromUrl) token = decodeURIComponent(fromUrl[1]);
+      token = token.replace(/^Lozon:/i, "").trim();
+      if (!token) continue;
+      const key = token.toLowerCase();
+      if (seen.has(key)) {
+        duplicates += 1;
+        continue;
+      }
+      seen.add(key);
+      if (!sheetReader.looksLikeNumber(token)) odd += 1;
+      out.push(token);
     }
-    seen.add(key);
-    out.push(token);
   }
   out.duplicates = duplicates;
+  out.odd = odd;
   return out;
 }
 
@@ -674,10 +678,12 @@ function resetScanHud(total) {
   renderRunState();
 }
 
-function renderBrief() {
+// Разбор идёт на каждое нажатие клавиши, на тысяче строк он не бесплатный —
+// у кого список уже на руках, тот его и передаёт.
+function renderBrief(parsed) {
   const list = $("brief");
   if (!list) return;
-  const count = parsePostings(postingsEl.value).length;
+  const count = (parsed || parsePostings(postingsEl.value)).length;
   const rate = Number(ui.rates.auto) || Number(ui.rates[settings.mode]) || 0;
 
   const rows = [["", `<b>${count}</b> ${plural(count, ["номер", "номера", "номеров"])} в очереди`]];
@@ -703,15 +709,22 @@ function updateCount() {
   const parsed = parsePostings(postingsEl.value);
   $("count-badge").textContent = String(parsed.length);
   const stats = $("input-stats");
-  if (!parsed.length) stats.textContent = "Пока пусто";
-  else if (parsed.duplicates) stats.textContent = `${parsed.length} уникальных · ${parsed.duplicates} дублей убрано`;
-  else stats.textContent = `${parsed.length} уникальных номеров`;
-  renderBrief();
-  updateFormState();
+  if (!parsed.length) {
+    stats.textContent = "Пока пусто";
+  } else {
+    const parts = [];
+    if (parsed.duplicates) parts.push(`${parsed.duplicates} дублей убрано`);
+    // не молчим про мусор, но и не выкидываем его: проверим и покажем в отчёте
+    if (parsed.odd) parts.push(`${parsed.odd} не похожи на ID — проверю как есть`);
+    const head = parts.length ? `${parsed.length} уникальных` : `${parsed.length} уникальных номеров`;
+    stats.textContent = [head, ...parts].join(" · ");
+  }
+  renderBrief(parsed);
+  updateFormState(parsed);
 }
 
-function updateFormState() {
-  const hasPostings = parsePostings(postingsEl.value).length > 0;
+function updateFormState(parsed) {
+  const hasPostings = (parsed || parsePostings(postingsEl.value)).length > 0;
   const hasWarehouse = warehouseEl.value.trim().length > 0;
   $("btn-start").disabled = ui.running || !(hasPostings && hasWarehouse);
   $("btn-clear").disabled = !postingsEl.value.trim();
@@ -1285,7 +1298,7 @@ async function readFile(file) {
   }
 
   if (result.kind === "xlsx") {
-    showError(`В ${file.name} не нашлось ни одного ID (от 10 цифр, в конце 000).`);
+    showError(`В ${file.name} не нашлось ни одного ID (от 10 цифр подряд).`);
     return;
   }
   if (!result.text.trim()) {

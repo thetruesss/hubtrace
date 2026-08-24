@@ -91,6 +91,10 @@ const state = {
   apiRetries: 0,
   apiAuthStreak: 0,
   apiInconclusive: 0,
+  apiMismatch: 0,
+  apiChecks: 0,
+  apiRecheck: false,
+  nativeApiOffAt: 0,
   recipeStale: false,
   recipeStaleAt: 0,
 
@@ -774,6 +778,7 @@ async function apiScan(worker, posting) {
     }
     if (reply?.nativeMissing && state.nativeApi) {
       state.nativeApi = false;
+      state.nativeApiOffAt = Date.now();
       broadcastHints();
     }
     if (reply?.notReady) {
@@ -932,8 +937,21 @@ function broadcastHints() {
   }
 }
 
+// Ручку признают пропавшей и по разовой причине — выкатке Hub, ответу шлюза.
+// Без второго шанса весь остаток прогона идёт мимо неё.
+function reviveNativeApi() {
+  if (state.nativeApi || !state.nativeApiOffAt) return;
+  if (Date.now() - state.nativeApiOffAt < NATIVE_RECOVER_MS) return;
+  state.nativeApi = true;
+  state.nativeApiOffAt = 0;
+  notice("api", "Пробую прямую ручку истории заново.");
+  broadcastHints();
+  emitState(true);
+}
+
 function apiAllowed(worker) {
   if (!state.useApi || !cfg().api || !worker.hubReady) return false;
+  reviveNativeApi();
   if (!state.nativeApi && !state.recipe) return false;
 
   if (state.recipeStale) {
@@ -977,17 +995,39 @@ function lessonDue() {
   return !state.lessonDone && !state.lessonBusy && state.lessonTries < LESSON_TRIES;
 }
 
+// Сверка стоит целого обхода DOM поверх запроса. Раз в 25 номеров это десятая
+// часть прогона, и на тысячах номеров она и съедает всю выгоду быстрого пути.
+// Каждая сошедшаяся сверка отодвигает следующую вдвое — до потолка.
+const SPOT_CHECK_BACKOFF = 4;
+
+function spotCheckEvery() {
+  const base = cfg().spotCheckEvery;
+  if (!base) return 0;
+  return base * Math.pow(2, Math.min(state.apiChecks, SPOT_CHECK_BACKOFF));
+}
+
 function spotCheckDue() {
-  const every = cfg().spotCheckEvery;
+  if (state.apiRecheck) return true;
+  const every = spotCheckEvery();
   if (!every) return false;
   return state.apiSinceCheck >= every;
 }
 
 const API_RETRY_BASE_MS = 20000;
-const API_MAX_RETRIES = 6;
+// Потолок паузы: дальше растить её незачем, а бросать попытки — тем более.
+// Прогон на тысячи номеров переживает и выкатку Hub, и обрыв сети, и лишний час
+// на медленном пути стоит дороже одной проверки раз в пять минут.
+const API_RETRY_CAP_MS = 300000;
+// Расхождение с DOM — повод не верить, но одиночное расхождение бывает и от
+// недочитанной страницы, поэтому ждём подтверждения.
+const API_MISMATCH_LIMIT = 2;
+// Отключение по расхождению держим дольше: данные важнее скорости.
+const API_MISMATCH_RETRY_MS = 180000;
 const API_FAIL_LIMIT = 5;
 const RECIPE_REFRESH_TIMEOUT_MS = 60000;
 const API_AUTH_STREAK_LIMIT = 6;
+// Ручка пропадает и от разовой выкатки — через это время пробуем её снова.
+const NATIVE_RECOVER_MS = 180000;
 
 // свежесть важнее score: повторный захват даёт тот же score, но новый токен
 function acceptRecipe(next) {
@@ -1007,40 +1047,41 @@ function markRecipeStale(status) {
   emitState(true);
 }
 
-// Расхождение с DOM или одинаковые ответы — это неверные данные, возврата
-// нет. Таймаут или разовый сбой сети — временно.
+// Отключаем на время, а не навсегда: и расхождение, и молчание ручки чаще
+// оказываются мгновением прогона, а не приговором. Насовсем оставаться на DOM —
+// это часы разницы на большом списке.
 function blockApi(reason, kind) {
   if (state.apiState === "blocked") return;
   state.apiState = "blocked";
   state.apiBlockKind = kind || "mismatch";
   state.apiDigests = [];
 
-  let text = reason;
-  if (state.apiBlockKind === "unavailable" && state.apiRetries < API_MAX_RETRIES) {
-    const wait = API_RETRY_BASE_MS * Math.pow(2, state.apiRetries);
-    state.apiRetryAt = Date.now() + wait;
-    text = `${reason} Попробую снова через ${Math.round(wait / 1000)} с.`;
-  } else {
-    state.apiRetryAt = 0;
-  }
+  const wait =
+    state.apiBlockKind === "mismatch"
+      ? API_MISMATCH_RETRY_MS
+      : Math.min(API_RETRY_CAP_MS, API_RETRY_BASE_MS * Math.pow(2, state.apiRetries));
+  state.apiRetryAt = Date.now() + wait;
 
-  notice("api", text);
+  notice("api", `${reason} Попробую снова через ${Math.round(wait / 1000)} с.`);
   retuneThreads();
   emitState(true);
 }
 
 function apiRetryDue() {
   if (state.apiState !== "blocked") return false;
-  if (state.apiBlockKind !== "unavailable") return false;
   if (!state.apiRetryAt || Date.now() < state.apiRetryAt) return false;
 
+  // после расхождения возвращаемся не на веру, а на сверку: до неё путь снова «неизвестный»
+  const wasMismatch = state.apiBlockKind === "mismatch";
   state.apiRetries += 1;
   state.apiRetryAt = 0;
   state.apiBlockKind = "";
   state.apiState = "unknown";
   state.apiFailStreak = 0;
+  state.apiMismatch = 0;
   state.apiSinceCheck = 0;
-  notice("api", `Пробую быстрый путь заново (попытка ${state.apiRetries} из ${API_MAX_RETRIES}).`);
+  if (wasMismatch) state.apiChecks = 0;
+  notice("api", `Пробую быстрый путь заново (попытка ${state.apiRetries}).`);
   emitState(true);
   return true;
 }
@@ -1063,6 +1104,8 @@ function requeueApiResults() {
 const API_INCONCLUSIVE_LIMIT = 3;
 
 function calibrate(api, dom, index) {
+  // сверка состоялась, второй заход по расхождению больше не нужен
+  state.apiRecheck = false;
   if (!api) {
     if (state.recipeStale) {
       if (state.apiAuthStreak >= API_AUTH_STREAK_LIMIT) {
@@ -1083,6 +1126,9 @@ function calibrate(api, dom, index) {
   if (!domTrusted) {
     state.apiSinceCheck = 0;
     state.apiInconclusive += 1;
+    // сверка не удалась — повторять её тем же шагом значит и дальше платить
+    // обходом за ответ «сравнить не с чем»
+    state.apiChecks += 1;
     if (
       state.apiInconclusive >= API_INCONCLUSIVE_LIMIT &&
       state.apiState !== "trusted" &&
@@ -1105,6 +1151,8 @@ function calibrate(api, dom, index) {
   state.apiSinceCheck = 0;
   if (Boolean(api.found) === Boolean(dom?.found)) {
     state.apiFailStreak = 0;
+    state.apiMismatch = 0;
+    state.apiChecks += 1;
     // сверку мог запустить соседний воркер ещё до блокировки
     if (state.apiState === "blocked") return;
     if (state.apiState !== "trusted") {
@@ -1118,11 +1166,24 @@ function calibrate(api, dom, index) {
     return;
   }
 
+  // Обход считается полным по счётчику страницы, а он врёт, когда таблица не
+  // домотана. Одного расхождения мало: ждём второго подряд, а спорный номер
+  // в любом случае переснимаем обоими путями.
+  state.apiMismatch += 1;
+  state.apiChecks = 0;
+  const where = dom?.posting || index;
+  if (state.apiMismatch < API_MISMATCH_LIMIT) {
+    state.apiRecheck = true;
+    notice("api", `Быстрый путь разошёлся с обходом DOM на ${where}. Проверяю ещё раз на следующем номере.`);
+    emitState(true);
+    return;
+  }
+
   const back = requeueApiResults();
   blockApi(
     back
-      ? `Быстрый путь разошёлся с обходом DOM на ${dom?.posting || index}. Отключил его и переснимаю ${back} номер(ов).`
-      : `Быстрый путь разошёлся с обходом DOM на ${dom?.posting || index}. Отключил его.`,
+      ? `Быстрый путь разошёлся с обходом DOM на ${where}. Отключил его и переснимаю ${back} номер(ов).`
+      : `Быстрый путь разошёлся с обходом DOM на ${where}. Отключил его.`,
     "mismatch"
   );
 }
@@ -1300,7 +1361,12 @@ function coverageOf(item) {
   return Math.min(1, loaded / expected);
 }
 
+// У «нет страницы» дочитывать нечего: круг повторов гонял такой номер обоими
+// путями трижды, а ответ на него один и тот же — номера в Hub нет.
+const NOTHING_MORE = ["missing", "stopped", "paused"];
+
 function needsMore(item) {
+  if (NOTHING_MORE.includes(item?.status)) return false;
   return isIssue(item) || coverageOf(item) < COVERAGE_TARGET;
 }
 
@@ -1557,6 +1623,7 @@ async function runScan(payload, postings, warehouse) {
   if (state.autoThreads) state.threads = autoThreadCount();
   state.apiNote = "";
   state.nativeApi = true;
+  state.nativeApiOffAt = 0;
   state.apiTune = null;
   state.apiProbe = [];
   state.changeLabels = {};
@@ -1578,6 +1645,9 @@ async function runScan(payload, postings, warehouse) {
   state.apiRetries = 0;
   state.apiAuthStreak = 0;
   state.apiInconclusive = 0;
+  state.apiMismatch = 0;
+  state.apiChecks = 0;
+  state.apiRecheck = false;
   state.recipeStale = false;
   state.recipeStaleAt = 0;
   state.domInFlight = 0;
