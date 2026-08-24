@@ -4624,8 +4624,10 @@ a.t-id__code:hover {
   }
 }
 
-.stats__table tbody tr {
-  animation: row-in 0.26s var(--ease) both;
+/* Строки таблицы оживляются не по одной, а всем телом: построчная волна шла
+   на каждую букву в поиске — ровно та дёрганность, от которой уходим. */
+.stats__table tbody.is-swap {
+  animation: swap-in 0.2s var(--ease);
 }
 
 /* анимация появления — только новой панели: на всех сразу любой клик по
@@ -4817,4 +4819,123 @@ kbd,
 
 .radar.is-retry .radar__hud em {
   color: var(--text-dim);
+}
+
+/* ------------------------------------------------------------------ */
+/*  показ и уход без рывка                                             */
+
+/* Строки прошлых прогонов: ссылались на row-in, а сами кадры где-то потерялись,
+   и появление стало мгновенным. */
+@keyframes row-in {
+  from {
+    opacity: 0;
+    transform: translateY(-6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* Перерисованный список проявляется целиком: строки поодиночке дают волну. */
+@keyframes swap-in {
+  from {
+    opacity: 0;
+    transform: translateY(3px);
+  }
+}
+
+.is-swap {
+  animation: swap-in 0.2s var(--ease);
+}
+
+/* Общее гашение: hidden снимается уже после перехода, поэтому элемент успевает
+   уйти плавно, а не пропасть в том же кадре. */
+.reveal {
+  transition:
+    opacity 0.18s var(--ease),
+    transform 0.2s var(--ease);
+}
+
+.reveal.is-out {
+  opacity: 0;
+  transform: translateY(-3px);
+  pointer-events: none;
+}
+
+/* Счётчик и «Сбросить всё» меняют ширину соседей: гасить их мало, нужно ещё
+   и схлопнуть место, иначе на месте пропажи остаётся зазор. */
+.filterbox__count,
+.filterbox__head .btn {
+  overflow: hidden;
+  white-space: nowrap;
+  transition:
+    max-width 0.22s var(--ease),
+    min-width 0.22s var(--ease),
+    padding 0.22s var(--ease),
+    margin 0.22s var(--ease),
+    opacity 0.18s var(--ease);
+}
+
+.filterbox__count {
+  max-width: 4rem;
+}
+
+.filterbox__head .btn {
+  max-width: 12rem;
+}
+
+.filterbox__count.is-out,
+.filterbox__head .btn.is-out {
+  max-width: 0;
+  min-width: 0;
+  padding-left: 0;
+  padding-right: 0;
+  border-width: 0;
+  opacity: 0;
+  transform: none;
+}
+
+/* съедаем зазор кнопки, иначе схлопнутый счётчик оставляет после себя пустоту */
+.filterbox__count.is-out {
+  margin-left: -8px;
+}
+
+/* Строка ошибки растит панель: без схлопывания по высоте кнопка «Проверить»
+   подпрыгивает вместе с её появлением. */
+.error {
+  overflow: hidden;
+  max-height: 6rem;
+  transition:
+    max-height 0.24s var(--ease),
+    margin-top 0.24s var(--ease),
+    opacity 0.18s var(--ease);
+}
+
+.error.is-out {
+  max-height: 0;
+  margin-top: 0;
+  opacity: 0;
+  transform: none;
+}
+
+/* Кнопка выгрузки висит поверх раскладки — ей достаточно уйти вниз и погаснуть. */
+.fab.reveal {
+  transition:
+    opacity 0.2s var(--ease),
+    transform 0.24s var(--sp),
+    box-shadow 0.24s var(--ease),
+    background 0.24s var(--ease);
+}
+
+.fab.reveal.is-out {
+  opacity: 0;
+  transform: translateY(10px) scale(0.96);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .is-swap,
+  .last__row {
+    animation: none !important;
+  }
 }

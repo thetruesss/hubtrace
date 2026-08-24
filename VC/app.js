@@ -228,6 +228,79 @@ function parsePostings(raw) {
   return out;
 }
 
+// hidden убирает элемент из раскладки в том же кадре, и соседи прыгают. Показываем
+// в два шага: сначала возвращаем в поток и только следующим кадром снимаем гашение,
+// а прячем наоборот — гасим переходом, из потока убираем после него.
+const REVEAL_MS = 240;
+const revealTimers = new WeakMap();
+
+function reveal(node, show) {
+  if (!node) return;
+  window.clearTimeout(revealTimers.get(node));
+  node.classList.add("reveal");
+  if (REDUCED_MOTION.matches) {
+    node.classList.toggle("is-out", !show);
+    node.hidden = !show;
+    return;
+  }
+  if (show) {
+    if (node.hidden) {
+      // разметка приходит просто скрытой, без гашения: без него первый показ
+      // будет мгновенным, потому что снимать нечего
+      node.classList.add("is-out");
+      node.hidden = false;
+      // пересчёт раскладки обязателен, иначе оба класса схлопнутся в один кадр
+      void node.offsetWidth;
+    }
+    node.classList.remove("is-out");
+    return;
+  }
+  if (node.hidden) {
+    node.classList.add("is-out");
+    return;
+  }
+  node.classList.add("is-out");
+  revealTimers.set(
+    node,
+    window.setTimeout(() => {
+      node.hidden = true;
+    }, REVEAL_MS)
+  );
+}
+
+// Список перерисовывается целиком, и без этого он подменяется рывком. Оживляем
+// контейнер, а не строки: построчная волна на каждую букву в поиске — та же дёрганность.
+function playSwap(node) {
+  if (!node || REDUCED_MOTION.matches) return;
+  node.classList.remove("is-swap");
+  // перезапуск анимации требует пересчёта раскладки между снятием и возвратом класса
+  void node.offsetWidth;
+  node.classList.add("is-swap");
+}
+
+// Полоса схлопывается переходом, поэтому вычищать её сразу нельзя: содержимое
+// исчезнет рывком, а закрываться будет уже пустое место.
+const emptyTimers = new WeakMap();
+
+function emptyLater(node, ms) {
+  if (!node) return;
+  window.clearTimeout(emptyTimers.get(node));
+  if (REDUCED_MOTION.matches) {
+    node.replaceChildren();
+    return;
+  }
+  emptyTimers.set(
+    node,
+    window.setTimeout(() => node.replaceChildren(), ms == null ? REVEAL_MS : ms)
+  );
+}
+
+function emptyNow(node) {
+  if (!node) return;
+  window.clearTimeout(emptyTimers.get(node));
+  node.replaceChildren();
+}
+
 function toast(kind, text) {
   const host = $("toasts");
   if (!host || !text) return;
@@ -399,7 +472,7 @@ function renderFeed(item) {
   const feed = $("feed");
   feed.prepend(li);
   while (feed.children.length > 120) feed.lastElementChild.remove();
-  $("feed-empty").hidden = true;
+  reveal($("feed-empty"), false);
 }
 
 const PHASE_LABELS = {
@@ -417,7 +490,7 @@ function renderLanes() {
   if (!list) return;
 
   count.textContent = String(ui.workers.length);
-  empty.hidden = ui.workers.length > 0;
+  reveal(empty, ui.workers.length === 0);
   list.innerHTML = "";
 
   for (const worker of ui.workers) {
@@ -537,7 +610,7 @@ function renderRunState() {
 
   const empty = $("feed-empty");
   const hasItems = $("feed").children.length > 0;
-  empty.hidden = hasItems;
+  reveal(empty, !hasItems);
   if (!hasItems) {
     empty.textContent =
       mode === "live"
@@ -743,7 +816,7 @@ function renderFab() {
   const fab = $("btn-xlsx");
   if (!fab) return;
   const ready = Boolean(ui.finished) && ui.currentStep === "result";
-  fab.hidden = !ready;
+  reveal(fab, ready);
   fab.classList.toggle("is-waiting", ready && !ui.reportSaved);
   fab.classList.toggle("is-done", ready && ui.reportSaved);
 
@@ -761,8 +834,9 @@ function renderFab() {
 }
 
 function showError(message) {
-  inputError.hidden = !message;
-  inputError.textContent = message || "";
+  // текст меняем только при показе: на уходе он нужен, пока строка схлопывается
+  if (message) inputError.textContent = message;
+  reveal(inputError, Boolean(message));
 }
 
 function splitResults(results) {
@@ -890,10 +964,10 @@ function renderRuns() {
   if (!host) return;
 
   const runs = ui.runs;
-  if (empty) empty.hidden = runs.length > 0;
+  reveal(empty, runs.length === 0);
   if (count) {
-    count.hidden = !runs.length;
-    count.textContent = String(runs.length);
+    reveal(count, runs.length > 0);
+    if (runs.length) count.textContent = String(runs.length);
   }
   $("last-run")?.classList.toggle("is-empty", runs.length === 0);
 
@@ -1863,8 +1937,8 @@ function renderFilterCount(name, active) {
     select.closest(".pick")?.classList.toggle("is-set", Boolean(select.value));
   }
   if (!box.count) return;
-  box.count.hidden = !active;
-  box.count.textContent = String(active);
+  reveal(box.count, active > 0);
+  if (active) box.count.textContent = String(active);
   box.btn.classList.toggle("has-filters", active > 0);
 }
 
@@ -1882,9 +1956,13 @@ document.addEventListener("keydown", (event) => {
 function renderDetailChips() {
   const box = $("detail-chips");
   if (!box) return;
-  box.innerHTML = "";
-  box.closest(".detail__bar")?.classList.toggle("has-chips", detailQuery.length >= 2);
-  if (detailQuery.length < 2) return;
+  const show = detailQuery.length >= 2;
+  box.closest(".detail__bar")?.classList.toggle("has-chips", show);
+  if (!show) {
+    emptyLater(box);
+    return;
+  }
+  emptyNow(box);
   for (const value of detailQuery) {
     const chip = el("span", "detail__chip", value);
     const drop = el("button", null, "×");
@@ -1909,8 +1987,7 @@ function renderDetail() {
 
   renderTally("detail-count", shown.length, all);
   renderFilterCount("detail", countActive(Object.values(detailFilters)));
-  const reset = $("filter-reset");
-  if (reset) reset.hidden = !filtersActive();
+  reveal($("filter-reset"), filtersActive());
   renderDetailChips();
 
   list.innerHTML = "";
@@ -1921,6 +1998,7 @@ function renderDetail() {
       el("span", null, all ? "Смягчите фильтры или очистите поиск." : "Запустите проверку — детали появятся здесь.")
     );
     list.appendChild(empty);
+    playSwap(list);
     return;
   }
 
@@ -1933,6 +2011,7 @@ function renderDetail() {
     more.appendChild(el("span", null, "Сузьте поиск или фильтры, чтобы увидеть остальные."));
     list.appendChild(more);
   }
+  playSwap(list);
 }
 
 function mountDetail() {
@@ -3392,6 +3471,7 @@ function renderStatsTable(shown) {
   const body = $("stats-rows");
   if (!body) return;
   body.innerHTML = "";
+  playSwap(body);
 
   renderStatsHead();
 
@@ -3431,7 +3511,6 @@ function statsRowsForExport() {
 function renderStatsChips() {
   const box = $("stats-chips");
   if (!box) return;
-  box.innerHTML = "";
   const chips = [
     ["cell", "ячейка"],
     ["place", "склад"],
@@ -3440,10 +3519,16 @@ function renderStatsChips() {
     ["user", "пользователь"],
     ["priceBand", "цена"]
   ];
-  for (const [key, label] of chips) {
-    const value = statsFilters[key];
-    if (!value) continue;
-    const chip = el("span", "detail__chip", `${label}: ${value}`);
+  const active = chips.filter(([key]) => statsFilters[key]);
+  box.closest(".detail__bar")?.classList.toggle("has-chips", active.length > 0);
+  if (!active.length) {
+    emptyLater(box);
+    return;
+  }
+
+  emptyNow(box);
+  for (const [key, label] of active) {
+    const chip = el("span", "detail__chip", `${label}: ${statsFilters[key]}`);
     const drop = el("button", null, "×");
     drop.type = "button";
     drop.title = "Снять фильтр";
@@ -3454,7 +3539,6 @@ function renderStatsChips() {
     chip.appendChild(drop);
     box.appendChild(chip);
   }
-  box.closest(".detail__bar")?.classList.toggle("has-chips", box.childElementCount > 0);
 }
 
 function renderStats() {
@@ -3469,7 +3553,7 @@ function renderStats() {
   renderTally("stats-count", shown.length, statsIndex.length);
   renderFilterCount("stats", countActive(Object.values(statsFilters)));
   const reset = $("stats-reset");
-  if (reset) reset.hidden = !statsFiltersActive();
+  reveal(reset, statsFiltersActive());
 
   renderStatsKpis(shown);
   renderStatsPanels();
