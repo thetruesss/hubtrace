@@ -5028,3 +5028,54 @@ kbd,
   overflow: hidden;
   text-overflow: ellipsis;
 }
+
+/* ------------------------------------------------------------------ */
+/*  протягивание по графику                                            */
+
+/* пока тянут, выделять текст и ловить наведение не нужно */
+.is-sweeping {
+  user-select: none;
+  cursor: crosshair;
+}
+
+.is-sweeping .viztip {
+  display: none;
+}
+
+/* подсветка того, что попадёт в фильтр, если отпустить прямо сейчас */
+.hbar.is-sweep,
+.col.is-sweep,
+.lchip.is-sweep,
+.donut__seg.is-sweep {
+  opacity: 1;
+}
+
+.hbar.is-sweep .hbar__label,
+.col.is-sweep .col__cap,
+.col.is-sweep .col__day {
+  color: #fff;
+  font-weight: 650;
+}
+
+/* захваченное читается как сплошной блок: одной подсветки подписи мало,
+   чтобы с одного взгляда понять, что попадёт в фильтр */
+.hbar.is-sweep,
+.col.is-sweep {
+  background: rgba(103, 160, 255, 0.16);
+  box-shadow: inset 0 0 0 1px rgba(126, 178, 255, 0.55);
+}
+
+.hbar.is-sweep .hbar__track,
+.col.is-sweep .col__plot {
+  box-shadow: 0 0 0 1px rgba(126, 178, 255, 0.8);
+  border-radius: var(--r-xs);
+}
+
+.lchip.is-sweep {
+  border-color: rgba(126, 178, 255, 0.8);
+  color: var(--text);
+}
+
+.donut__seg.is-sweep {
+  stroke-width: 20;
+}
