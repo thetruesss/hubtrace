@@ -1,24 +1,16 @@
-// Достаём из файла только ID. Признак у Hub — 10+ цифр подряд, обычно с хвостом из нулей.
-// Со столбцами берём тот, где таких значений больше: иначе примешаются ID ячеек и контейнеров.
-// Хвост из нулей — признак строгий, поэтому он идёт первым, но не последним: файл, где ни одно
-// число под него не подошло, лучше разобрать по длине, чем вернуть пустой список.
 (function () {
   "use strict";
 
-  // границы обязательны, иначе из 1501895529761000 вырежется кусок нужной длины
   const ID_RE = /(?<![0-9])[0-9]{10,}(?![0-9])/g;
 
   function looksLikeId(value) {
     return /^[0-9]{10,}$/.test(value) && value.endsWith("000");
   }
 
-  // Мягкий признак — просто длинное число. Хвост из нулей у ID сборный, но не
-  // обязательный, и по строгому признаку номер вроде 551373007622001 терялся.
   function looksLikeNumber(value) {
     return /^[0-9]{10,}$/.test(value);
   }
 
-  // ID внутри текста: Lozon:501895529761000, ссылка на Hub и прочее
   function idsIn(text, loose) {
     const fits = loose ? looksLikeNumber : looksLikeId;
     const out = [];
@@ -55,10 +47,7 @@
     return byColumn;
   }
 
-  // колонка, где ID больше всего; при равенстве побеждает та, что левее
   function idsFromCells(cells) {
-    // строгий признак первым: он отсекает ID ячеек и контейнеров, а без единого
-    // попадания выбирать не из чего — тогда сгодится любое длинное число
     let byColumn = columnsOf(cells, false);
     if (!byColumn.size) byColumn = columnsOf(cells, true);
     if (!byColumn.size) return { ids: [], columns: 0 };
@@ -71,7 +60,6 @@
   }
 
   const SIG_ZIP = 0x04034b50;
-  // .xls — это OLE2, а не zip
   const SIG_OLE = [0xd0, 0xcf, 0x11, 0xe0];
 
   function isOle(bytes) {
@@ -83,8 +71,6 @@
     return new Uint8Array(await new Response(stream).arrayBuffer());
   }
 
-  // Идём по локальным заголовкам от начала файла: имена и данные есть и тут, а пропустить
-  // запись можно по её compressedSize.
   async function unzip(buffer, wanted) {
     const view = new DataView(buffer);
     const bytes = new Uint8Array(buffer);
@@ -102,7 +88,6 @@
       const name = names.decode(bytes.subarray(at + 30, at + 30 + nameLength));
       const dataAt = at + 30 + nameLength + extraLength;
 
-      // размеры уехали в дескриптор после данных, без каталога дальше не пройти
       if ((flags & 0x08) !== 0 && compressed === 0) break;
 
       if (wanted(name)) {
@@ -132,7 +117,6 @@
   function sharedStrings(text) {
     const doc = text ? parseXml(text) : null;
     if (!doc) return [];
-    // в <si> кусков <t> бывает несколько (форматированный текст)
     return [...doc.getElementsByTagName("si")].map((si) =>
       [...si.getElementsByTagName("t")].map((t) => t.textContent).join("")
     );
@@ -174,8 +158,6 @@
     }
     if (cells.length) return idsFromCells(cells);
 
-    // разметка не разобралась — ищем ID прямо в тексте, пробелы между тегами не дают
-    // соседним числам склеиться
     return { ids: extractIds([...parts.values()].join(" ").replace(/></g, "> <")), columns: 0 };
   }
 
@@ -212,7 +194,6 @@
       return { ids: found.ids, columns: found.columns, column: found.column, text: "", kind: "xlsx" };
     }
 
-    // ID состоят из цифр, так что кодировка неважна
     const text = new TextDecoder("utf-8").decode(buffer).replace(/^﻿/, "");
     const found = readDelimited(text);
     return { ids: found.ids, columns: found.columns, column: found.column, text, kind: "text" };

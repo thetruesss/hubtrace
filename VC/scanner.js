@@ -1,4 +1,3 @@
-// Сканер страницы. Два пути: повтор запроса истории и обход таблицы в DOM как страховка.
 (() => {
   if (globalThis.__hubTraceScannerReady) return;
   globalThis.__hubTraceScannerReady = true;
@@ -21,7 +20,6 @@
     return String(value || "").replace(/\s+/g, " ").trim();
   }
 
-  // textContent, а не innerText: innerText форсирует reflow
   function textOf(el) {
     return norm(el ? el.textContent : "");
   }
@@ -93,7 +91,6 @@
     }
   });
 
-  // Без ID предмета в рецепте подставлять номер некуда — на все номера приедет одна история.
   function carriesId(recipe) {
     const id = String(recipe?.itemId || "");
     if (!id) return false;
@@ -218,12 +215,10 @@
 
   const AUDIT_PATH = "/p-api/scms-article-gateway/v1/articles/{id}/auditV3";
 
-  // Пустой список типов = вся история, поэтому «Перемещения» фильтруем телом запроса.
   const TRANSITION_TYPES = ["InnerWarehouse", "OnWarehouse", "InTripContainer", "InContainer", "OnCell"];
   let auditTypes = TRANSITION_TYPES.slice();
   let typesConfirmed = false;
 
-  // Рецепт мог сняться со «Свойств»: их типы с перемещениями не пересекаются, и мы запросим чужой срез.
   function adoptAuditTypes(next) {
     if (!Array.isArray(next) || !next.length) return false;
     const clean = next.map((value) => String(value || "")).filter(Boolean);
@@ -246,7 +241,6 @@
   }
   const BOXES_PATH = "/p-api/scms-article-gateway/v3/boxes/getBoxesFromTopologyAndContent";
 
-  // Без x-o3-app-name/version сервер может не ответить; значения лежат в __FE_VARS__ страницы.
   let appVersion = "";
   let appName = "scms";
   let varsRead = false;
@@ -294,8 +288,6 @@
     } catch {}
   }
 
-  // Сервер может не принять страницу в 500 строк, нумерацию с единицы или запрос без версии —
-  // перебираем варианты на первом запросе и дальше ходим тем, что прошёл.
   const PAGE_SIZES = [500, 100, 20];
   const HEADER_SETS = ["full", "noVersion", "plain"];
 
@@ -313,7 +305,6 @@
     return out;
   }
 
-  // версию кладём в сам вариант: свежая вкладка могла не видеть ни одного запроса Hub
   function apiHeaders(tune) {
     const kind = typeof tune === "string" ? tune : tune?.headers;
     const version = (typeof tune === "object" && tune?.version) || appVersion;
@@ -368,36 +359,25 @@
     return json;
   }
 
-  // Так ручка отвечает на номер, которого нет или который ей не по формату. Это её
-  // ответ про номер, а не поломка: страница по такому номеру показала бы «не найден».
   const POSTING_REJECT = new Set([400, 404, 422]);
 
   function rejectsPosting(response) {
     return Boolean(response) && !response.error && POSTING_REJECT.has(Number(response.status));
   }
 
-  // Столько цифр подряд по опечатке не наберёшь: такой номер похож на настоящий,
-  // и отказ по нему стоит перепроверить страницей. А набранное руками «фигня»
-  // ручка заворачивает по делу — на него отвечаем сразу.
   function looksLikeItemId(value) {
     return /^[0-9]{10,}$/.test(String(value || ""));
   }
 
-  // Столько отказов подряд — дело уже не в номерах, а в самом запросе.
   const REJECT_STREAK = 8;
-  // 200 не тем телом: возможно, ручка сменила формат и подбор пора пересобрать.
   const ODD_ANSWER_STREAK = 3;
-  // Столько номеров подряд не дали собрать запрос — теперь дело точно в ручке.
   const PROBE_REJECT_STREAK = 3;
 
   let rejectStreak = 0;
   let oddStreak = 0;
   let probeRejects = 0;
-  // номер, на который ручка точно отвечала историей: на нём и пересобираем запрос,
-  // иначе подбор пойдёт по мусорному номеру и «не подошёл» окажется ни при чём
   let lastGoodPosting = "";
 
-  // Номера нет — это готовый ответ, а не сбой. Обходить страницей нечего.
   function missingPosting() {
     return {
       ok: true,
@@ -413,11 +393,8 @@
     };
   }
 
-  // успех — не просто 200, а ответ со списком
   const PROBE_ATTEMPT_MS = 4000;
 
-  // Подбор идёт на номере из списка, и мусорный номер завернёт все варианты подряд.
-  // Отличаем «ручка не та» от «номер не тот»: во втором случае хоронить нечего.
   let probeOnlyRejects = false;
 
   async function tuneApi(posting, budgetMs) {
@@ -440,12 +417,10 @@
 
       if (!json) {
         apiProbeLog.push(`${describe(tune)} → ${snippet(response)}`);
-        // 401 не про вариант запроса, а про сессию
         if (response && (response.status === 401 || response.status === 403)) return null;
         if (!rejectsPosting(response)) onlyRejects = false;
         continue;
       }
-      // пустая страница при непустом итоге — нумерация не та
       if (!json.records.length && Number(json.totalCount) > 0) {
         apiProbeLog.push(`${describe(tune)} → 200, но список пуст при итоге ${json.totalCount}`);
         onlyRejects = false;
@@ -473,7 +448,6 @@
     };
   }
 
-  // Незнакомый код пишем как есть и доучиваем по странице.
   const CHANGE_TYPES = {
     InnerWarehouse: "Внутрискладское",
     OnWarehouse: "На склад",
@@ -515,7 +489,6 @@
 
   const AUDIT_COLUMNS = ["Тип изменения", "Дата", "Пользователь", "Изменения", "Описание"];
 
-  // Ответ в UTC, Hub показывает московское. Без сдвига дата в отчёте разъедется со страницей.
   let hubClock = null;
 
   function formatEventTime(raw) {
@@ -627,7 +600,6 @@
     }
     if (parts.length) return parts.join(", ");
 
-    // подпись бывает уровнем глубже: {type:{value:"Forward", name:"Прямой"}}
     for (const key of Object.keys(value)) {
       const own = value[key];
       if (!own || typeof own !== "object") continue;
@@ -746,8 +718,6 @@
       if (moved && moved !== "—") return moved;
     }
 
-    // Переезда не было, но ячейку Hub всё равно отдаёт рядом с местом операции. Форму приводим
-    // к той, что понимает cellPath: общий разбор вернул бы «Warehouse» или соседнее поле.
     const sides = [];
     const cellInfo = record?.cellInfo;
     if (Array.isArray(cellInfo?.cells)) sides.push({ nhlCell: cellInfo });
@@ -763,8 +733,6 @@
     return "";
   }
 
-  // Дата — из верхней строки о складе, ячейка — из первой, где она есть: приход на склад
-  // ячейку не показывает, а переезд по ячейкам — да.
   function pickCellRecord(records) {
     for (const record of records) {
       if (auditCell(record)) return record;
@@ -772,8 +740,6 @@
     return null;
   }
 
-  // ищем по всей записи, как обход страницы ищет по тексту строки: сузишь до полей места —
-  // пути начнут расходиться на пограничных номерах
   function recordMatches(record, needle) {
     if (!record) return false;
     try {
@@ -783,7 +749,6 @@
     }
   }
 
-  // верхнее место по всем движениям: интерфейс выводил его из трёх строк отчёта и промахивался
   function placeOfRecord(record) {
     const move = record?.stateChanges?.location;
     for (const side of [move?.to, move?.from, record?.placeInfo]) {
@@ -821,7 +786,6 @@
     };
   }
 
-  // «Цена реализации» — это moneyPrice, «Цена» — fairPrice.
   function priceText(value, symbol) {
     const number = Number(value);
     if (!Number.isFinite(number)) return "";
@@ -845,8 +809,6 @@
     };
   }
 
-  // Ищем карточку по признакам, а не по пути items[0].postingInfo: положат чуть иначе —
-  // и пропадут номер, статус и обе суммы.
   const CARD_KEYS = ["postingName", "stateName", "moneyPrice", "fairPrice", "postingNumber"];
 
   function findPostingInfo(json) {
@@ -894,7 +856,6 @@
     return Boolean(card && (card.number || card.status || card.price || card.fairPrice));
   }
 
-  // не затираем уже добытое: у путей разные сильные стороны
   function fillCard(card, from) {
     if (!from) return card;
     for (const key of Object.keys(card)) card[key] = card[key] || from[key] || "";
@@ -905,13 +866,10 @@
     return Boolean(card.number && card.status);
   }
 
-  // Карточка отдаётся со складом оператора или без. Удачный вариант запоминаем, но второй
-  // не хороним: раньше одна неудача снимала его навсегда и весь прогон шёл без цен.
   let cardPlaceless = null;
 
   async function nativeCard(posting, timeoutMs) {
     if (!placeId) {
-      // склад оператора Hub дописывает в адрес уже после загрузки
       readPlaceFromLocation();
       if (placeId) void toBackground(hintPayload());
     }
@@ -959,8 +917,6 @@
       const tuned = await tuneApi(lastGoodPosting || posting, Math.floor((deadline - Date.now()) * 0.6));
       if (!tuned) {
         const reason = apiProbeLog.length ? apiProbeLog[apiProbeLog.length - 1] : "ручка не отвечает";
-        // Все варианты завернул сам номер — значит проверять надо номер, а не ручку.
-        // Признаём её мёртвой, только когда так себя ведут несколько номеров подряд.
         if (probeOnlyRejects && probeRejects < PROBE_REJECT_STREAK) {
           probeRejects += 1;
           return { ok: false, reason };
@@ -984,7 +940,6 @@
     let loosePlace = "";
     let size = apiTune.pageSize;
     let retuned = false;
-    // сервер не принял список типов и отдал лишнее, «Всего» тогда не про наш срез
     let trimmed = false;
     let read = 0;
 
@@ -1001,7 +956,6 @@
 
       if (!response) return { ok: false, reason: "нет ответа" };
       if (response.status === 401 || response.status === 403) {
-        // 403 приходит и когда серверу не хватило заголовка; общий вариант мог подобрать другая вкладка
         if (!retuned) {
           retuned = true;
           apiTune = null;
@@ -1018,12 +972,8 @@
 
       const json = readAudit(response);
       if (!json) {
-        // Раньше любой неудобный ответ хоронил ручку целиком: один мусорный номер в списке —
-        // и весь прогон доезжал обходом DOM. Разбираем, чей это отказ.
-        // Отказ посреди листания — не про номер: его первые страницы уже прочитаны.
         if (page === 0 && rejectsPosting(response)) {
           rejectStreak += 1;
-          // отказывает всем подряд — верить перестаём, номера уйдут на страницу
           if (rejectStreak >= REJECT_STREAK) {
             apiTune = null;
             rejectStreak = 0;
@@ -1039,7 +989,6 @@
             oddStreak = 0;
           }
         }
-        // 5xx, обрыв, HTML вместо JSON — беда разовая, подбор остаётся при нас
         return { ok: false, reason: snippet(response) };
       }
       rejectStreak = 0;
@@ -1052,7 +1001,6 @@
       if (page === 0) {
         digest = digestOf(response.text);
         if (Number.isFinite(json.totalCount)) total = Number(json.totalCount);
-        // сервер режет страницу по своему пределу, дальше идём его шагом
         if (raw.length && raw.length < size && total != null && total > raw.length) {
           size = raw.length;
         }
@@ -1077,10 +1025,7 @@
         sample = JSON.stringify(hits[0]).slice(0, 280);
       }
 
-      // нашли склад — дальше не больше одной страницы: гоняться за ячейкой по всей истории
-      // это минуты на каждый номер
       if (found && (pickCellRecord(hits) || page > foundAt)) break;
-      // листаем по тому, что отдал сервер: страница целиком из не-перемещений не повод бросить чтение
       if (!raw.length) break;
       if (total != null && read >= total) break;
       if (total == null && raw.length < size) break;
@@ -1185,7 +1130,6 @@
     return stripped ? out : null;
   }
 
-  // Раз на 401 пробуем тот же запрос без токена: если сессия держится на cookie, протухать нечему.
   async function replayPage(request, timeoutMs) {
     const response = await replay(request, timeoutMs);
     if (!response || (response.status !== 401 && response.status !== 403)) return response;
@@ -1203,7 +1147,6 @@
     return retry;
   }
 
-  // свой список типов в подсмотренное тело: рецепт мог сняться со вкладки «Все»
   function forceTypes(node, depth) {
     if (!node || typeof node !== "object" || depth > 4) return false;
     let touched = false;
@@ -1251,7 +1194,6 @@
     };
   }
 
-  // самый крупный массив объектов в ответе — это и есть строки истории
   function findRows(json) {
     let best = null;
     let bestLen = -1;
@@ -1273,7 +1215,6 @@
     return best;
   }
 
-  // дешёвый отпечаток: по нему фон замечает одинаковые ответы на разные номера
   function digestOf(text) {
     const head = text.slice(0, 4000);
     const tail = text.length > 6000 ? text.slice(-2000) : "";
@@ -1361,8 +1302,6 @@
     }
   }
 
-  // Запись истории узнаём по форме, а не по тому, каким путём достали. Иначе в отчёт уезжали
-  // operationContextId и placeInfo.type, а «последней ячейкой» становилось слово Warehouse.
   function looksLikeAudit(rows) {
     const first = rows?.[0];
     if (!first || typeof first !== "object" || Array.isArray(first)) return false;
@@ -1371,8 +1310,6 @@
 
   const DATE_KEY_RE = /(date|time|дата|created|moment|stamp)/i;
 
-  // Форма незнакомая, колонки под неё придумывать нельзя — в отчёт попадёт сырая раскладка JSON.
-  // Берём только дату: она нужна для корзинки.
   function reportFromApiRows(rows, needle) {
     const flat = rows.map((row) => flattenRow(row, "", {}, 0));
     const hit = flat.find((row) => Object.values(row).join(" ").toLowerCase().includes(needle));
@@ -1390,8 +1327,6 @@
     return { columns: [], lastRows: [], warehouseAt, warehouseCell: "", lastPlace: "" };
   }
 
-  // Пусто при непустом входе: либо перемещений правда нет, либо наш список типов разошёлся
-  // с Hub. Различаем по памяти прогона.
   function keepTransitions(rows) {
     if (!Array.isArray(rows) || !rows.length) return rows || [];
     if (!looksLikeAudit(rows)) return rows;
@@ -1411,8 +1346,6 @@
     return report;
   }
 
-  // Ручку хороним на время, а не насовсем: она пропадает и от разовой выкатки Hub,
-  // а без неё прогон доезжает медленным путём до самого конца.
   const NATIVE_RETRY_MS = 120000;
   let nativeOffAt = 0;
 
@@ -1437,7 +1370,6 @@
       nativeFail = native;
     }
 
-    // про мёртвую ручку фон должен узнать в любом случае, иначе каждая вкладка ходит за ней заново
     const nativeReport = nativeFail
       ? {
           nativeMissing: Boolean(nativeFail.missing),
@@ -1450,7 +1382,6 @@
         ok: false,
         reason: nativeFail?.reason || "no_recipe",
         ...nativeReport,
-        // ни ручки, ни рецепта: это «пока нечем», а не провал
         notReady: true
       };
     }
@@ -1487,13 +1418,11 @@
           if (!response) failure = "нет ответа";
           else if (response.error) failure = `сеть: ${response.error}`;
           else if (response.status === 401 || response.status === 403) {
-            // токен в рецепте протух — нужен свежий захват, а не повтор
             return withNative(
               { ok: false, auth: true, status: response.status, reason: `ответ ${response.status}` },
               nativeReport
             );
           } else if (page === 0 && rejectsPosting(response)) {
-            // ответ про номер, а не про запрос: перебирать размеры страницы незачем
             rejectStreak += 1;
             if (rejectStreak >= REJECT_STREAK) rejectStreak = 0;
             else if (!looksLikeItemId(posting)) return missingPosting();
@@ -1530,7 +1459,6 @@
         }
         if (allRows.length < 60) allRows.push(...rows.slice(0, 60 - allRows.length));
 
-        // пере-сериализуем: сервер может отдавать кириллицу \u-эскейпами
         const haystack = JSON.stringify(rows).toLowerCase();
         if (!found && haystack.includes(needle)) {
           found = true;
@@ -1554,7 +1482,6 @@
       const expected = filtered || total == null ? loaded : total;
       const report = reportFromRows(allRows, needle);
 
-      // номер, статус и суммы — из карточки: в истории их нет, а регуляркой поймаешь что угодно похожее
       const card = await collectCard(posting, deadline, firstJson);
       report.number = card.number;
       report.status = card.status;
@@ -1577,8 +1504,6 @@
     return withNative({ ok: false, reason: failure || "запрос не подошёл" }, nativeReport);
   }
 
-  // Откат, если селекторы не нашли строк. На document.body тут нельзя: в шапке Hub стоит
-  // кнопка с текущим складом, и совпадение находилось на каждом номере.
   const CHROME_SELECTOR = [
     "header",
     "nav",
@@ -1603,8 +1528,6 @@
     '[class*="tabs"]'
   ].join(",");
 
-  // Страница на CSS-модулях, у каждого класса свой хвост-хеш (ozi__data-grid__row__vhPt-),
-  // и хеш меняется от сборки к сборке — держимся за стабильную часть имени.
   const HUB = {
     history: '[class*="_history_"]',
     grid: '[class*="ozi__data-grid__dataGrid__"]',
@@ -1683,7 +1606,6 @@
     return document.querySelectorAll(HUB.row);
   }
 
-  // «Всего: 1 234» — разряды через пробел или nbsp, поэтому чистим нецифры
   const TOTAL_RE = new RegExp("Всего:\\s*([0-9][0-9\\s\\u00a0\\u202f\\u2009]*)", "i");
 
   function readTotal(el) {
@@ -1717,8 +1639,6 @@
     );
   }
 
-  // textContent склеил бы «ЯчейкаСОРТ 1 Степ / — / 05H», поэтому обходим узлы сами
-  // и расставляем разделители по разметке.
   const RICH_SKIP = new Set(["script", "style", "button", "input", "textarea", "select", "svg"]);
   const RICH_BLOCK = new Set([
     "div",
@@ -1742,7 +1662,6 @@
     "h5",
     "h6"
   ]);
-  // слабый разделитель не затирает сильный, иначе div внутри li подменял «; »
   const RICH_RANK = { "": 0, " ": 1, " · ": 2, "; ": 3, ": ": 4, " → ": 4 };
   const RICH_NODE_LIMIT = 4000;
 
@@ -1806,7 +1725,6 @@
     const number = norm(head.querySelector(HUB.headingText)?.textContent || "");
     if (number) out.number = (number.match(POSTING_NUMBER_RE) || [number])[0];
 
-    // такой же класс носят бейджи в строках истории, ищем строго в заголовке
     const status = norm(head.querySelector(HUB.badgeLabel)?.textContent || "");
     if (status && status.length <= 60) out.status = status;
     return out;
@@ -1828,8 +1746,6 @@
     if (numberAt < 0) return out;
     out.number = (leaves[numberAt].text.match(POSTING_NUMBER_RE) || [""])[0];
 
-    // вкладки «О предмете / Состав / История» тоже подходят под описание статуса,
-    // поэтому берём ближайшее к номеру и с фоном
     let best = null;
     for (let i = numberAt + 1; i < leaves.length && i <= numberAt + 12; i += 1) {
       const text = leaves[i].text;
@@ -1892,8 +1808,6 @@
     return out;
   }
 
-  // Запретный список, а не разрешительный: разрешительный отбросил бы незнакомый вид
-  // перемещения — тот самый, подпись которого мы учим.
   function foreignWords() {
     const words = new Set();
     const mine = new Set(auditTypes);
@@ -1935,7 +1849,6 @@
     return list.filter((row) => !foreign.has(rowTypeText(row, column)));
   }
 
-  // дата из колонки «Дата»: в «Описании» тоже встречаются даты
   function rowDate(row, columns) {
     const titles = columns || tableColumns();
     const at = titles.findIndex((title) => /^дата/i.test(title));
@@ -1975,7 +1888,6 @@
       const observer = new MutationObserver(() => {
         if (test()) finish(true);
       });
-      // подписка на весь документ дёргает колбэк на каждый чих SPA
       const root = target || document.documentElement || document;
       observer.observe(root, { childList: true, subtree: true, characterData: true });
       const poll = setInterval(() => {
@@ -1993,7 +1905,6 @@
       style.id = "hub-trace-expand";
       (document.head || document.documentElement).appendChild(style);
     }
-    // Плавную прокрутку отключаем: с ней scrollTop анимируется и позиция плывёт.
     style.textContent = `
       html, body, [data-overlayscrollbars-viewport], [class*="scroller"], [class*="Scroller"] {
         scroll-behavior: auto !important;
@@ -2019,8 +1930,6 @@
     return overflow === "auto" || overflow === "scroll" || overflow === "overlay";
   }
 
-  // Контейнер прокрутки ищем от строки вверх по родителям. Угадывание по списку селекторов
-  // попадало то во внешнюю обёртку, то в документ — оттуда и дёрганье.
   function findScroller() {
     const rows = rowNodes();
 
@@ -2033,7 +1942,6 @@
       return null;
     }
 
-    // строк ещё нет: пустая таблица не прокручивается, а поиск по родителям уходил во внешнюю обёртку
     for (const selector of [
       `${HUB.grid} ${HUB.viewport}`,
       `${HUB.scroller} ${HUB.viewport}`,
@@ -2070,8 +1978,6 @@
 
   let scrollReached = 0;
 
-  // scrollIntoView двигает все прокручиваемые родители разом, включая окно, и вместе
-  // с нашим scrollTop давал качание.
   function jumpToBottom(scroller) {
     if (!scroller) return false;
 
@@ -2087,7 +1993,6 @@
     scrollReached = Math.max(scrollReached, after);
 
     if (after > before) {
-      // bubbles: false обязателен — всплывающий дубль будил обработчики внешних обёрток.
       scroller.dispatchEvent(new Event("scroll", { bubbles: false }));
       return true;
     }
@@ -2108,8 +2013,6 @@
     return false;
   }
 
-  // Нужен именно срез перемещений. «История» его содержит, но открывается на «Все»,
-  // поэтому её можно кликнуть по дороге, а принять за цель — нельзя.
   const TRANSITION_LABELS = ["перемещения", "история перемещений"];
   const HISTORY_LABELS = ["история"];
 
@@ -2121,8 +2024,6 @@
     return null;
   }
 
-  // активную вкладку Hub помечает на вложенном узле, а активную фишку фильтра —
-  // классом filled и атрибутом disabled
   function tabIsActive(el) {
     if (el.getAttribute("aria-selected") === "true") return true;
     if (el.disabled) return true;
@@ -2130,8 +2031,6 @@
     return Boolean(el.querySelector(HUB.tabActive));
   }
 
-  // «уже открыта», «только что нажали» и «такой вкладки нет» — три разных ответа:
-  // спутаешь, и на открытых «Перемещениях» пойдёшь дальше по списку и кликнешь «Все»
   function pickTab(labels, lookOnly) {
     for (const wanted of labels) {
       const el = findTabLabelled(wanted);
@@ -2152,7 +2051,6 @@
     const left = () => deadline - Date.now();
     const dead = () => abortFlag || left() <= 0;
 
-    // seen — перемещения, seenAll — вообще все: счётчик «Всего» считает всё подряд
     const seen = new Set();
     const seenAll = new Set();
     let domTrimmed = false;
@@ -2219,15 +2117,6 @@
 
     reportPhase("history", job.posting);
 
-    // Раньше здесь первым стоял historyReady(), а он спрашивает только «есть ли на
-    // странице таблица» — и на уже отрисованных «Все» ожидание заканчивалось, не успев
-    // ничего переключить. На «Все» приходится домотать всю историю предмета, а в отчёт
-    // попадают чужие виды изменений, поэтому сначала добиваемся среза перемещений.
-    //
-    // Ждём не бесконечно и по-разному: нажатой вкладке даём время отметиться, а если
-    // такой вкладки в Hub нет вовсе — ждём только пока дорисовывается страница, иначе
-    // каждый номер платил бы полным ожиданием впустую. Отсчёт от готовности списка:
-    // до неё страница и так грузится.
     const TAB_SWITCH_MS = 4000;
     const TAB_LOOK_MS = 800;
     let tabSettled = false;
@@ -2240,7 +2129,6 @@
       if (grid && !gridAt) gridAt = Date.now();
       if (tabSettled || !document.body) return grid;
 
-      // повторно жать не надо: нажатую вкладку ждём, а не кликаем каждые 40 мс
       const own = pickTab(TRANSITION_LABELS, clickedOwn);
       if (own === "active") {
         tabSettled = true;
@@ -2250,7 +2138,6 @@
         clickedOwn = true;
         return false;
       }
-      // «Перемещения» лежат внутри «Истории»: её открываем по дороге, но целью не считаем
       if (!own && !openedHistory && pickTab(HISTORY_LABELS) === "clicked") {
         openedHistory = true;
         return false;
@@ -2267,11 +2154,8 @@
       return { ok: false, status: "no_history", found: false, expected: 0, loaded: 0 };
     }
 
-    // Ноль в счётчике «Всего» обычно значит «данные ещё не приехали», поэтому total бывает null:
-    // тогда догружаем, пока список не перестанет расти.
     let total = parseCounter();
     if (total == null) {
-      // ждём счётчик, но не дольше появления строк: стоять по 10 секунд на каждом номере нельзя
       await waitFor(() => {
         total = parseCounter();
         return total != null || rowNodes().length > 0;
@@ -2294,7 +2178,6 @@
       if (detectMissing()) return { ok: false, status: "missing", found: false, expected: 0, loaded: 0 };
       if (!hasRows()) return { ok: false, status: "no_counter", found: false, expected: 0, loaded: 0 };
     } else if (total === 0 && hasRows()) {
-      // счётчик говорит «ноль», а строки на месте — значит он не про историю
       total = null;
     }
 
@@ -2327,7 +2210,6 @@
       let stall = 0;
 
       while (!dead() && !found && needMore()) {
-        // ищем контейнер на каждом круге: пока строк не было, его могло не быть
         const scroller = findScroller();
         const before = rowNodes().length;
         const moved = jumpToBottom(scroller);
@@ -2392,7 +2274,6 @@
 
     const loaded = seen.size;
     const complete = found || (total != null ? seenAll.size >= total : drained);
-    // Итог неизвестен: список вычитан или искомое нашлось — «всего» это сколько прочли.
     const expected = domTrimmed
       ? complete || found
         ? loaded
@@ -2442,7 +2323,6 @@
     if (!raw) return { status: "script_error", found: false, expected: 0, loaded: 0, ok: false };
     if (raw.via === "api") {
       return {
-        // «нет такого номера» ручка говорит прямо, гадать по полноте выборки тут нечего
         status: raw.status || (raw.complete ? "complete" : "partial"),
         via: "api",
         found: Boolean(raw.found),
@@ -2521,8 +2401,6 @@
     if (message.action === "ht:setHints") {
       if (message.appVersion && !appVersion) appVersion = String(message.appVersion);
       if (message.placeId && !placeId) placeId = String(message.placeId);
-      // content script поднимается заново после каждой загрузки и без этого
-      // ходил бы за мёртвой ручкой снова; фон же и говорит, когда она ожила
       if (message.nativeApi === false && !nativeOffAt) nativeOffAt = Date.now();
       else if (message.nativeApi === true) nativeOffAt = 0;
       if (message.apiTune && !apiTune) apiTune = message.apiTune;
@@ -2570,7 +2448,6 @@
     return false;
   });
 
-  // склад оператора Hub дописывает в адрес уже после загрузки страницы
   function shareHints() {
     readBuildVars();
     readPlaceFromLocation();

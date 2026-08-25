@@ -1,5 +1,3 @@
-/* шрифты лежат внутри расширения: системный фолбэк давал «лесенки» */
-
 @font-face {
   font-family: "Inter";
   font-style: normal;
@@ -66,8 +64,6 @@
   initial-value: 0deg;
 }
 
-/* токены */
-
 :root {
   --bg: #05070d;
   --bg-2: #0a0e18;
@@ -83,7 +79,6 @@
   --warn: #efb03c;
   --err: #f05a4a;
 
-  /* жёлтый — «склад есть», на него и надо смотреть; зелёный — спокойное «нет» */
   --hit: var(--warn);
   --hit-soft: #f7d295;
   --hit-ink: #33230a;
@@ -104,11 +99,7 @@
   --r-xs: 8px;
 
   --gap: 14px;
-  /* Рамка страницы одна на все четыре стороны: раньше по бокам уходило до 52 px,
-     и на широком экране под содержимое оставалось меньше окна. */
   --edge: clamp(12px, 1.2vw, 20px);
-  /* Панель этапов висит поверх страницы, поэтому нижнюю строку прокручиваемых
-     областей надо уметь вывести из-под неё. */
   --steps-clear: 64px;
   --ease: cubic-bezier(0.22, 0.61, 0.36, 1);
   --sp: cubic-bezier(0.34, 1.3, 0.5, 1);
@@ -127,7 +118,6 @@
   box-sizing: border-box;
 }
 
-/* display мы задаём почти всем плашкам, а он перебивает атрибут hidden */
 [hidden] {
   display: none !important;
 }
@@ -140,7 +130,6 @@ body {
   overflow: hidden;
   background: var(--bg);
   color: var(--text);
-  /* Chrome ставит body { font-family } в UA-стилях страниц расширения и перебивает :root */
   font-family: var(--sans);
   font-size: 14px;
   font-weight: 450;
@@ -183,8 +172,6 @@ select {
   background: rgba(255, 255, 255, 0.22);
   background-clip: content-box;
 }
-
-/* фон */
 
 .bg {
   position: fixed;
@@ -242,8 +229,6 @@ select {
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.8' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='.9'/%3E%3C/svg%3E");
 }
 
-/* каркас */
-
 .shell {
   position: relative;
   z-index: 2;
@@ -252,7 +237,6 @@ select {
   display: grid;
   grid-template-rows: minmax(0, 1fr);
   gap: var(--gap);
-  /* снизу больше ничего не резервируем: этапы не занимают полосу, а висят над ней */
   padding: var(--edge);
 }
 
@@ -303,8 +287,6 @@ main {
   grid-template-columns: 1.1fr 0.95fr 0.95fr;
 }
 
-/* стекло */
-
 .glass {
   position: relative;
   isolation: isolate;
@@ -348,9 +330,6 @@ main {
   z-index: 1;
 }
 
-/* шаги */
-
-/* с flex:1 ширина упиралась в самое длинное слово, а подсветка считается как треть */
 .steps {
   position: fixed;
   left: 50%;
@@ -425,8 +404,6 @@ main {
 .step.is-active {
   color: var(--text);
 }
-
-/* панели */
 
 .panel {
   min-height: 0;
@@ -534,8 +511,6 @@ main {
   margin-bottom: 0;
 }
 
-/* поля ввода */
-
 textarea,
 input[type="text"],
 input[type="search"],
@@ -609,7 +584,6 @@ input:focus {
   font-size: 11.5px;
 }
 
-/* фиксированная высота — только полям в одну строку, textarea её ломала */
 input[type="text"],
 input[type="search"],
 input[type="number"] {
@@ -626,8 +600,6 @@ input[type="number"] {
 .filter::-webkit-search-cancel-button {
   filter: invert(0.6);
 }
-
-/* кнопки */
 
 .btn {
   position: relative;
@@ -770,7 +742,6 @@ input[type="number"] {
   transform: none;
 }
 
-/* .btn--ghost:hover специфичнее, поэтому зелёный дублируем — иначе нажатая кнопка сереет под курсором */
 .btn.is-copied,
 .btn.is-copied:hover:not(:disabled),
 .btn.is-copied:focus-visible {
@@ -790,8 +761,6 @@ input[type="number"] {
   font-size: 12.5px;
   line-height: 1.4;
 }
-
-/* боковая колонка ввода */
 
 .side {
   min-height: 0;
@@ -836,8 +805,6 @@ input[type="number"] {
 
 .brief li {
   display: grid;
-  /* содержимое строки в одном span: иначе каждый инлайн-кусок стал бы
-     отдельным grid-элементом */
   grid-template-columns: 5px minmax(0, 1fr);
   gap: 9px;
   align-items: start;
@@ -902,8 +869,6 @@ input[type="number"] {
   border: 1px solid var(--stroke-2);
   color: var(--muted);
 }
-
-/* дек управления */
 
 .deck {
   display: grid;
@@ -1184,8 +1149,6 @@ input[type="number"] {
   line-height: 1.35;
 }
 
-/* радар */
-
 .radar-card {
   gap: 14px;
 }
@@ -1328,7 +1291,6 @@ input[type="number"] {
   pointer-events: none;
 }
 
-/* луч развёртки проходит под цифрами, без затемнения проценты теряются */
 .radar__hud::before {
   content: "";
   position: absolute;
@@ -1361,8 +1323,6 @@ input[type="number"] {
   color: var(--text-dim);
   font-variant-numeric: tabular-nums;
 }
-
-/* прогресс и метрики */
 
 .progress-block {
   display: grid;
@@ -1491,8 +1451,6 @@ input[type="number"] {
   gap: 8px;
 }
 
-/* вкладки-воркеры */
-
 .panel--live {
   overflow-y: auto;
 }
@@ -1517,7 +1475,6 @@ input[type="number"] {
   margin: 0;
   padding: 0;
   display: grid;
-  /* строки держат свою высоту: при max-height сетка раздавала её поровну и строки сплющивались */
   grid-auto-rows: max-content;
   gap: 6px;
   max-height: 232px;
@@ -1607,8 +1564,6 @@ input[type="number"] {
   animation: lane-run 1.4s linear infinite;
 }
 
-/* лента */
-
 .panel--feed .feed {
   flex: 1;
   min-height: 0;
@@ -1637,7 +1592,6 @@ input[type="number"] {
 
 .feed li {
   display: grid;
-  /* фиксированная колонка под статус, иначе номера прыгают по горизонтали */
   grid-template-columns: 94px minmax(0, 1fr) max-content max-content;
   column-gap: 9px;
   align-items: center;
@@ -1713,8 +1667,6 @@ input[type="number"] {
   background: var(--err);
 }
 
-/* результат */
-
 .result-hero {
   display: flex;
   justify-content: space-between;
@@ -1777,8 +1729,6 @@ input[type="number"] {
 .result-col.is-empty .result-list {
   opacity: 0.5;
 }
-
-/* кнопка выгрузки */
 
 .fab {
   position: fixed;
@@ -1862,8 +1812,6 @@ input[type="number"] {
   color: #06301c;
 }
 
-/* тосты */
-
 .toasts {
   position: fixed;
   right: 20px;
@@ -1904,8 +1852,6 @@ input[type="number"] {
   border-left: 3px solid var(--ok);
 }
 
-/* детализация */
-
 .seg--tabs {
   --seg-count: 3;
   --seg-index: 0;
@@ -1923,7 +1869,6 @@ input[type="number"] {
   font-size: 12px;
 }
 
-/* подсветка едет за выбранной вкладкой: ширина от числа кнопок, сдвиг от индекса */
 .seg--tabs::before {
   content: "";
   position: absolute;
@@ -1963,7 +1908,6 @@ input[type="number"] {
   pointer-events: none;
 }
 
-/* Сетка, а не flex с переносом: на flex промежуток между строками остаётся и панель подскакивает. */
 .detail__bar {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
@@ -1974,7 +1918,6 @@ input[type="number"] {
   padding: 12px 14px;
   border-radius: var(--r);
   transition: grid-template-rows 0.24s var(--ease);
-  /* поповер выходит за край панели — снимаем обрезку у .glass */
   overflow: visible;
   z-index: 20;
 }
@@ -2021,13 +1964,11 @@ input[type="number"] {
   color: var(--faint);
 }
 
-/* счётчик среза */
 .tally {
   display: inline-flex;
   align-items: baseline;
   gap: 7px;
   flex: 0 0 auto;
-  /* ширина фиксирована: «40 отправлений» → «10 отправлений из 40» иначе раздвигает блок на каждой букве */
   min-width: 205px;
   height: 38px;
   padding: 0 14px;
@@ -2061,7 +2002,6 @@ input[type="number"] {
   color: #a9c9ff;
 }
 
-/* фильтры под кнопкой: в строке селекты занимали по две-три полосы */
 .filterbox {
   position: relative;
   flex: 0 0 auto;
@@ -2118,7 +2058,6 @@ input[type="number"] {
   gap: 14px;
   justify-items: stretch;
   opacity: 0;
-  /* --shift ставит JS, если поповер иначе не помещается в окно */
   transform: translate(var(--shift, 0px), -6px) scale(0.985);
   transform-origin: 100% 0;
   transition: opacity 0.2s var(--ease), transform 0.2s var(--ease);
@@ -2197,7 +2136,6 @@ input[type="number"] {
   grid-template-rows: auto 1fr;
 }
 
-/* отступ на самих фишках, чтобы схлопывался вместе со строкой */
 .detail__chips {
   grid-column: 1 / -1;
   min-height: 0;
@@ -2253,11 +2191,9 @@ input[type="number"] {
   flex-direction: column;
   gap: var(--gap);
   padding-right: 4px;
-  /* панель этапов висит поверх страницы — последнюю карточку надо уметь вывести из-под неё */
   padding-bottom: var(--steps-clear);
 }
 
-/* колонка в flex-контейнере ужимается под высоту родителя и режет содержимое */
 .detail__scroll > * {
   flex: 0 0 auto;
 }
@@ -2456,8 +2392,6 @@ input[type="number"] {
   font-size: 12px;
 }
 
-/* подпись автора */
-
 .credit {
   position: fixed;
   left: 22px;
@@ -2568,8 +2502,6 @@ input[type="number"] {
   outline-offset: 3px;
   border-radius: 3px;
 }
-
-/* анимации */
 
 @keyframes drift-a {
   0% {
@@ -2796,14 +2728,9 @@ input[type="number"] {
   }
 }
 
-/* адаптив и доступность */
-
-/* ниже 1400 три колонки не помещаются: радар слева во всю высоту,
-     управление и лента делят правую */
 @media (max-width: 1400px) {
   .scan-grid {
     grid-template-columns: minmax(260px, 0.9fr) minmax(0, 1.1fr);
-    /* только пропорциональные строки: auto перерастала контейнер */
     grid-template-rows: minmax(0, 1.05fr) minmax(0, 0.95fr);
   }
   .radar-card {
@@ -2851,8 +2778,6 @@ input[type="number"] {
 }
 
 @media (max-width: 1080px) {
-  /* колонки схлопнулись в одну и экран прокручивается целиком — значит запас
-     под панель этапов нужен уже ему, а не отдельным областям внутри */
   .layout,
   .result-grid {
     grid-template-columns: 1fr;
@@ -2912,9 +2837,6 @@ input[type="number"] {
   }
 }
 
-/* аналитика */
-/* цвета графиков ступенью темнее интерфейсных: #c98500 / #199e70 проверены на цветослабость (ΔE 8.4) */
-
 .stats {
   --viz-hit: #c98500;
   --viz-miss: #199e70;
@@ -2935,7 +2857,6 @@ input[type="number"] {
   flex-direction: column;
   gap: var(--gap);
   padding-right: 4px;
-  /* снизу и кнопка выгрузки, и панель этапов; берём больший запас */
   padding-bottom: max(84px, var(--steps-clear));
 }
 
@@ -3006,8 +2927,6 @@ input[type="number"] {
 .kpi--miss b { color: var(--miss-soft); }
 .kpi--issue b { color: #ffada2; }
 
-/* Высота ряда постоянная. С 1fr она равнялась самой длинной панели, и пока набираешь
-   в поиске, полосы отсеиваются и вся страница прыгает. */
 .stats__grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -3119,10 +3038,6 @@ input[type="number"] {
   flex-direction: column;
 }
 
-/* Высоту делим между строками поровну, их число приходит из JS в --bar-rows.
-   Промежуток небольшой: на десяти строках шестипиксельные съедали столько, что
-   на саму строку оставалось меньше, чем занимает её текст, и он вылезал наружу —
-   отсюда и рамка выделения не по содержимому, и наезд на подпись снизу. */
 .bars__rows {
   --bar-gap: 3px;
   flex: 1 1 auto;
@@ -3155,7 +3070,6 @@ input[type="number"] {
 
 .hbar__label {
   font-size: 11.5px;
-  /* плотная строка: с обычной высотой текст не помещался в свою же строку сетки */
   line-height: 1.15;
   color: var(--text-dim);
   white-space: nowrap;
@@ -3210,8 +3124,6 @@ input[type="number"] {
   box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.22);
 }
 
-/* «показаны 10 самых частых…»: двух пикселей до последней строки не хватало,
-   подпись и строка читались как одна строка текста */
 .bars__foot {
   flex: 0 0 auto;
   margin: 10px 0 0;
@@ -3740,13 +3652,10 @@ a.t-id__code:hover {
   text-anchor: middle;
 }
 
-/* приветствие */
-
 .splash {
   position: fixed;
   inset: 0;
   z-index: 200;
-  /* оборот луча и момент старта: из этих двух чисел считается всё остальное */
   --sweep-dur: 1.35s;
   --sweep-start: 0.3s;
   display: grid;
@@ -3822,8 +3731,6 @@ a.t-id__code:hover {
   inset: 0;
   border-radius: 50%;
   opacity: 0;
-  /* Луч крутится по часовой, значит кромка это 360°, а послесвечение тянется назад.
-     transparent тут — прозрачный чёрный, поэтому нулевая альфа синего. */
   background: conic-gradient(
     from 0deg,
     rgba(90, 160, 255, 0) 0deg,
@@ -3847,7 +3754,6 @@ a.t-id__code:hover {
   box-shadow: 0 0 10px rgba(122, 208, 255, 0.75);
 }
 
-/* два ровных оборота: только так отметки загораются ровно под лучом */
 .splash.is-on .splash__arm {
   animation:
     splash-sweep var(--sweep-dur) linear var(--sweep-start) 2,
@@ -3874,8 +3780,6 @@ a.t-id__code:hover {
   animation-delay: calc(var(--sweep-start) + var(--sweep-dur));
 }
 
-/* Обёртка на весь радар поворачивается на --a, точка внутри отъезжает на --r и разворачивается
-   обратно. Проценты в translate меряются по самому элементу, поэтому отметки сползались в центр. */
 .splash__blip {
   position: absolute;
   inset: 0;
@@ -3885,7 +3789,6 @@ a.t-id__code:hover {
   transform: rotate(var(--a));
 }
 
-/* forwards, а не both: до своей задержки отметка должна быть невидимой */
 .splash.is-on .splash__blip {
   animation: splash-contact var(--sweep-dur) linear var(--d) 2 forwards;
 }
@@ -4092,8 +3995,6 @@ a.t-id__code:hover {
   }
 }
 
-/* живые графики прогона */
-
 .gauges {
   display: flex;
   flex-direction: column;
@@ -4174,8 +4075,6 @@ a.t-id__code:hover {
   fill: rgba(122, 208, 255, 0.1);
 }
 
-/* «Прошло» — засечки по минутам: пройденные закрашены, текущая наливается
-   секундами (--fill) */
 .gauge__ticks {
   display: flex;
   align-items: flex-end;
@@ -4233,10 +4132,6 @@ a.t-id__code:hover {
   }
 }
 
-/* прошлые прогоны */
-
-/* панель ровно по содержимому: свёрнутые строки и один раскрытый итог
-   не заполнят полтысячи пикселей */
 .panel--last {
   min-height: 0;
   flex: 0 1 auto;
@@ -4315,8 +4210,6 @@ a.t-id__code:hover {
   color: #9dc2ff;
 }
 
-/* раскрывается высотой: сетка едет от 0fr к 1fr, вложенный блок с
-   min-height: 0 даёт ей себя сжать */
 .run__body {
   display: grid;
   grid-template-rows: 0fr;
@@ -4337,8 +4230,6 @@ a.t-id__code:hover {
   gap: 8px;
 }
 
-/* вертикальные отступы полями крайних детей: дорожка 0fr не сжимается
-   ниже padding вложенного блока */
 .run__inner > :first-child {
   margin-top: 2px;
 }
@@ -4411,8 +4302,6 @@ a.t-id__code:hover {
   color: var(--faint);
 }
 
-/* заголовок панели = выбор измерения */
-
 .ptitle {
   position: relative;
   min-width: 0;
@@ -4480,8 +4369,6 @@ a.t-id__code:hover {
   outline-offset: 2px;
   border-radius: var(--r-xs);
 }
-
-/* столбцы таблицы: выбор и порядок */
 
 .colmenu {
   overflow: hidden;
@@ -4561,8 +4448,6 @@ a.t-id__code:hover {
   box-shadow: inset 2px 0 0 var(--blue-soft);
 }
 
-/* общая плавность */
-
 @media (prefers-reduced-motion: no-preference) {
   ::view-transition-old(root) {
     animation: vt-out 0.16s var(--ease) both;
@@ -4585,14 +4470,10 @@ a.t-id__code:hover {
   }
 }
 
-/* Строки таблицы оживляются не по одной, а всем телом: построчная волна шла
-   на каждую букву в поиске — ровно та дёрганность, от которой уходим. */
 .stats__table tbody.is-swap {
   animation: swap-in 0.2s var(--ease);
 }
 
-/* анимация появления — только новой панели: на всех сразу любой клик по
-   значению прокатывал волну по набору */
 .spanel.is-fresh {
   animation: panel-in 0.42s var(--ease) both;
 }
@@ -4663,7 +4544,6 @@ video {
   user-drag: none;
 }
 
-/* иконки и плашки не выделяются: выделение — первый шаг к перетаскиванию */
 svg,
 .kbd,
 kbd,
@@ -4686,8 +4566,6 @@ kbd,
   -webkit-user-drag: element;
   user-drag: element;
 }
-
-/* подсказка графиков */
 
 .viztip {
   position: fixed;
@@ -4782,11 +4660,6 @@ kbd,
   color: var(--text-dim);
 }
 
-/* ------------------------------------------------------------------ */
-/*  показ и уход без рывка                                             */
-
-/* Строки прошлых прогонов: ссылались на row-in, а сами кадры где-то потерялись,
-   и появление стало мгновенным. */
 @keyframes row-in {
   from {
     opacity: 0;
@@ -4798,7 +4671,6 @@ kbd,
   }
 }
 
-/* Перерисованный список проявляется целиком: строки поодиночке дают волну. */
 @keyframes swap-in {
   from {
     opacity: 0;
@@ -4810,8 +4682,6 @@ kbd,
   animation: swap-in 0.2s var(--ease);
 }
 
-/* Общее гашение: hidden снимается уже после перехода, поэтому элемент успевает
-   уйти плавно, а не пропасть в том же кадре. */
 .reveal {
   transition:
     opacity 0.18s var(--ease),
@@ -4824,8 +4694,6 @@ kbd,
   pointer-events: none;
 }
 
-/* Счётчик и «Сбросить всё» меняют ширину соседей: гасить их мало, нужно ещё
-   и схлопнуть место, иначе на месте пропажи остаётся зазор. */
 .filterbox__count,
 .filterbox__head .btn {
   overflow: hidden;
@@ -4857,13 +4725,10 @@ kbd,
   transform: none;
 }
 
-/* съедаем зазор кнопки, иначе схлопнутый счётчик оставляет после себя пустоту */
 .filterbox__count.is-out {
   margin-left: -8px;
 }
 
-/* Строка ошибки растит панель: без схлопывания по высоте кнопка «Проверить»
-   подпрыгивает вместе с её появлением. */
 .error {
   overflow: hidden;
   max-height: 6rem;
@@ -4880,7 +4745,6 @@ kbd,
   transform: none;
 }
 
-/* Кнопка выгрузки висит поверх раскладки — ей достаточно уйти вниз и погаснуть. */
 .fab.reveal {
   transition:
     opacity 0.2s var(--ease),
@@ -4901,9 +4765,6 @@ kbd,
   }
 }
 
-/* ------------------------------------------------------------------ */
-/*  меню по правой кнопке в Аналитике                                  */
-
 .cmenu {
   position: fixed;
   z-index: 60;
@@ -4914,8 +4775,6 @@ kbd,
   display: grid;
   gap: 2px;
   transform-origin: top left;
-  /* меню читают, а не любуются им: полупрозрачное стекло панелей просвечивало
-     строками таблицы насквозь, поэтому фон здесь почти сплошной — как у фильтров */
   background: rgba(11, 16, 26, 0.985);
   border-color: var(--stroke);
   box-shadow:
@@ -4923,7 +4782,6 @@ kbd,
     0 22px 52px rgba(0, 0, 0, 0.58);
 }
 
-/* своё гашение: меню должно вырастать из точки нажатия, а не наезжать сверху */
 .cmenu.reveal {
   transition:
     opacity 0.14s var(--ease),
@@ -4963,7 +4821,6 @@ kbd,
   font-weight: 600;
 }
 
-/* подсказка — само значение: длинное обрезаем, иначе меню растянется на пол-экрана */
 .cmenu__hint {
   max-width: 100%;
   font-style: normal;
@@ -4975,10 +4832,6 @@ kbd,
   text-overflow: ellipsis;
 }
 
-/* ------------------------------------------------------------------ */
-/*  протягивание по графику                                            */
-
-/* пока тянут, выделять текст и ловить наведение не нужно */
 .is-sweeping {
   user-select: none;
   cursor: crosshair;
@@ -4988,7 +4841,6 @@ kbd,
   display: none;
 }
 
-/* подсветка того, что попадёт в фильтр, если отпустить прямо сейчас */
 .hbar.is-sweep,
 .col.is-sweep,
 .lchip.is-sweep,
@@ -5003,11 +4855,6 @@ kbd,
   font-weight: 650;
 }
 
-/* Захваченное читается как сплошной блок: одной подсветки подписи мало, чтобы с
-   одного взгляда понять, что попадёт в фильтр. Рисуем отдельным слоем и с запасом
-   наружу: строка сетки узкая, и рамка по её краю резала бы подпись и полосу.
-   По вертикали запас — половина промежутка, поэтому соседние выбранные строки
-   складываются в одну полосу без нахлёста. */
 .hbar.is-sweep::before,
 .col.is-sweep::before {
   content: "";
@@ -5019,7 +4866,6 @@ kbd,
   pointer-events: none;
 }
 
-/* содержимое поднимаем над подсветкой: без этого слой лёг бы поверх текста */
 .hbar > *,
 .col > * {
   position: relative;
@@ -5044,16 +4890,12 @@ kbd,
   stroke-width: 20;
 }
 
-/* ------------------------------------------------------------------ */
-/*  свой список с галочками вместо родного select                      */
-
 .mselect {
   position: relative;
   width: 100%;
   min-width: 0;
 }
 
-/* кнопка повторяет прежний select: та же высота, скругление и фон */
 .mselect__btn {
   width: 100%;
   height: 40px;
@@ -5094,7 +4936,6 @@ kbd,
   white-space: nowrap;
 }
 
-/* своя стрелка вместо системной: та в каждой сборке своя и чужая тёмной панели */
 .mselect__caret {
   flex: 0 0 auto;
   width: 12px;
@@ -5112,7 +4953,6 @@ kbd,
   opacity: 1;
 }
 
-/* выбранное состояние — как раньше у select: синяя подсветка поля и подписи */
 .mselect.is-set .mselect__btn {
   border-color: rgba(47, 123, 255, 0.55);
   background: rgba(0, 91, 255, 0.14);
@@ -5128,15 +4968,12 @@ kbd,
   z-index: 50;
   top: calc(100% + 6px);
   left: 0;
-  /* поле узкое, а названия ячеек длинные: даём списку вырасти под них, но не во всю
-     панель — иначе он перекроет соседние фильтры */
   min-width: 100%;
   width: max-content;
   max-width: min(340px, 84vw);
   padding: 5px;
   border: 1px solid var(--stroke);
   border-radius: var(--r-sm);
-  /* почти сплошной фон: сквозь стекло просвечивало бы то, что под панелью */
   background: rgba(11, 16, 26, 0.985);
   box-shadow: 0 22px 52px rgba(0, 0, 0, 0.58);
   display: grid;
@@ -5146,13 +4983,11 @@ kbd,
   transition: opacity 0.18s var(--ease), transform 0.2s var(--ease);
 }
 
-/* справа места нет — прижимаемся к правому краю поля */
 .mselect__pop.is-left {
   left: auto;
   right: 0;
 }
 
-/* снизу места нет — раскрываемся вверх */
 .mselect__pop.is-up {
   top: auto;
   bottom: calc(100% + 6px);
@@ -5184,7 +5019,6 @@ kbd,
 .mselect__list {
   display: grid;
   gap: 1px;
-  /* длинный список ячеек иначе вытянул бы поповер во весь экран */
   max-height: 232px;
   overflow-y: auto;
   overscroll-behavior: contain;
@@ -5218,7 +5052,6 @@ kbd,
   color: var(--text);
 }
 
-/* галочка рисуется маской, чтобы не тянуть иконку отдельным узлом */
 .mselect__mark {
   flex: 0 0 auto;
   width: 15px;

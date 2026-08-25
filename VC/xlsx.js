@@ -1,5 +1,3 @@
-// Пишем .xlsx сами, без библиотек. CSV не годится: ссылка там только через =HYPERLINK,
-// а Excel разбирает имя функции по локали и выдаёт #ИМЯ?.
 (() => {
   const CRC_TABLE = (() => {
     const table = new Uint32Array(256);
@@ -17,7 +15,6 @@
     return (c ^ 0xffffffff) >>> 0;
   }
 
-  // без сжатия: файл мелкий, а deflate тянуть неоткуда
   function zipStore(entries, mimeType) {
     const encoder = new TextEncoder();
     const parts = [];
@@ -108,7 +105,6 @@
     return name;
   }
 
-  // Excel не пускает в имя листа : \ / ? * [ ] и режет до 31 символа
   function sheetTitle(name, index) {
     const clean = String(name || `Лист${index + 1}`).replace(/[\\/?*[\]:]/g, " ").trim();
     return (clean || `Лист${index + 1}`).slice(0, 31);
@@ -119,8 +115,6 @@
   const NS_R = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
   const NS_PKG = "http://schemas.openxmlformats.org/package/2006/relationships";
 
-  // 0 обычный, 1 шапка, 2 ссылка, 3 подзаголовок, 4 приглушённый,
-  // 5 переход «смотреть», 6 переход «к отчёту»
   const STYLE_PLAIN = 0;
   const STYLE_HEAD = 1;
   const STYLE_LINK = 2;
@@ -128,6 +122,9 @@
   const STYLE_MUTED = 4;
   const STYLE_JUMP = 5;
   const STYLE_BACK = 6;
+  const STYLE_MONEY = 7;
+
+  const MONEY_FMT_ID = 164;
 
   function buildSheetXml(sheet) {
     const links = [];
@@ -218,8 +215,6 @@
     return { xml, rels };
   }
 
-  // { sheets: [{ name, columns, rows, headRow, freeze, autoFilter }] }
-  // ячейка — строка/число либо { text, number, link, anchor, style }
   function buildXlsxBlob(input) {
     const encoder = new TextEncoder();
     const sheets = (input && input.sheets ? input.sheets : [input || {}]).map((sheet, index) => ({
@@ -245,6 +240,9 @@
 
     const styles =
       `${XML_HEAD}<styleSheet xmlns="${NS}">` +
+      `<numFmts count="1">` +
+      `<numFmt numFmtId="${MONEY_FMT_ID}" formatCode="#,##0.00\\ &quot;\u20bd&quot;"/>` +
+      `</numFmts>` +
       `<fonts count="6">` +
       `<font><sz val="11"/><color theme="1"/><name val="Calibri"/><family val="2"/><scheme val="minor"/></font>` +
       `<font><b/><sz val="11"/><color theme="1"/><name val="Calibri"/><family val="2"/><scheme val="minor"/></font>` +
@@ -260,7 +258,7 @@
       `</fills>` +
       `<borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>` +
       `<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>` +
-      `<cellXfs count="7">` +
+      `<cellXfs count="8">` +
       `<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0" applyAlignment="1"><alignment vertical="top" wrapText="1"/></xf>` +
       `<xf numFmtId="0" fontId="1" fillId="2" borderId="0" xfId="0" applyFont="1" applyFill="1"/>` +
       `<xf numFmtId="0" fontId="2" fillId="0" borderId="0" xfId="0" applyFont="1"/>` +
@@ -270,6 +268,7 @@
       `<alignment horizontal="center" vertical="center"/></xf>` +
       `<xf numFmtId="0" fontId="5" fillId="0" borderId="0" xfId="0" applyFont="1" applyAlignment="1">` +
       `<alignment horizontal="left" vertical="center"/></xf>` +
+      `<xf numFmtId="${MONEY_FMT_ID}" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>` +
       `</cellXfs>` +
       `<cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>` +
       `</styleSheet>`;
@@ -327,7 +326,8 @@
     STYLE_TITLE,
     STYLE_MUTED,
     STYLE_JUMP,
-    STYLE_BACK
+    STYLE_BACK,
+    STYLE_MONEY
   };
   globalThis.xlsxSheetTitle = sheetTitle;
 })();
