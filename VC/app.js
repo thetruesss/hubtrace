@@ -1,4 +1,3 @@
-
 const STORAGE_SETTINGS = "hubTraceSettings";
 const STORAGE_FINISHED = "hubTraceFinished";
 const STORAGE_RUNS = "hubTraceRuns";
@@ -67,8 +66,6 @@ function storageSet(payload) {
   return new Promise((resolve) => chrome.storage.local.set(payload, resolve));
 }
 
-// Всё, что пишется в настройки, идёт через одну очередь: два сохранения
-// подряд затирали друг друга, каждое читало старый снимок.
 const SETTINGS_IDLE_MS = 300;
 const SETTINGS_MAX_WAIT_MS = 2000;
 
@@ -174,9 +171,8 @@ function plural(count, forms) {
   return forms[2];
 }
 
-// Колонки Excel и CSV разделены табом или «;», список в одну строку — пробелами.
 const CELL_SPLIT_RE = /[\t;,]/;
-// Похоже на номер, даже если это не он: буквы, цифры и знаки из ссылок Hub.
+
 const TOKEN_RE = /^[A-Za-z0-9:_-]+$/;
 
 function splitCells(line) {
@@ -184,15 +180,10 @@ function splitCells(line) {
   return line.split(by).map((part) => part.trim()).filter(Boolean);
 }
 
-// Что бы ни стояло в строке, до проверки она должна дойти: угадывать за
-// человека, какая часть «настоящая», мы можем только когда видим ID.
 function tokenize(line) {
   const cells = splitCells(line);
-  // в строке из Excel колонок несколько и ID далеко не первый
   const id = cells.find(sheetReader.looksLikeId) || cells.find(sheetReader.looksLikeNumber);
   if (id) return [id];
-  // ID не видно, выбирать не из чего: список коротких номеров разбираем по частям,
-  // а всё остальное отдаём строкой целиком — иначе от ввода останется первое слово
   if (cells.length > 1 && cells.every((cell) => TOKEN_RE.test(cell))) return cells;
   return [line];
 }
@@ -228,9 +219,6 @@ function parsePostings(raw) {
   return out;
 }
 
-// hidden убирает элемент из раскладки в том же кадре, и соседи прыгают. Показываем
-// в два шага: сначала возвращаем в поток и только следующим кадром снимаем гашение,
-// а прячем наоборот — гасим переходом, из потока убираем после него.
 const REVEAL_MS = 240;
 const revealTimers = new WeakMap();
 
@@ -245,11 +233,8 @@ function reveal(node, show) {
   }
   if (show) {
     if (node.hidden) {
-      // разметка приходит просто скрытой, без гашения: без него первый показ
-      // будет мгновенным, потому что снимать нечего
       node.classList.add("is-out");
       node.hidden = false;
-      // пересчёт раскладки обязателен, иначе оба класса схлопнутся в один кадр
       void node.offsetWidth;
     }
     node.classList.remove("is-out");
@@ -268,18 +253,13 @@ function reveal(node, show) {
   );
 }
 
-// Список перерисовывается целиком, и без этого он подменяется рывком. Оживляем
-// контейнер, а не строки: построчная волна на каждую букву в поиске — та же дёрганность.
 function playSwap(node) {
   if (!node || REDUCED_MOTION.matches) return;
   node.classList.remove("is-swap");
-  // перезапуск анимации требует пересчёта раскладки между снятием и возвратом класса
   void node.offsetWidth;
   node.classList.add("is-swap");
 }
 
-// Полоса схлопывается переходом, поэтому вычищать её сразу нельзя: содержимое
-// исчезнет рывком, а закрываться будет уже пустое место.
 const emptyTimers = new WeakMap();
 
 function emptyLater(node, ms) {
@@ -535,8 +515,6 @@ function dropItem(index) {
   ui.byIndex.delete(index);
 }
 
-// круги добора входят в знаменатель, иначе висит «55 из 55 · 100 %»,
-// пока вкладки ещё крутятся
 function updateScanHud() {
   const total = ui.total;
   const processed = ui.byIndex.size;
@@ -660,7 +638,6 @@ function pushSample(log, value) {
   if (log.length > SAMPLE_LIMIT) log.shift();
 }
 
-// дёргать текст на каждый тик незачем, ломается плавность
 function setText(node, text) {
   if (node && node.textContent !== text) node.textContent = text;
 }
@@ -685,7 +662,6 @@ function drawSpark(lineId, fillId, samples, invert) {
     .map((value, index) => {
       const x = (index / (samples.length - 1)) * 100;
       const norm = (value - min) / span;
-      // остаток времени падает к нулю, поэтому инвертируем
       const y = 23 - (invert ? 1 - norm : norm) * 19;
       return `${x.toFixed(2)},${y.toFixed(2)}`;
     })
@@ -751,8 +727,6 @@ function resetScanHud(total) {
   renderRunState();
 }
 
-// Разбор идёт на каждое нажатие клавиши, на тысяче строк он не бесплатный —
-// у кого список уже на руках, тот его и передаёт.
 function renderBrief(parsed) {
   const list = $("brief");
   if (!list) return;
@@ -787,7 +761,6 @@ function updateCount() {
   } else {
     const parts = [];
     if (parsed.duplicates) parts.push(`${parsed.duplicates} дублей убрано`);
-    // не молчим про мусор, но и не выкидываем его: проверим и покажем в отчёте
     if (parsed.odd) parts.push(`${parsed.odd} не похожи на ID — проверю как есть`);
     const head = parts.length ? `${parsed.length} уникальных` : `${parsed.length} уникальных номеров`;
     stats.textContent = [head, ...parts].join(" · ");
@@ -834,7 +807,6 @@ function renderFab() {
 }
 
 function showError(message) {
-  // текст меняем только при показе: на уходе он нужен, пока строка схлопывается
   if (message) inputError.textContent = message;
   reveal(inputError, Boolean(message));
 }
@@ -864,7 +836,6 @@ function renderList(name) {
   updateFormState();
 }
 
-// тип приходит кодом, а подпись со страницы может приехать позже
 let changeLabels = {};
 
 function withLabels(report) {
@@ -925,7 +896,6 @@ function runLine(run) {
   item.appendChild(head);
 
   const body = el("div", "run__body");
-  // сетке нужно что сжимать до нуля
   const inner = el("div", "run__inner");
   const rows = [
     ["hit", "склад есть", run.hits],
@@ -1075,7 +1045,6 @@ function renderResults(payload, fresh) {
 const REPORT_SHEET = "Все ID";
 const DETAIL_SHEET = "Последние действия";
 
-// «15.08.2026, 09:18:58» или ISO с быстрого пути
 function parseHubDate(raw) {
   const text = String(raw || "").trim();
   if (!text) return null;
@@ -1099,7 +1068,6 @@ const BUCKETS = [
 
 const BUCKET_ORDER = [...BUCKETS.map((bucket) => bucket.label), "48 ч+"];
 
-// если склада нет, возраст считаем от верхней строки истории
 function bucketDateOf(report) {
   return String(report?.warehouseAt || "").trim() || topDateOf(report);
 }
@@ -1113,13 +1081,11 @@ function bucketOf(raw, now) {
   return "48 ч+";
 }
 
-// tab=transitionHistory — это фишка «Перемещения» внутри «Истории»
 function hubUrl(posting) {
   const clean = String(posting || "").trim().replace(/^Lozon:/i, "");
   return `https://hub.o3t.ru/management/stock/item/Lozon:${encodeURIComponent(clean)}?&tab=transitionHistory`;
 }
 
-// технический статус проверки, не тот, что на странице Hub
 const CHECK_STATUS = {
   complete: "проверено",
   partial: "мало строк",
@@ -1136,8 +1102,6 @@ const CHECK_STATUS = {
   exception: "ошибка"
 };
 
-// Кнопок внутри xlsx не бывает: макросы требуют .xlsm. «детализация →» —
-// обычная внутренняя ссылка на второй лист.
 function buildXlsx() {
   const entries = statsRowsForExport();
   const cols = statsCols.filter((key) => STATS_COLUMNS[key]);
@@ -1149,7 +1113,6 @@ function buildXlsx() {
     const report = entry.item.report;
     if (!report?.lastRows?.length) return;
 
-    // +1 на шапку, +1 на нумерацию с единицы
     const reportRow = index + 2;
     anchors.set(index, `'${DETAIL_SHEET}'!A${detailRows.length + 1}`);
 
@@ -1272,7 +1235,6 @@ async function startScan() {
 
   rememberWarehouse(warehouse);
   patchSettings({ ...settings, warehouse, lastPostings: postingsEl.value });
-  // ждём записи: фон следом дописывает в тот же ключ
   await flushSettings();
 
   ensureKeepAlive();
@@ -1617,7 +1579,6 @@ async function boot() {
   }
 }
 
-// «Результат» один и тот же в обоих наборах фильтров
 const VERDICT_ITEMS = [
   { value: "hit", label: "склад есть" },
   { value: "miss", label: "склада нет" },
@@ -1736,7 +1697,6 @@ function setResultView(view, animate) {
   viewSwapTimer = window.setTimeout(show, 160);
 }
 
-// Запятая бывает и десятичной («12 000,50»): по хвосту из двух цифр не режем.
 function parseDetailQuery(raw) {
   return String(raw || "")
     .split(/[\s;]+|,(?!\d{2}(?!\d))/)
@@ -1757,12 +1717,8 @@ function verdictOf(item) {
   return { className: "is-issue", text: statusLabel(item) };
 }
 
-/* Свой список с галочками вместо родного <select>. Родной показывает ровно одно
-   значение, а фильтры держат список — приходилось подсовывать строку «выбрано: N»
-   вместо того, что выбрано на самом деле. */
-
 const pickers = new Map();
-// столько вариантов ещё можно окинуть взглядом, дальше нужен поиск
+
 const PICKER_SEARCH_FROM = 8;
 
 function mountPicker(id, onPick) {
@@ -1809,7 +1765,6 @@ function mountPicker(id, onPick) {
   });
   clear.addEventListener("click", () => applyPicker(picker, []));
   search.addEventListener("input", () => renderPickerList(picker));
-  // клик внутри списка не должен закрывать поповер фильтров, в котором он лежит
   pop.addEventListener("click", (event) => event.stopPropagation());
   list.addEventListener("click", (event) => {
     const option = event.target.closest("[data-value]");
@@ -1838,8 +1793,6 @@ function applyPicker(picker, values) {
   picker.onPick(picker.values);
 }
 
-// Пройтись по галочкам, а не собрать список заново: пересборка сбрасывала прокрутку,
-// и следующий клик приходил уже по другому узлу — отметить два значения подряд не выходило.
 function paintPickerMarks(picker) {
   for (const option of picker.list.querySelectorAll(".mselect__opt")) {
     const on = picker.values.includes(option.dataset.value);
@@ -1850,7 +1803,6 @@ function paintPickerMarks(picker) {
   picker.tally.textContent = `выбрано ${picker.values.length} из ${picker.items.length}`;
 }
 
-// В кнопке помещается немного: одно значение показываем целиком, дальше — счётчиком
 function renderPickerValue(picker) {
   const { values, items } = picker;
   const labelOf = (one) => items.find((item) => item.value === one)?.label || one;
@@ -1890,11 +1842,9 @@ function fitPicker(picker) {
   const { pop, host } = picker;
   pop.classList.remove("is-up", "is-left");
   const box = host.getBoundingClientRect();
-  // под кнопкой места нет — раскрываем вверх
   if (box.bottom + pop.offsetHeight + 12 > window.innerHeight && box.top > pop.offsetHeight + 12) {
     pop.classList.add("is-up");
   }
-  // список шире поля и уходит за край окна — прижимаем к правому краю
   if (box.left + pop.offsetWidth + 12 > window.innerWidth) pop.classList.add("is-left");
 }
 
@@ -1910,7 +1860,6 @@ function openPicker(id) {
   picker.btn.setAttribute("aria-expanded", "true");
   picker.host.classList.add("is-open");
   fitPicker(picker);
-  // кадр на раскладку, иначе перехода не будет
   requestAnimationFrame(() => picker.pop.classList.add("is-open"));
   if (!picker.search.hidden) picker.search.focus({ preventScroll: true });
 }
@@ -1932,12 +1881,10 @@ function closeAllPickers() {
   for (const id of pickers.keys()) closePicker(id);
 }
 
-
 function setPickerItems(id, items) {
   const picker = pickers.get(id);
   if (!picker) return;
   picker.items = items.map((item) => (typeof item === "string" ? { value: item, label: item } : item));
-  // после нового прогона выбранного значения может уже не быть
   picker.values = picker.values.filter((one) => picker.items.some((item) => item.value === one));
   renderPickerValue(picker);
   renderPickerList(picker);
@@ -1947,7 +1894,6 @@ function setPickerValues(id, values) {
   const picker = pickers.get(id);
   if (!picker) return;
   const next = [...new Set(values)];
-  // значения бывают с пробелами и косыми, поэтому сравниваем поэлементно, а не склейкой
   const same = next.length === picker.values.length && next.every((one, at) => one === picker.values[at]);
   if (same) return;
   picker.values = next;
@@ -1957,8 +1903,6 @@ function setPickerValues(id, values) {
 
 document.addEventListener("click", closeAllPickers);
 
-// Escape разбирается одним местом (см. обработчик поповера фильтров): порядок
-// подписок тут ненадёжен, а список внутри должен закрываться раньше самого поповера.
 function escapeClosedPicker() {
   const open = [...pickers.values()].find((picker) => picker.open);
   if (!open) return false;
@@ -2046,7 +1990,6 @@ function detailCard(item) {
     columns.forEach((_, index) => {
       const value = row[index] == null ? "" : String(row[index]);
       const td = document.createElement("td");
-      // первая колонка Hub — плашка типа, вторая — дата моноширинным
       if (index === 0 && value) td.appendChild(el("span", "card__type", value));
       else if (index === 1 && value) td.appendChild(el("span", "card__when", value));
       else if (value.includes(": ")) paintChange(td, value);
@@ -2093,7 +2036,6 @@ function closeFilterBox(name) {
 
 function fitFilterBox(pop) {
   pop.style.setProperty("--shift", "0px");
-  // меряем по раскладке: закрытый поповер ещё уменьшен анимацией появления
   const parent = pop.offsetParent;
   const base = parent ? parent.getBoundingClientRect().left : 0;
   const left = base + pop.offsetLeft;
@@ -2116,7 +2058,6 @@ function openFilterBox(name) {
   box.btn.classList.add("is-on");
   box.btn.setAttribute("aria-expanded", "true");
   fitFilterBox(box.pop);
-  // кадр на раскладку, потом класс — иначе перехода не будет
   requestAnimationFrame(() => box.pop.classList.add("is-open"));
 }
 
@@ -2135,7 +2076,6 @@ function mountFilterBox(name, btnId, popId, countId) {
   pop.addEventListener("click", (event) => event.stopPropagation());
 }
 
-// у select нет атрибута value, поэтому состояние ставим отсюда, а не в CSS
 function renderFilterCount(name, active) {
   const box = filterBoxes.get(name);
   if (!box) return;
@@ -2156,7 +2096,6 @@ window.addEventListener("resize", () => {
 });
 document.addEventListener("keydown", (event) => {
   if (event.key !== "Escape") return;
-  // внутри поповера может быть открыт список выбора — он закрывается первым
   if (escapeClosedPicker()) return;
   for (const [name, box] of filterBoxes) if (box.open) closeFilterBox(name);
 });
@@ -2210,7 +2149,6 @@ function renderDetail() {
     return;
   }
 
-  // тысячи карточек рисовать незачем, до них никто не долистает
   const LIMIT = 300;
   for (const entry of shown.slice(0, LIMIT)) list.appendChild(detailCard(entry.item));
   if (shown.length > LIMIT) {
@@ -2268,12 +2206,9 @@ function resetDetailFilters() {
 
 mountDetail();
 
-// Склад в истории есть — смотрим последнюю ячейку на нём; склада нет —
-// предыдущий склад по движениям.
 let statsIndex = [];
 let statsQuery = [];
-// Фильтр держит не одно значение, а список: по графику можно протянуть и выбрать
-// сразу несколько. Пустой список означает «любое».
+
 const statsFilters = {
   verdict: [],
   cell: [],
@@ -2305,22 +2240,19 @@ function setStatsFilter(key, values) {
   renderStats();
 }
 
-// Клик оставляет одно значение — как было; списком набирают протягиванием и Ctrl.
 function toggleStatsFilter(key, value, add) {
   const list = filterList(key);
   const has = list.includes(value);
   if (add) setStatsFilter(key, has ? list.filter((one) => one !== value) : [...list, value]);
   else setStatsFilter(key, has && list.length === 1 ? [] : [value]);
 }
-// null — сортировки нет и строки идут в том порядке, в каком их ввели
+
 let statsSort = { key: "at", dir: -1 };
 
-// у даты естественный порядок — свежие сверху, у остального — по возрастанию
 function firstSortDir(key) {
   return key === "at" ? -1 : 1;
 }
 
-// клик по столбцу: сначала в одну сторону, потом в другую, третий — снимает
 function nextSort(key) {
   const first = firstSortDir(key);
   if (!statsSort || statsSort.key !== key) return { key, dir: first };
@@ -2352,7 +2284,6 @@ const STATS_SELECTS = {
   priceBand: "stats-price"
 };
 
-// «A → B» — доехал до B, «A → —» — последним известен A
 function lastCellOf(raw) {
   const text = String(raw || "").trim();
   if (!text) return "";
@@ -2363,7 +2294,6 @@ function lastCellOf(raw) {
   return "";
 }
 
-// рейсы пропускаем, нужен именно склад
 function topPlaceOf(rows) {
   let fallback = "";
   for (const row of rows || []) {
@@ -2404,7 +2334,6 @@ function blameOf(item) {
     return { kind: "cell", value: lastCellOf(report.warehouseCell), at: report.warehouseAt || topDateOf(report) };
   }
   if (kind === "miss") {
-    // сканер видит всю историю, разбор текста — откат для обхода DOM
     const place = report.lastPlace || topPlaceOf(withLabels(report));
     return { kind: "place", value: place, at: topDateOf(report) };
   }
@@ -2413,7 +2342,6 @@ function blameOf(item) {
 
 const BLAME_TAGS = { cell: "ячейка", place: "склад" };
 
-// Hub пишет «12 000,50 ₽» с неразрывным пробелом, а ищут как придётся
 function priceNeedles(text) {
   const value = priceValue(text);
   if (value == null) return [];
@@ -2626,10 +2554,6 @@ function renderStatsKpis(shown) {
   }
 }
 
-/* Выбор нескольких значений протягиванием по графику. Клик оставляет одно
-   значение, Ctrl добавляет по одному, протягивание берёт диапазон между тем,
-   где нажали, и тем, где отпустили. */
-
 function markPickGroup(node, key) {
   if (node && key) node.dataset.pickGroup = key;
   return node;
@@ -2645,7 +2569,6 @@ function addKey(event) {
   return Boolean(event && (event.ctrlKey || event.metaKey));
 }
 
-// столько пикселей — ещё клик, дальше уже протягивание
 const SWEEP_SLOP = 5;
 let sweep = null;
 let sweepSwallow = false;
@@ -2672,7 +2595,6 @@ function endSweep(apply) {
   done.host.classList.remove("is-sweeping");
   if (done.host.hasPointerCapture?.(done.id)) done.host.releasePointerCapture(done.id);
   if (!done.moved) return;
-  // клик после протягивания пришёл бы на элемент, где отпустили, и затёр бы выбор
   sweepSwallow = true;
   if (!apply) return;
   const lo = Math.min(done.from, done.to);
@@ -2687,7 +2609,6 @@ function mountStatsSweep() {
 
   host.addEventListener("pointerdown", (event) => {
     sweepSwallow = false;
-    // пальцем протягивают, чтобы прокрутить, — там оставляем обычное касание
     if (event.button !== 0 || event.pointerType === "touch") return;
     const node = event.target.closest?.("[data-pick]");
     const group = node?.closest?.("[data-pick-group]");
@@ -2705,7 +2626,6 @@ function mountStatsSweep() {
       x: event.clientX,
       y: event.clientY,
       moved: false,
-      // с Ctrl протягивание добавляет к уже выбранному, как и клик
       add: addKey(event),
       id: event.pointerId
     };
@@ -2717,14 +2637,9 @@ function mountStatsSweep() {
       if (Math.hypot(event.clientX - sweep.x, event.clientY - sweep.y) < SWEEP_SLOP) return;
       sweep.moved = true;
       host.classList.add("is-sweeping");
-      // Захват берём только здесь, а не на нажатии: пока он висит, Chromium уводит
-      // на контейнер и mouseup, а click тогда считается от общего предка — и обычный
-      // клик по столбику до его обработчика уже не доходил.
       host.setPointerCapture?.(event.pointerId);
-      // подсказка бежала бы за курсором через весь график
       hideVizTip();
     }
-    // захват увёл события на контейнер, поэтому цель ищем по координатам
     const under = document.elementFromPoint(event.clientX, event.clientY);
     const node = under?.closest?.("[data-pick]");
     if (node && sweep.group.contains(node)) {
@@ -2789,7 +2704,6 @@ function hideVizTip() {
 }
 
 function showVizTip(event, content) {
-  // во время протягивания подсказка бежала бы за курсором через весь график
   if (sweepingNow()) return;
   const data = typeof content === "function" ? content() : content;
   if (!data) return;
@@ -2845,7 +2759,6 @@ function pickFoot(active, value) {
   return "Клик — оставить только эти ID, протянуть — выбрать несколько";
 }
 
-// цвет закреплён за значением на весь прогон: фильтр не перекрашивает выживших
 const STATS_CAT = ["#3987e5", "#d95926", "#199e70", "#c98500", "#d55181"];
 const STATS_REST = "#5b6478";
 const DAY_RAMP = ["#9ec4ff", "#63a3ef", "#3987e5", "#2262b8", "#184f95"];
@@ -3047,7 +2960,6 @@ function renderBarChart(host, rows, options) {
   const top = rows.slice(0, 10);
   const max = Math.max(...top.map(([, count]) => count)) || 1;
   const total = rows.reduce((sum, [, count]) => sum + count, 0);
-  // число строк отдаём в CSS: по нему высота делится поровну
   const rowsBox = el("div", "bars__rows");
   rowsBox.style.setProperty("--bar-rows", String(top.length));
   markPickGroup(rowsBox, options.filterKey);
@@ -3166,11 +3078,9 @@ function renderColsChart(host, slice, dimKey, options) {
     });
 
     col.appendChild(el("span", "col__cap", String(total)));
-    // высота столбика — доля от самого высокого, чтобы график занял блок целиком
     const plot = el("span", "col__plot");
     const stack = el("span", "col__stack");
     stack.style.height = `${Math.max(2, (total / max) * 100)}%`;
-    // снизу вверх: склад есть, склада нет, не вышло
     const parts = [
       [VERDICT_COLORS.issue, counts.issue],
       [VERDICT_COLORS.miss, counts.miss],
@@ -3223,7 +3133,6 @@ function renderLineChart(host, data, options) {
   }
   plot.appendChild(svg);
 
-  // точки HTML поверх: preserveAspectRatio=none растянул бы круги
   for (const line of series) {
     line.points.forEach((value, index) => {
       const dot = el("i", `line__dot${chipState(options.active, line.name)}`);
@@ -3378,7 +3287,6 @@ function panelTitle(value, entries, onChange) {
   caret.appendChild(path);
   button.appendChild(caret);
 
-  // настоящий select лежит поверх прозрачным слоем: клавиатура и родное меню
   const select = document.createElement("select");
   select.className = "ptitle__select";
   select.setAttribute("aria-label", "Что показывать");
@@ -3445,7 +3353,6 @@ function renderStatsPanel(panel, index) {
   tools.appendChild(
     panelSelect(panel.viz, Object.entries(STATS_VIZ), (next) => updatePanel(index, { viz: next }))
   );
-  // крестик есть всегда, у единственной панели его прячет CSS
   const drop = el("button", "spanel__drop", "×");
   drop.type = "button";
   drop.title = "Убрать панель";
@@ -3481,7 +3388,6 @@ function renderStatsPanel(panel, index) {
 
   if (panel.viz === "line") {
     if (panel.dim === "day") {
-      // дни по дням выродились бы в диагональ, рисуем есть/нет
       const data = seriesByDay(
         slice.filter((entry) => classify(entry.item) !== "issue"),
         (entry) => classify(entry.item),
@@ -3545,7 +3451,6 @@ function renderStatsPanel(panel, index) {
   return section;
 }
 
-// анимация появления — только новой панели, иначе мигает весь набор
 function renderStatsPanels() {
   const grid = $("stats-panels");
   if (!grid) return;
@@ -3690,7 +3595,6 @@ const STATS_COLUMNS = {
   price: {
     title: "Цена реализации",
     width: 16,
-    // сортируем числом, иначе «1 000,00» встанет раньше «9,00»
     sort: (entry) => priceValue(entry.price) ?? -1,
     text: (entry) => entry.price || "",
     cell: (entry, td) => {
@@ -3739,7 +3643,6 @@ function persistStatsCols() {
 }
 
 function sortStats(entries) {
-  // сортировку сняли — отдаём как есть, во входном порядке
   if (!statsSort) return [...entries];
   const column = STATS_COLUMNS[statsSort.key] || STATS_COLUMNS.at;
   const dir = statsSort.dir;
@@ -3778,7 +3681,6 @@ function renderStatsHead() {
       dragCol = key;
       th.classList.add("is-dragging");
       event.dataTransfer.effectAllowed = "move";
-      // Firefox не начинает перетаскивание без данных
       event.dataTransfer.setData("text/plain", key);
     });
     th.addEventListener("dragend", () => {
@@ -3890,7 +3792,6 @@ function renderStatsTable(shown) {
       column.cell(entry, td);
       tr.appendChild(td);
     }
-    // из разметки строку уже не собрать: в ячейке ID лежит ещё и кнопка
     statsRowEntry.set(tr, entry);
     body.appendChild(tr);
   }
@@ -3911,7 +3812,6 @@ function renderStatsChips() {
     ["user", "пользователь"],
     ["priceBand", "цена"]
   ];
-  // по фишке на каждое выбранное значение: снимать их хочется поодиночке
   const active = [];
   for (const [key, label] of chips) {
     for (const value of filterList(key)) active.push({ key, label, value });
@@ -3940,7 +3840,6 @@ function renderStats() {
   const host = $("result-stats");
   if (!host) return;
 
-  // элемент под курсором сейчас исчезнет, pointerleave по нему не придёт
   hideVizTip();
   closeCopyMenu();
   syncStatsControls();
@@ -3958,13 +3857,8 @@ function renderStats() {
   renderFab();
 }
 
-/* Своё меню по правой кнопке в Аналитике: значения тут смотрят, а не редактируют,
-   и системное меню браузера для них бесполезно. */
-
 const statsRowEntry = new WeakMap();
 
-// Что копировать, из разметки уже не вытащить: у столбика подпись и число лежат
-// в разных узлах, а в ячейке ID к номеру примешана кнопка. Помечаем при отрисовке.
 function markValue(node, value, label, extra) {
   if (!node) return node;
   const text = oneLine(value);
@@ -3981,7 +3875,6 @@ function oneLine(value) {
   return String(value == null ? "" : value).replace(/\s+/g, " ").trim();
 }
 
-// поля ввода отдаём системному меню: там нужны «вставить» и «отменить»
 const FIELD_TAGS = new Set(["INPUT", "TEXTAREA", "SELECT"]);
 const LOOSE_LIMIT = 200;
 
@@ -3995,15 +3888,11 @@ function columnText(key, entry) {
   return oneLine(column.text ? column.text(entry) : "");
 }
 
-// подпись графика без хвоста вроде «остальные · 4» читается лучше, но копировать
-// человек хочет ровно то, что видит
 function looseValue(node, root) {
   for (let at = node; at && at !== root; at = at.parentElement) {
     if (FIELD_TAGS.has(at.tagName)) return "";
     const text = oneLine(at.textContent);
     if (!text) continue;
-    // Первый же непустой узел — самый глубокий, то есть самый близкий к тому,
-    // куда целились. Выше текста только больше, поэтому длинный не спасаем.
     return text.length <= LOOSE_LIMIT ? text : "";
   }
   return "";
@@ -4042,7 +3931,6 @@ function statsCopyItems(target) {
       items.push({
         label: "Копировать строку",
         hint: `${cols.length} ${plural(cols.length, ["столбец", "столбца", "столбцов"])}`,
-        // через табуляцию: так строка ложится в Excel по колонкам
         text: cols.map((name) => columnText(name, entry)).join("\t"),
         said: "Строка скопирована"
       });
@@ -4078,7 +3966,6 @@ function copyMenu() {
   copyMenuEl = el("div", "cmenu glass");
   copyMenuEl.hidden = true;
   copyMenuEl.setAttribute("role", "menu");
-  // по правой кнопке внутри самого меню системное тоже не нужно
   copyMenuEl.addEventListener("contextmenu", (event) => event.preventDefault());
   document.body.appendChild(copyMenuEl);
   return copyMenuEl;
@@ -4092,12 +3979,9 @@ function closeCopyMenu() {
 function placeCopyMenu(x, y) {
   const menu = copyMenuEl;
   const pad = 10;
-  // offset-размеры не считают transform, а гашение как раз двигает узел
   const width = menu.offsetWidth;
   const height = menu.offsetHeight;
   const left = Math.min(Math.max(pad, x), Math.max(pad, window.innerWidth - width - pad));
-  // под курсором места нет — раскрываем вверх, а потом всё равно вгоняем в окно:
-  // у нижнего края одного разворота вверх не хватает
   const up = y + height + pad > window.innerHeight;
   const top = Math.min(
     Math.max(pad, up ? y - height : y),
@@ -4134,16 +4018,10 @@ function openCopyMenu(x, y, items) {
   }
   reveal(menu, true);
   placeCopyMenu(x, y);
-  // без preventScroll браузер подкручивает контейнер под ушедший фокус, а прокрутка
-  // у нас закрывает меню — оно захлопывалось в тот же кадр, что и открылось
   menu.firstElementChild?.focus({ preventScroll: true });
   openedAt = Date.now();
 }
 
-// Меню несёт своё значение в подсказке, поэтому от прокрутки оно не устаревает —
-// закрываем только на осознанное колесо, а не на любое событие scroll: страница
-// подкручивается и сама (перевод фокуса, доводка вида), и меню захлопывалось в тот
-// же кадр, в котором открылось.
 const SETTLE_MS = 120;
 let openedAt = 0;
 
@@ -4331,9 +4209,6 @@ function mountCredit() {
 }
 
 mountCredit();
-
-// браузер разрешает тащить картинки и текст как файл, а это выглядит как
-// поломка; своё перетаскивание помечено draggable="true"
 
 document.addEventListener("dragstart", (event) => {
   if (event.target?.closest?.('[draggable="true"]')) return;

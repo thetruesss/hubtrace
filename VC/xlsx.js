@@ -1,5 +1,3 @@
-// Пишем .xlsx сами, без библиотек. CSV не годится: ссылка там только через =HYPERLINK,
-// а Excel разбирает имя функции по локали и выдаёт #ИМЯ?.
 (() => {
   const CRC_TABLE = (() => {
     const table = new Uint32Array(256);
@@ -17,7 +15,6 @@
     return (c ^ 0xffffffff) >>> 0;
   }
 
-  // без сжатия: файл мелкий, а deflate тянуть неоткуда
   function zipStore(entries, mimeType) {
     const encoder = new TextEncoder();
     const parts = [];
@@ -108,7 +105,6 @@
     return name;
   }
 
-  // Excel не пускает в имя листа : \ / ? * [ ] и режет до 31 символа
   function sheetTitle(name, index) {
     const clean = String(name || `Лист${index + 1}`).replace(/[\\/?*[\]:]/g, " ").trim();
     return (clean || `Лист${index + 1}`).slice(0, 31);
@@ -119,8 +115,6 @@
   const NS_R = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
   const NS_PKG = "http://schemas.openxmlformats.org/package/2006/relationships";
 
-  // 0 обычный, 1 шапка, 2 ссылка, 3 подзаголовок, 4 приглушённый,
-  // 5 переход «смотреть», 6 переход «к отчёту»
   const STYLE_PLAIN = 0;
   const STYLE_HEAD = 1;
   const STYLE_LINK = 2;
@@ -218,8 +212,6 @@
     return { xml, rels };
   }
 
-  // { sheets: [{ name, columns, rows, headRow, freeze, autoFilter }] }
-  // ячейка — строка/число либо { text, number, link, anchor, style }
   function buildXlsxBlob(input) {
     const encoder = new TextEncoder();
     const sheets = (input && input.sheets ? input.sheets : [input || {}]).map((sheet, index) => ({

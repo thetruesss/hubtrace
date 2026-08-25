@@ -1,14 +1,10 @@
-// Движок: гоняет номера по вкладкам Hub, читает историю повтором запроса
-// (см. netprobe.js), обход DOM — страховка и эталон при сверке.
-
 const APP_PATH = "app.html";
 const STORAGE_RUNTIME = "hubTraceRuntime";
 const STORAGE_FINISHED = "hubTraceFinished";
 const STORAGE_RUNS = "hubTraceRuns";
 const RUN_PREFIX = "hubTraceRun:";
 const MAX_RUNS = 5;
-// chrome.storage.local без unlimitedStorage даёт около десяти мегабайт,
-// а прогон на тысячу номеров весит примерно мегабайт
+
 const RUNS_BUDGET_BYTES = 6 * 1024 * 1024;
 const STORAGE_SETTINGS = "hubTraceSettings";
 
@@ -38,7 +34,6 @@ const MODES = {
   deep: {
     label: "Глубокий",
     threads: 3,
-    // «глубокий» — это не «без API», а самые щедрые повторы
     api: true,
     retryPartial: 3,
     retryFail: 2,
@@ -103,8 +98,6 @@ const state = {
   nativeApi: true,
   apiTune: null,
   cardPlaceless: null,
-  // Тип изменения приходит кодом (Flow, DestinationPlace), по-русски он
-  // написан только на странице, а список кодов нам неизвестен.
   changeLabels: {},
   lessonDone: false,
   lessonTries: 0,
@@ -156,7 +149,6 @@ function storageRemove(keys) {
   return new Promise((resolve) => chrome.storage.local.remove(keys, resolve));
 }
 
-// переполнение хранилища приходит через lastError, а не исключением
 function storageSetChecked(payload) {
   return new Promise((resolve) => {
     try {
@@ -351,7 +343,6 @@ function releaseGate() {
   pauseWaiters.clear();
 }
 
-// один общий промис на задачу, иначе резолверы копятся до самой остановки
 let stopSignal = null;
 let releaseStopSignal = null;
 
@@ -436,7 +427,6 @@ function getWindow(windowId) {
   });
 }
 
-// рабочие вкладки живут в своём окне: рядом с приложением они перехватывают фокус
 let workerWindowPromise = null;
 
 async function ensureWorkerWindow() {
@@ -444,15 +434,12 @@ async function ensureWorkerWindow() {
   if (workerWindowPromise) return workerWindowPromise;
 
   workerWindowPromise = (async () => {
-    // Chrome отвергает state:"maximized" вместе с focused:false
     let win = await createWindow({ url: "about:blank", focused: false, type: "normal" });
     if (!win?.id) win = await createWindow({ url: "about:blank", type: "normal" });
     if (!win?.id) return null;
 
     state.workerWindowId = win.id;
     state.ownsWorkerWindow = true;
-    // стартовая вкладка — якорь: без вкладок Chrome закроет окно, а мы примем
-    // это за «закрыл пользователь» и остановим прогон
     state.anchorTabId = win.tabs?.[0]?.id ?? null;
     if (state.anchorTabId != null) state.workerTabIds.add(state.anchorTabId);
     chrome.windows.update(win.id, { state: "maximized" }, ignoreLastError);
@@ -491,7 +478,6 @@ function stopBoost() {
   state.boostTimerId = null;
 }
 
-// скрытые вкладки Chrome тормозит, и бесконечный скролл в них залипает
 function boostTick() {
   if (!state.running || state.stopping || state.paused) return;
   if (!state.focusMode || state.domInFlight <= 0) return;
@@ -529,7 +515,6 @@ async function spawnWorker(id) {
   try {
     await spawnWorkerInner(id);
   } catch (error) {
-    // иначе воркер повиснет: liveWorkers уже увеличен, а цикл не стартовал
     state.liveWorkers -= 1;
     notice("error", `Не удалось поднять вкладку: ${String(error?.message || error)}`);
     maybeFinalize();
@@ -556,7 +541,6 @@ async function spawnWorkerInner(id) {
 
   state.workerTabIds.add(tab.id);
 
-  // проверяем по факту, а не по ответу create
   let placed = tab.windowId != null ? tab : await getTab(tab.id);
   if (placed && placed.windowId !== windowId) {
     await moveWorkerTabsTo(windowId, [tab.id]);
@@ -641,7 +625,6 @@ function cleanPosting(posting) {
   return String(posting || "").trim().replace(/^Lozon:/i, "");
 }
 
-// tab=transitionHistory — фишка «Перемещения» внутри «Истории»
 const HISTORY_TAB = "transitionHistory";
 
 function buildHistoryUrl(posting) {
@@ -657,7 +640,6 @@ function failItem(posting, status, extra) {
 async function domScan(worker, posting) {
   const conf = cfg();
   const tabId = worker.tabId;
-  // tabs.update(null, ...) уедет в активную вкладку пользователя
   if (tabId == null) {
     worker.retire = true;
     return failItem(posting, "tab_error");
@@ -698,7 +680,6 @@ async function domScan(worker, posting) {
       injectScanner(tabId);
     }, Math.min(7000, conf.navTimeoutMs));
 
-    // на странице логина ждать полный таймаут незачем
     const strayCheck = await Promise.race([
       answer.then((value) => ({ answered: value })),
       sleep(conf.navTimeoutMs).then(() => ({ answered: null })),
@@ -787,7 +768,6 @@ async function apiScan(worker, posting) {
     }
     if (reply?.auth) {
       state.apiAuthStreak += 1;
-      // у известных ручек токена нет, там 401 — это не поднявшаяся сессия
       if (state.recipe) markRecipeStale(reply.reason);
     }
     return null;
@@ -884,9 +864,6 @@ function hintsMessage() {
 
 const CYRILLIC = /[А-Яа-яЁё]/;
 
-// строки обоих путей идут в одном порядке, значит код и подпись стоят в паре
-// Сводим по дате, а не по месту: срезы у путей могут разойтись, и тогда
-// i-я строка у них уже про разные события.
 function labelsByDate(rows) {
   const byDate = new Map();
   if (!Array.isArray(rows)) return byDate;
@@ -937,8 +914,6 @@ function broadcastHints() {
   }
 }
 
-// Ручку признают пропавшей и по разовой причине — выкатке Hub, ответу шлюза.
-// Без второго шанса весь остаток прогона идёт мимо неё.
 function reviveNativeApi() {
   if (state.nativeApi || !state.nativeApiOffAt) return;
   if (Date.now() - state.nativeApiOffAt < NATIVE_RECOVER_MS) return;
@@ -966,7 +941,6 @@ function apiAllowed(worker) {
 
 const SAME_DIGEST_LIMIT = 4;
 
-// один и тот же ответ на четыре разных номера = подстановка не работает
 function watchDigest(item) {
   const digest = item?.digest;
   if (!digest) return;
@@ -988,16 +962,12 @@ function watchDigest(item) {
   );
 }
 
-// Урок: один номер за прогон гоняем обоими путями и смотрим строки рядом.
 const LESSON_TRIES = 4;
 
 function lessonDue() {
   return !state.lessonDone && !state.lessonBusy && state.lessonTries < LESSON_TRIES;
 }
 
-// Сверка стоит целого обхода DOM поверх запроса. Раз в 25 номеров это десятая
-// часть прогона, и на тысячах номеров она и съедает всю выгоду быстрого пути.
-// Каждая сошедшаяся сверка отодвигает следующую вдвое — до потолка.
 const SPOT_CHECK_BACKOFF = 4;
 
 function spotCheckEvery() {
@@ -1014,22 +984,18 @@ function spotCheckDue() {
 }
 
 const API_RETRY_BASE_MS = 20000;
-// Потолок паузы: дальше растить её незачем, а бросать попытки — тем более.
-// Прогон на тысячи номеров переживает и выкатку Hub, и обрыв сети, и лишний час
-// на медленном пути стоит дороже одной проверки раз в пять минут.
+
 const API_RETRY_CAP_MS = 300000;
-// Расхождение с DOM — повод не верить, но одиночное расхождение бывает и от
-// недочитанной страницы, поэтому ждём подтверждения.
+
 const API_MISMATCH_LIMIT = 2;
-// Отключение по расхождению держим дольше: данные важнее скорости.
+
 const API_MISMATCH_RETRY_MS = 180000;
 const API_FAIL_LIMIT = 5;
 const RECIPE_REFRESH_TIMEOUT_MS = 60000;
 const API_AUTH_STREAK_LIMIT = 6;
-// Ручка пропадает и от разовой выкатки — через это время пробуем её снова.
+
 const NATIVE_RECOVER_MS = 180000;
 
-// свежесть важнее score: повторный захват даёт тот же score, но новый токен
 function acceptRecipe(next) {
   if (!state.recipe) return true;
   if (state.recipeStale) return true;
@@ -1047,9 +1013,6 @@ function markRecipeStale(status) {
   emitState(true);
 }
 
-// Отключаем на время, а не навсегда: и расхождение, и молчание ручки чаще
-// оказываются мгновением прогона, а не приговором. Насовсем оставаться на DOM —
-// это часы разницы на большом списке.
 function blockApi(reason, kind) {
   if (state.apiState === "blocked") return;
   state.apiState = "blocked";
@@ -1071,7 +1034,6 @@ function apiRetryDue() {
   if (state.apiState !== "blocked") return false;
   if (!state.apiRetryAt || Date.now() < state.apiRetryAt) return false;
 
-  // после расхождения возвращаемся не на веру, а на сверку: до неё путь снова «неизвестный»
   const wasMismatch = state.apiBlockKind === "mismatch";
   state.apiRetries += 1;
   state.apiRetryAt = 0;
@@ -1104,7 +1066,6 @@ function requeueApiResults() {
 const API_INCONCLUSIVE_LIMIT = 3;
 
 function calibrate(api, dom, index) {
-  // сверка состоялась, второй заход по расхождению больше не нужен
   state.apiRecheck = false;
   if (!api) {
     if (state.recipeStale) {
@@ -1120,14 +1081,10 @@ function calibrate(api, dom, index) {
     return;
   }
 
-  // Сверять можно только с полным обходом: если он сам не дочитал список,
-  // его «не нашёл» ничего не доказывает.
   const domTrusted = Boolean(dom?.ok) && dom?.status === "complete";
   if (!domTrusted) {
     state.apiSinceCheck = 0;
     state.apiInconclusive += 1;
-    // сверка не удалась — повторять её тем же шагом значит и дальше платить
-    // обходом за ответ «сравнить не с чем»
     state.apiChecks += 1;
     if (
       state.apiInconclusive >= API_INCONCLUSIVE_LIMIT &&
@@ -1153,7 +1110,6 @@ function calibrate(api, dom, index) {
     state.apiFailStreak = 0;
     state.apiMismatch = 0;
     state.apiChecks += 1;
-    // сверку мог запустить соседний воркер ещё до блокировки
     if (state.apiState === "blocked") return;
     if (state.apiState !== "trusted") {
       state.apiState = "trusted";
@@ -1166,9 +1122,6 @@ function calibrate(api, dom, index) {
     return;
   }
 
-  // Обход считается полным по счётчику страницы, а он врёт, когда таблица не
-  // домотана. Одного расхождения мало: ждём второго подряд, а спорный номер
-  // в любом случае переснимаем обоими путями.
   state.apiMismatch += 1;
   state.apiChecks = 0;
   const where = dom?.posting || index;
@@ -1188,7 +1141,6 @@ function calibrate(api, dom, index) {
   );
 }
 
-// повторить запрос можно только из страницы Hub: нужны её cookie и origin
 async function primeTab(worker, posting) {
   if (worker.hubReady || worker.tabId == null) return worker.hubReady;
 
@@ -1327,7 +1279,6 @@ async function workerLoop(worker) {
         putBack(index);
         continue;
       }
-      // соседний воркер мог получить ответ, пока мы решали не верить пути
       if (item?.via === "api" && state.apiState === "blocked") {
         state.apiIndexes.delete(index);
         putBack(index);
@@ -1348,7 +1299,6 @@ function isIssue(item) {
   return !item.ok;
 }
 
-// «нет» стоит чего-то, только если список прочитан почти весь
 const COVERAGE_TARGET = 0.8;
 const MAX_RETRY_ROUNDS = 3;
 
@@ -1357,16 +1307,10 @@ function coverageOf(item) {
   if (item.found) return 1;
   const expected = Number(item.expected) || 0;
   const loaded = Number(item.loaded) || 0;
-  // Ноль из нуля читался как «ничего не прочли», хотя это «читать было нечего»:
-  // у отправления просто нет перемещений. Такой номер уходил во все три круга и
-  // каждый раз возвращался тем же нулём — вместе с полным обходом страницы.
-  // Отличаем по тому, сам ли путь сказал, что дочитал список.
   if (!expected) return loaded > 0 || (item.ok && item.status === "complete") ? 1 : 0;
   return Math.min(1, loaded / expected);
 }
 
-// У «нет страницы» дочитывать нечего: круг повторов гонял такой номер обоими
-// путями трижды, а ответ на него один и тот же — номера в Hub нет.
 const NOTHING_MORE = ["missing", "stopped", "paused"];
 
 function needsMore(item) {
@@ -1374,7 +1318,6 @@ function needsMore(item) {
   return isIssue(item) || coverageOf(item) < COVERAGE_TARGET;
 }
 
-// больше трёх кругов не крутим — честнее показать «не вышло»
 function queueRetries() {
   if (state.stopping || state.retryRound >= MAX_RETRY_ROUNDS) return false;
 
@@ -1464,7 +1407,6 @@ async function archiveRun(finished) {
   const previous = Array.isArray(saved[STORAGE_RUNS]) ? saved[STORAGE_RUNS] : [];
   const fresh = runSummary(finished, byteSize(json));
 
-  // тот же прогон второй раз (перезапуск фона) не должен задваиваться
   let runs = [fresh, ...previous.filter((run) => run && run.jobId !== fresh.jobId)];
 
   const kept = [];
@@ -1476,8 +1418,6 @@ async function archiveRun(finished) {
     bytes += size;
   }
 
-  // Сначала освобождаем место, потом пишем итог, и только если он лёг —
-  // обновляем список: переполнение приходит через lastError.
   const gone = runs.filter((run) => !kept.includes(run)).map((run) => `${RUN_PREFIX}${run.jobId}`);
   if (gone.length) await storageRemove(gone);
 
@@ -1621,8 +1561,6 @@ async function runScan(payload, postings, warehouse) {
   state.focusMode = settings.focusMode;
   state.useApi = settings.useApi;
   state.uncheckCurrentOnly = settings.uncheckCurrentOnly;
-  // с "unknown" каждый номер до первой сверки шёл обоими путями, и прогон
-  // стартовал вдвое медленнее
   state.apiState = "trusted";
   if (state.autoThreads) state.threads = autoThreadCount();
   state.apiNote = "";
@@ -1868,7 +1806,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       state.apiTune = message.apiTune;
       changed = true;
     }
-    // иначе каждая вкладка перебирает варианты заново и теряет цену на первых номерах
     if (typeof message.cardPlaceless === "boolean" && state.cardPlaceless == null) {
       state.cardPlaceless = message.cardPlaceless;
       changed = true;

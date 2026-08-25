@@ -1,5 +1,3 @@
-// Пробник в MAIN world: подсматривает, каким запросом страница тянет историю предмета.
-// Запомненный «рецепт» потом повторяется для любого номера — один round-trip вместо загрузки SPA.
 (() => {
   if (window.__hubTraceProbe) return;
 
@@ -19,7 +17,6 @@
   const probe = {
     recipe: null,
     score: -1,
-    // второй рецепт — карточка: номер отправления и статус живут не в истории
     card: null,
     cardScore: -1,
     startedAt: Date.now(),
@@ -82,7 +79,6 @@
     return out;
   }
 
-  // эти заголовки браузер ставит сам, повторять их нельзя
   const FORBIDDEN_HEADERS = new Set([
     "host",
     "connection",
@@ -119,7 +115,6 @@
     return head.startsWith("{") || head.startsWith("[");
   }
 
-  // Без ID предмета в рецепте подставлять номер некуда — на каждый запрос приедет история чужого предмета.
   function carriesId(url, body, itemId) {
     if (!itemId) return false;
     const hay = `${url || ""}\n${typeof body === "string" ? body : ""}`;
@@ -156,7 +151,6 @@
     return score;
   }
 
-  // карточка предмета: номер вида 0109673395-0032-1 в ответе и точно не история
   const POSTING_NUMBER_RE = /\d{6,}-\d{2,}-\d{1,3}/;
 
   function scoreCard(request, responseText) {
@@ -171,7 +165,6 @@
     if (itemId && responseText.includes(itemId)) score += 15;
     if (/"(status|state|stateName|statusName)"/i.test(responseText)) score += 20;
     if (/\/item|\/predmet|\/stock/.test(url)) score += 10;
-    // короткий ответ скорее карточка, длинный — список
     score += Math.max(0, 10 - Math.floor(responseText.length / 20000));
     return score;
   }
@@ -198,8 +191,6 @@
     post({ type: "cardRecipe", recipe });
   }
 
-  // Версию приложения и склад оператора Hub шлёт в своих же запросах — забираем из любого
-  // обращения, а не только из тех, что годятся в рецепт.
   function readBuildVars() {
     if (probe.appVersion) return false;
     try {
@@ -409,7 +400,6 @@
       });
   });
 
-  // рецепт мог пойматься раньше, чем scanner подписался на канал
   window.addEventListener("message", (event) => {
     if (event.source !== window) return;
     if (event.origin && event.origin !== ORIGIN) return;
