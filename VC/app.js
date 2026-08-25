@@ -1565,7 +1565,8 @@ function applySavedSettings(saved) {
     const cols = saved.statsCols.filter((key) => STATS_COLUMNS[key]);
     if (cols.length) statsCols = [...new Set(cols)];
   }
-  if (saved.statsSort && STATS_COLUMNS[saved.statsSort.key]) {
+  if (saved.statsSort === null) statsSort = null;
+  else if (saved.statsSort && STATS_COLUMNS[saved.statsSort.key]) {
     statsSort = { key: saved.statsSort.key, dir: saved.statsSort.dir < 0 ? -1 : 1 };
   }
   if (RESULT_VIEWS.includes(saved.resultView)) resultView = saved.resultView;
@@ -1616,9 +1617,21 @@ async function boot() {
   }
 }
 
+// «Результат» один и тот же в обоих наборах фильтров
+const VERDICT_ITEMS = [
+  { value: "hit", label: "склад есть" },
+  { value: "miss", label: "склада нет" },
+  { value: "issue", label: "не вышло" }
+];
+
 let detailQuery = [];
 let detailIndex = [];
-const detailFilters = { verdict: "", bucket: "", status: "" };
+const detailFilters = { verdict: [], bucket: [], status: [] };
+
+function detailFits(key, value) {
+  const list = detailFilters[key];
+  return !list.length || list.includes(value);
+}
 
 function haystackOf(item) {
   const report = item.report || {};
@@ -1659,36 +1672,19 @@ function fillFilterOptions() {
   buckets.sort((a, b) => BUCKET_ORDER.indexOf(a) - BUCKET_ORDER.indexOf(b));
   statuses.sort((a, b) => a.localeCompare(b, "ru"));
 
-  const fill = (id, values, anyLabel) => {
-    const select = $(id);
-    if (!select) return;
-    const keep = select.value;
-    select.innerHTML = "";
-    const any = document.createElement("option");
-    any.value = "";
-    any.textContent = anyLabel;
-    select.appendChild(any);
-    for (const value of values) {
-      const option = document.createElement("option");
-      option.value = value;
-      option.textContent = value;
-      select.appendChild(option);
-    }
-    select.value = values.includes(keep) ? keep : "";
-  };
-  fill("filter-bucket", buckets, "любая");
-  fill("filter-status", statuses, "любой");
+  setPickerItems("filter-bucket", buckets);
+  setPickerItems("filter-status", statuses);
 }
 
 function passesFilters(item) {
-  if (detailFilters.verdict && classify(item) !== detailFilters.verdict) return false;
-  if (detailFilters.status && item.report?.status !== detailFilters.status) return false;
-  if (detailFilters.bucket && bucketOf(bucketDateOf(item.report), Date.now()) !== detailFilters.bucket) return false;
+  if (!detailFits("verdict", classify(item))) return false;
+  if (!detailFits("status", item.report?.status || "")) return false;
+  if (!detailFits("bucket", bucketOf(bucketDateOf(item.report), Date.now()))) return false;
   return true;
 }
 
 function filtersActive() {
-  return Object.values(detailFilters).some(Boolean) || detailQuery.length > 0;
+  return Object.values(detailFilters).some((list) => list.length) || detailQuery.length > 0;
 }
 
 const RESULT_VIEWS = ["list", "detail", "stats"];
@@ -1759,6 +1755,216 @@ function verdictOf(item) {
   if (kind === "hit") return { className: "is-hit", text: "склад есть" };
   if (kind === "miss") return { className: "is-miss", text: "склада нет" };
   return { className: "is-issue", text: statusLabel(item) };
+}
+
+/* Свой список с галочками вместо родного <select>. Родной показывает ровно одно
+   значение, а фильтры держат список — приходилось подсовывать строку «выбрано: N»
+   вместо того, что выбрано на самом деле. */
+
+const pickers = new Map();
+// столько вариантов ещё можно окинуть взглядом, дальше нужен поиск
+const PICKER_SEARCH_FROM = 8;
+
+function mountPicker(id, onPick) {
+  const host = $(id);
+  if (!host || pickers.has(id)) return pickers.get(id) || null;
+
+  const anyLabel = host.dataset.any || "любое";
+  const btn = el("button", "mselect__btn");
+  btn.type = "button";
+  btn.setAttribute("aria-haspopup", "listbox");
+  btn.setAttribute("aria-expanded", "false");
+  const value = el("span", "mselect__value");
+  const caret = el("i", "mselect__caret");
+  btn.append(value, caret);
+
+  const pop = el("div", "mselect__pop");
+  pop.hidden = true;
+  const search = document.createElement("input");
+  search.className = "mselect__search";
+  search.type = "text";
+  search.placeholder = "Найти";
+  search.autocomplete = "off";
+  const list = el("div", "mselect__list");
+  list.setAttribute("role", "listbox");
+  list.setAttribute("aria-multiselectable", "true");
+  const foot = el("div", "mselect__foot");
+  const tally = el("span", "mselect__tally");
+  const clear = el("button", "mselect__clear", "Снять всё");
+  clear.type = "button";
+  foot.append(tally, clear);
+  pop.append(search, list, foot);
+  host.append(btn, pop);
+
+  const picker = {
+    id, host, btn, value, pop, search, list, foot, tally, clear, anyLabel,
+    items: [], values: [], open: false, timer: null, onPick
+  };
+  pickers.set(id, picker);
+
+  btn.addEventListener("click", (event) => {
+    event.stopPropagation();
+    if (picker.open) closePicker(id);
+    else openPicker(id);
+  });
+  clear.addEventListener("click", () => applyPicker(picker, []));
+  search.addEventListener("input", () => renderPickerList(picker));
+  // клик внутри списка не должен закрывать поповер фильтров, в котором он лежит
+  pop.addEventListener("click", (event) => event.stopPropagation());
+  list.addEventListener("click", (event) => {
+    const option = event.target.closest("[data-value]");
+    if (!option) return;
+    const one = option.dataset.value;
+    const has = picker.values.includes(one);
+    applyPicker(picker, has ? picker.values.filter((v) => v !== one) : [...picker.values, one]);
+  });
+  list.addEventListener("keydown", (event) => {
+    if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+    event.preventDefault();
+    const all = [...list.querySelectorAll(".mselect__opt")];
+    const at = all.indexOf(document.activeElement);
+    const next = event.key === "ArrowDown" ? at + 1 : at - 1;
+    all[(next + all.length) % all.length]?.focus({ preventScroll: true });
+  });
+
+  renderPickerValue(picker);
+  return picker;
+}
+
+function applyPicker(picker, values) {
+  picker.values = [...new Set(values)];
+  renderPickerValue(picker);
+  paintPickerMarks(picker);
+  picker.onPick(picker.values);
+}
+
+// Пройтись по галочкам, а не собрать список заново: пересборка сбрасывала прокрутку,
+// и следующий клик приходил уже по другому узлу — отметить два значения подряд не выходило.
+function paintPickerMarks(picker) {
+  for (const option of picker.list.querySelectorAll(".mselect__opt")) {
+    const on = picker.values.includes(option.dataset.value);
+    option.classList.toggle("is-on", on);
+    option.setAttribute("aria-selected", on ? "true" : "false");
+  }
+  picker.foot.hidden = !picker.values.length;
+  picker.tally.textContent = `выбрано ${picker.values.length} из ${picker.items.length}`;
+}
+
+// В кнопке помещается немного: одно значение показываем целиком, дальше — счётчиком
+function renderPickerValue(picker) {
+  const { values, items } = picker;
+  const labelOf = (one) => items.find((item) => item.value === one)?.label || one;
+  picker.host.classList.toggle("is-set", values.length > 0);
+  if (!values.length) picker.value.textContent = picker.anyLabel;
+  else if (values.length === 1) picker.value.textContent = labelOf(values[0]);
+  else picker.value.textContent = `${labelOf(values[0])} +${values.length - 1}`;
+  picker.value.title = values.length > 1 ? values.map(labelOf).join(", ") : "";
+}
+
+function renderPickerList(picker) {
+  const { items, values, list, search } = picker;
+  const needle = search.value.trim().toLowerCase();
+  const shown = needle ? items.filter((item) => item.label.toLowerCase().includes(needle)) : items;
+  search.hidden = items.length < PICKER_SEARCH_FROM;
+  picker.foot.hidden = !values.length;
+  picker.tally.textContent = `выбрано ${values.length} из ${items.length}`;
+
+  list.replaceChildren();
+  if (!shown.length) {
+    list.appendChild(el("p", "mselect__none", items.length ? "Ничего не нашлось" : "Значений нет"));
+    return;
+  }
+  for (const item of shown) {
+    const on = values.includes(item.value);
+    const option = el("button", `mselect__opt${on ? " is-on" : ""}`);
+    option.type = "button";
+    option.dataset.value = item.value;
+    option.setAttribute("role", "option");
+    option.setAttribute("aria-selected", on ? "true" : "false");
+    option.append(el("i", "mselect__mark"), el("span", "mselect__label", item.label));
+    list.appendChild(option);
+  }
+}
+
+function fitPicker(picker) {
+  const { pop, host } = picker;
+  pop.classList.remove("is-up", "is-left");
+  const box = host.getBoundingClientRect();
+  // под кнопкой места нет — раскрываем вверх
+  if (box.bottom + pop.offsetHeight + 12 > window.innerHeight && box.top > pop.offsetHeight + 12) {
+    pop.classList.add("is-up");
+  }
+  // список шире поля и уходит за край окна — прижимаем к правому краю
+  if (box.left + pop.offsetWidth + 12 > window.innerWidth) pop.classList.add("is-left");
+}
+
+function openPicker(id) {
+  for (const other of pickers.keys()) if (other !== id) closePicker(other);
+  const picker = pickers.get(id);
+  if (!picker || picker.open) return;
+  picker.open = true;
+  window.clearTimeout(picker.timer);
+  picker.search.value = "";
+  renderPickerList(picker);
+  picker.pop.hidden = false;
+  picker.btn.setAttribute("aria-expanded", "true");
+  picker.host.classList.add("is-open");
+  fitPicker(picker);
+  // кадр на раскладку, иначе перехода не будет
+  requestAnimationFrame(() => picker.pop.classList.add("is-open"));
+  if (!picker.search.hidden) picker.search.focus({ preventScroll: true });
+}
+
+function closePicker(id) {
+  const picker = pickers.get(id);
+  if (!picker || !picker.open) return;
+  picker.open = false;
+  picker.pop.classList.remove("is-open");
+  picker.btn.setAttribute("aria-expanded", "false");
+  picker.host.classList.remove("is-open");
+  window.clearTimeout(picker.timer);
+  picker.timer = window.setTimeout(() => {
+    if (!picker.open) picker.pop.hidden = true;
+  }, 200);
+}
+
+function closeAllPickers() {
+  for (const id of pickers.keys()) closePicker(id);
+}
+
+
+function setPickerItems(id, items) {
+  const picker = pickers.get(id);
+  if (!picker) return;
+  picker.items = items.map((item) => (typeof item === "string" ? { value: item, label: item } : item));
+  // после нового прогона выбранного значения может уже не быть
+  picker.values = picker.values.filter((one) => picker.items.some((item) => item.value === one));
+  renderPickerValue(picker);
+  renderPickerList(picker);
+}
+
+function setPickerValues(id, values) {
+  const picker = pickers.get(id);
+  if (!picker) return;
+  const next = [...new Set(values)];
+  // значения бывают с пробелами и косыми, поэтому сравниваем поэлементно, а не склейкой
+  const same = next.length === picker.values.length && next.every((one, at) => one === picker.values[at]);
+  if (same) return;
+  picker.values = next;
+  renderPickerValue(picker);
+  if (picker.open) paintPickerMarks(picker);
+}
+
+document.addEventListener("click", closeAllPickers);
+
+// Escape разбирается одним местом (см. обработчик поповера фильтров): порядок
+// подписок тут ненадёжен, а список внутри должен закрываться раньше самого поповера.
+function escapeClosedPicker() {
+  const open = [...pickers.values()].find((picker) => picker.open);
+  if (!open) return false;
+  closePicker(open.id);
+  open.btn.focus({ preventScroll: true });
+  return true;
 }
 
 function el(tag, className, text) {
@@ -1933,8 +2139,8 @@ function mountFilterBox(name, btnId, popId, countId) {
 function renderFilterCount(name, active) {
   const box = filterBoxes.get(name);
   if (!box) return;
-  for (const select of box.pop.querySelectorAll("select")) {
-    select.closest(".pick")?.classList.toggle("is-set", Boolean(select.value));
+  for (const one of box.pop.querySelectorAll(".mselect")) {
+    one.closest(".pick")?.classList.toggle("is-set", one.classList.contains("is-set"));
   }
   if (!box.count) return;
   reveal(box.count, active > 0);
@@ -1950,6 +2156,8 @@ window.addEventListener("resize", () => {
 });
 document.addEventListener("keydown", (event) => {
   if (event.key !== "Escape") return;
+  // внутри поповера может быть открыт список выбора — он закрывается первым
+  if (escapeClosedPicker()) return;
   for (const [name, box] of filterBoxes) if (box.open) closeFilterBox(name);
 });
 
@@ -1986,7 +2194,7 @@ function renderDetail() {
   const all = detailIndex.length;
 
   renderTally("detail-count", shown.length, all);
-  renderFilterCount("detail", countActive(Object.values(detailFilters)));
+  renderFilterCount("detail", countActive(Object.values(detailFilters).map((list) => list.length)));
   reveal($("filter-reset"), filtersActive());
   renderDetailChips();
 
@@ -2036,17 +2244,13 @@ function mountDetail() {
     });
   }
 
-  const bind = (id, key) => {
-    const select = $(id);
-    if (!select) return;
-    select.addEventListener("change", () => {
-      detailFilters[key] = select.value;
+  for (const [id, key] of [["filter-verdict", "verdict"], ["filter-bucket", "bucket"], ["filter-status", "status"]]) {
+    mountPicker(id, (values) => {
+      detailFilters[key] = values;
       renderDetail();
     });
-  };
-  bind("filter-verdict", "verdict");
-  bind("filter-bucket", "bucket");
-  bind("filter-status", "status");
+  }
+  setPickerItems("filter-verdict", VERDICT_ITEMS);
 
   $("filter-reset")?.addEventListener("click", () => {
     resetDetailFilters();
@@ -2056,13 +2260,10 @@ function mountDetail() {
 
 function resetDetailFilters() {
   detailQuery = [];
-  for (const key of Object.keys(detailFilters)) detailFilters[key] = "";
+  for (const key of Object.keys(detailFilters)) detailFilters[key] = [];
   const search = $("detail-search");
   if (search) search.value = "";
-  for (const id of ["filter-verdict", "filter-bucket", "filter-status"]) {
-    const select = $(id);
-    if (select) select.value = "";
-  }
+  for (const id of ["filter-verdict", "filter-bucket", "filter-status"]) setPickerValues(id, []);
 }
 
 mountDetail();
@@ -2111,7 +2312,21 @@ function toggleStatsFilter(key, value, add) {
   if (add) setStatsFilter(key, has ? list.filter((one) => one !== value) : [...list, value]);
   else setStatsFilter(key, has && list.length === 1 ? [] : [value]);
 }
+// null — сортировки нет и строки идут в том порядке, в каком их ввели
 let statsSort = { key: "at", dir: -1 };
+
+// у даты естественный порядок — свежие сверху, у остального — по возрастанию
+function firstSortDir(key) {
+  return key === "at" ? -1 : 1;
+}
+
+// клик по столбцу: сначала в одну сторону, потом в другую, третий — снимает
+function nextSort(key) {
+  const first = firstSortDir(key);
+  if (!statsSort || statsSort.key !== key) return { key, dir: first };
+  if (statsSort.dir === first) return { key, dir: -first };
+  return null;
+}
 
 const STATS_VIZ = { bars: "Гистограмма", cols: "Столбики", line: "График", donut: "Диаграмма" };
 const DEFAULT_PANELS = [
@@ -2320,23 +2535,7 @@ function tallyBy(entries, keyOf) {
 }
 
 function fillStatsOptions() {
-  const fill = (id, values, anyLabel) => {
-    const select = $(id);
-    if (!select) return;
-    const keep = select.value;
-    select.innerHTML = "";
-    const any = document.createElement("option");
-    any.value = "";
-    any.textContent = anyLabel;
-    select.appendChild(any);
-    for (const value of values) {
-      const option = document.createElement("option");
-      option.value = value;
-      option.textContent = value;
-      select.appendChild(option);
-    }
-    select.value = values.includes(keep) ? keep : "";
-  };
+  const fill = (id, values) => setPickerItems(id, values);
 
   const cells = tallyBy(
     statsIndex.filter((entry) => entry.blame.kind === "cell"),
@@ -2363,39 +2562,16 @@ function fillStatsOptions() {
   ops.sort((a, b) => a.localeCompare(b, "ru"));
   bands.sort((a, b) => PRICE_ORDER.indexOf(a) - PRICE_ORDER.indexOf(b));
 
-  fill("stats-cell", cells, "любая");
-  fill("stats-place", places, "любой");
-  fill("stats-bucket", buckets, "любая");
-  fill("stats-status", statuses, "любой");
-  fill("stats-op", ops, "любая");
-  fill("stats-price", bands, "любая");
+  fill("stats-cell", cells);
+  fill("stats-place", places);
+  fill("stats-bucket", buckets);
+  fill("stats-status", statuses);
+  fill("stats-op", ops);
+  fill("stats-price", bands);
 }
 
-// В списке выбора одна строка, а фильтр умеет несколько — показываем это прямо,
-// иначе выбранное протягиванием выглядело бы как «фильтра нет».
-const MULTI_VALUE = "\u0001multi";
-
 function syncStatsControls() {
-  for (const [key, id] of Object.entries(STATS_SELECTS)) {
-    const select = $(id);
-    if (!select) continue;
-    const list = filterList(key);
-    let multi = select.querySelector("option[data-multi]");
-    if (list.length > 1) {
-      if (!multi) {
-        multi = document.createElement("option");
-        multi.dataset.multi = "1";
-        multi.value = MULTI_VALUE;
-        select.appendChild(multi);
-      }
-      multi.textContent = `выбрано: ${list.length}`;
-      if (select.value !== MULTI_VALUE) select.value = MULTI_VALUE;
-      continue;
-    }
-    if (multi) multi.remove();
-    const want = list[0] || "";
-    if (select.value !== want) select.value = want;
-  }
+  for (const [key, id] of Object.entries(STATS_SELECTS)) setPickerValues(id, filterList(key));
 }
 
 function renderStatsKpis(shown) {
@@ -3563,6 +3739,8 @@ function persistStatsCols() {
 }
 
 function sortStats(entries) {
+  // сортировку сняли — отдаём как есть, во входном порядке
+  if (!statsSort) return [...entries];
   const column = STATS_COLUMNS[statsSort.key] || STATS_COLUMNS.at;
   const dir = statsSort.dir;
   return [...entries].sort((a, b) => {
@@ -3592,9 +3770,9 @@ function renderStatsHead() {
     th.dataset.sort = key;
     th.draggable = true;
     th.textContent = column.title;
-    th.title = "Клик — сортировка, перетаскиванием — порядок столбцов";
-    th.classList.toggle("is-sorted", key === statsSort.key);
-    th.classList.toggle("is-desc", key === statsSort.key && statsSort.dir < 0);
+    th.title = "Клик — сортировка, третий — снять; перетаскиванием — порядок столбцов";
+    th.classList.toggle("is-sorted", key === statsSort?.key);
+    th.classList.toggle("is-desc", key === statsSort?.key && statsSort.dir < 0);
 
     th.addEventListener("dragstart", (event) => {
       dragCol = key;
@@ -3653,7 +3831,7 @@ function renderColMenu() {
           return;
         }
         statsCols = statsCols.filter((name) => name !== key);
-        if (statsSort.key === key) statsSort = { key: statsCols[0], dir: 1 };
+        if (statsSort?.key === key) statsSort = { key: statsCols[0], dir: firstSortDir(statsCols[0]) };
       }
       persistStatsCols();
       refreshStatsTable();
@@ -4014,12 +4192,7 @@ function resetStatsFilters() {
   for (const key of Object.keys(statsFilters)) statsFilters[key] = [];
   const search = $("stats-search");
   if (search) search.value = "";
-  for (const id of Object.values(STATS_SELECTS)) {
-    const select = $(id);
-    if (!select) continue;
-    select.querySelector("option[data-multi]")?.remove();
-    select.value = "";
-  }
+  for (const id of Object.values(STATS_SELECTS)) setPickerValues(id, []);
 }
 
 function jumpToDetail(posting) {
@@ -4045,14 +4218,9 @@ function mountStats() {
   }
 
   for (const [key, id] of Object.entries(STATS_SELECTS)) {
-    const select = $(id);
-    if (!select) continue;
-    select.addEventListener("change", () => {
-      // «выбрано: N» — это отражение состояния, а не вариант выбора
-      if (select.value === MULTI_VALUE) return;
-      setStatsFilter(key, select.value ? [select.value] : []);
-    });
+    mountPicker(id, (values) => setStatsFilter(key, values));
   }
+  setPickerItems("stats-verdict", VERDICT_ITEMS);
 
   $("stats-reset")?.addEventListener("click", () => {
     resetStatsFilters();
@@ -4102,8 +4270,7 @@ function mountStats() {
       const th = event.target.closest("th[data-sort]");
       if (th) {
         const key = th.dataset.sort;
-        if (statsSort.key === key) statsSort.dir = -statsSort.dir;
-        else statsSort = { key, dir: key === "at" ? -1 : 1 };
+        statsSort = nextSort(key);
         persistStatsCols();
         refreshStatsTable();
       }
