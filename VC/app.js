@@ -1139,6 +1139,10 @@ function buildXlsx() {
   entries.forEach((entry, index) => {
     const row = cols.map((key) => {
       const column = STATS_COLUMNS[key];
+      const value = column.number ? column.number(entry) : null;
+      if (Number.isFinite(value)) {
+        return column.money ? { number: value, style: xlsxStyles.STYLE_MONEY } : { number: value };
+      }
       const cell = { text: column.text(entry) };
       if (column.link) cell.link = column.link(entry);
       return cell;
@@ -2360,6 +2364,13 @@ function priceValue(text) {
   const clean = String(text || "").replace(/[^0-9,.\s]/g, "").replace(/\s+/g, "").replace(",", ".");
   const number = Number.parseFloat(clean);
   return Number.isFinite(number) ? number : null;
+}
+
+function priceNumber(text) {
+  const clean = String(text || "").trim();
+  if (!clean) return null;
+  if (/[^0-9\s.,\u00a0\u20bd]/.test(clean)) return null;
+  return priceValue(clean);
 }
 
 function priceText(value) {
@@ -3597,6 +3608,8 @@ const STATS_COLUMNS = {
     width: 16,
     sort: (entry) => priceValue(entry.price) ?? -1,
     text: (entry) => entry.price || "",
+    number: (entry) => priceNumber(entry.price),
+    money: true,
     cell: (entry, td) => {
       td.className = "t-price";
       td.textContent = entry.price || "—";

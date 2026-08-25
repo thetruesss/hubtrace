@@ -122,6 +122,9 @@
   const STYLE_MUTED = 4;
   const STYLE_JUMP = 5;
   const STYLE_BACK = 6;
+  const STYLE_MONEY = 7;
+
+  const MONEY_FMT_ID = 164;
 
   function buildSheetXml(sheet) {
     const links = [];
@@ -237,6 +240,9 @@
 
     const styles =
       `${XML_HEAD}<styleSheet xmlns="${NS}">` +
+      `<numFmts count="1">` +
+      `<numFmt numFmtId="${MONEY_FMT_ID}" formatCode="#,##0.00\\ &quot;\u20bd&quot;"/>` +
+      `</numFmts>` +
       `<fonts count="6">` +
       `<font><sz val="11"/><color theme="1"/><name val="Calibri"/><family val="2"/><scheme val="minor"/></font>` +
       `<font><b/><sz val="11"/><color theme="1"/><name val="Calibri"/><family val="2"/><scheme val="minor"/></font>` +
@@ -252,7 +258,7 @@
       `</fills>` +
       `<borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>` +
       `<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>` +
-      `<cellXfs count="7">` +
+      `<cellXfs count="8">` +
       `<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0" applyAlignment="1"><alignment vertical="top" wrapText="1"/></xf>` +
       `<xf numFmtId="0" fontId="1" fillId="2" borderId="0" xfId="0" applyFont="1" applyFill="1"/>` +
       `<xf numFmtId="0" fontId="2" fillId="0" borderId="0" xfId="0" applyFont="1"/>` +
@@ -262,6 +268,7 @@
       `<alignment horizontal="center" vertical="center"/></xf>` +
       `<xf numFmtId="0" fontId="5" fillId="0" borderId="0" xfId="0" applyFont="1" applyAlignment="1">` +
       `<alignment horizontal="left" vertical="center"/></xf>` +
+      `<xf numFmtId="${MONEY_FMT_ID}" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>` +
       `</cellXfs>` +
       `<cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>` +
       `</styleSheet>`;
@@ -319,7 +326,8 @@
     STYLE_TITLE,
     STYLE_MUTED,
     STYLE_JUMP,
-    STYLE_BACK
+    STYLE_BACK,
+    STYLE_MONEY
   };
   globalThis.xlsxSheetTitle = sheetTitle;
 })();
