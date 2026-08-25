@@ -386,27 +386,18 @@
                     <button id="filter-reset" class="btn btn--ghost btn--sm" type="button" hidden>Сбросить всё</button>
                   </div>
                   <div class="filterbox__grid">
-                    <label class="pick">
+                    <div class="pick">
                       <span>Результат</span>
-                      <select id="filter-verdict">
-                        <option value="">любой</option>
-                        <option value="hit">склад есть</option>
-                        <option value="miss">склада нет</option>
-                        <option value="issue">не вышло</option>
-                      </select>
-                    </label>
-                    <label class="pick">
+                      <div class="mselect" id="filter-verdict" data-any="любой"></div>
+                    </div>
+                    <div class="pick">
                       <span>Корзинка</span>
-                      <select id="filter-bucket">
-                        <option value="">любая</option>
-                      </select>
-                    </label>
-                    <label class="pick">
+                      <div class="mselect" id="filter-bucket" data-any="любая"></div>
+                    </div>
+                    <div class="pick">
                       <span>Статус</span>
-                      <select id="filter-status">
-                        <option value="">любой</option>
-                      </select>
-                    </label>
+                      <div class="mselect" id="filter-status" data-any="любой"></div>
+                    </div>
                   </div>
                 </div>
               </div>
@@ -449,51 +440,34 @@
                     <button id="stats-reset" class="btn btn--ghost btn--sm" type="button" hidden>Сбросить всё</button>
                   </div>
                   <div class="filterbox__grid">
-                    <label class="pick">
+                    <div class="pick">
                       <span>Результат</span>
-                      <select id="stats-verdict">
-                        <option value="">любой</option>
-                        <option value="hit">склад есть</option>
-                        <option value="miss">склада нет</option>
-                        <option value="issue">не вышло</option>
-                      </select>
-                    </label>
-                    <label class="pick">
+                      <div class="mselect" id="stats-verdict" data-any="любой"></div>
+                    </div>
+                    <div class="pick">
                       <span>Ячейка</span>
-                      <select id="stats-cell">
-                        <option value="">любая</option>
-                      </select>
-                    </label>
-                    <label class="pick">
+                      <div class="mselect" id="stats-cell" data-any="любая"></div>
+                    </div>
+                    <div class="pick">
                       <span>Склад</span>
-                      <select id="stats-place">
-                        <option value="">любой</option>
-                      </select>
-                    </label>
-                    <label class="pick">
+                      <div class="mselect" id="stats-place" data-any="любой"></div>
+                    </div>
+                    <div class="pick">
                       <span>Корзинка</span>
-                      <select id="stats-bucket">
-                        <option value="">любая</option>
-                      </select>
-                    </label>
-                    <label class="pick">
+                      <div class="mselect" id="stats-bucket" data-any="любая"></div>
+                    </div>
+                    <div class="pick">
                       <span>Статус</span>
-                      <select id="stats-status">
-                        <option value="">любой</option>
-                      </select>
-                    </label>
-                    <label class="pick">
+                      <div class="mselect" id="stats-status" data-any="любой"></div>
+                    </div>
+                    <div class="pick">
                       <span>Операция</span>
-                      <select id="stats-op">
-                        <option value="">любая</option>
-                      </select>
-                    </label>
-                    <label class="pick">
+                      <div class="mselect" id="stats-op" data-any="любая"></div>
+                    </div>
+                    <div class="pick">
                       <span>Цена</span>
-                      <select id="stats-price">
-                        <option value="">любая</option>
-                      </select>
-                    </label>
+                      <div class="mselect" id="stats-price" data-any="любая"></div>
+                    </div>
                   </div>
                 </div>
               </div>
