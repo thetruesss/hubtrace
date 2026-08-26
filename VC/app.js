@@ -50,7 +50,6 @@ const ui = {
   lists: { hits: [], misses: [], issues: [] },
   finished: null,
   viewCutoff: 0,
-  viewCutoffText: "",
   reportSaved: false,
   recentWarehouses: [],
   rates: {},
@@ -846,20 +845,25 @@ function renderList(name) {
 let changeLabels = {};
 
 const LOGIN_RE = /^[A-Za-z][A-Za-z0-9._-]*$/;
+const NAME_RE = /^[A-Z][a-z]*$/;
 
-function loginOnly(raw) {
+function findLogin(raw) {
   const text = String(raw || "").trim();
   if (!text) return "";
-  for (const chunk of text.split(/[\s()·,;|]+/)) {
+
+  const chunks = text.split(/[\s()·,;|]+/).filter(Boolean);
+  const mail = chunks.find((chunk) => chunk.indexOf("@") > 0);
+  for (const chunk of mail ? [mail, ...chunks] : chunks) {
     const at = chunk.indexOf("@");
     const head = at > 0 ? chunk.slice(0, at) : chunk;
-    if (LOGIN_RE.test(head)) return head;
+    if (!LOGIN_RE.test(head)) continue;
+    if (at < 0 && (NAME_RE.test(head) || !/[a-z]/.test(head))) continue;
+    return head;
   }
-  if (/^\d+$/.test(text)) return text;
-  return "—";
+  return /^\d+$/.test(text) ? text : "";
 }
 
-function userColumnOf(report) {
+function userColumnAt(report) {
   const columns = report?.columns;
   if (!Array.isArray(columns) || !columns.length) return 2;
   const at = columns.findIndex((title) => /^польз/i.test(String(title || "")));
@@ -870,13 +874,13 @@ function withLabels(report) {
   const rows = report?.lastRows;
   if (!Array.isArray(rows)) return [];
   const codes = report?.codes;
-  const userAt = userColumnOf(report);
+  const userAt = userColumnAt(report);
   return rows.map((row, index) => {
     if (!Array.isArray(row)) return row;
     const out = [...row];
     const label = Array.isArray(codes) ? changeLabels[codes[index]] : "";
     if (label && out.length && out[0] !== label) out[0] = label;
-    if (userAt < out.length) out[userAt] = loginOnly(out[userAt]);
+    if (userAt < out.length) out[userAt] = findLogin(out[userAt]) || "—";
     return out;
   });
 }
@@ -1053,6 +1057,7 @@ function indexResults(keepFilters) {
   buildDetailIndex(results);
   if (!keepFilters) resetDetailFilters();
   fillFilterOptions();
+  syncDetailControls();
   buildStatsIndex(results);
   if (!keepFilters) resetStatsFilters();
   fillStatsOptions();
@@ -1066,7 +1071,6 @@ function setViewCutoff(raw, quiet) {
   const changed = next !== ui.viewCutoff;
 
   ui.viewCutoff = next;
-  ui.viewCutoffText = next ? cut.text : "";
   if (quiet) return;
 
   if (changed) indexResults(true);
@@ -1082,7 +1086,7 @@ const WEEK_DAYS = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"];
 const WHEEL_ITEM = 30;
 
 const datePickers = new Map();
-let openDtp = null;
+let openedDatePicker = null;
 
 function stampText(date) {
   return `${pad(date.getDate())}.${pad(date.getMonth() + 1)}.${date.getFullYear()} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
@@ -1120,7 +1124,7 @@ function spinWheel(col, value) {
   paintWheel(col);
 }
 
-function buildDtp() {
+function buildDatePicker() {
   const pop = el("div", "dtp");
   pop.hidden = true;
 
@@ -1159,7 +1163,7 @@ function buildDtp() {
   return { pop, prev, next, title, grid, hour, minute, now, wipe, done };
 }
 
-function dtpValue(picker) {
+function datePickerValue(picker) {
   const cut = readCutoff(picker.input.value);
   return cut.ok && cut.at ? new Date(cut.at) : null;
 }
@@ -1169,7 +1173,7 @@ function syncWheels(picker) {
   spinWheel(picker.parts.minute, picker.minute);
 }
 
-function renderDtp(picker) {
+function renderDatePicker(picker) {
   const parts = picker.parts;
   const chosen = picker.chosen;
   parts.title.textContent = `${MONTH_NAMES[picker.month]} ${picker.year}`;
@@ -1192,26 +1196,26 @@ function renderDtp(picker) {
   }
 }
 
-function emitDtp(picker, date) {
+function emitDatePicker(picker, date) {
   picker.chosen = date;
   picker.echo = true;
   picker.input.value = stampText(date);
   picker.input.dispatchEvent(new Event("input", { bubbles: true }));
   picker.echo = false;
-  renderDtp(picker);
+  renderDatePicker(picker);
 }
 
 function pickDay(picker, key) {
   const [year, month, day] = String(key).split("-").map(Number);
-  emitDtp(picker, new Date(year, month, day, picker.hour, picker.minute));
+  emitDatePicker(picker, new Date(year, month, day, picker.hour, picker.minute));
 }
 
-function slideDtp(picker) {
+function slideDatePicker(picker) {
   const base = picker.chosen || new Date();
-  emitDtp(picker, new Date(base.getFullYear(), base.getMonth(), base.getDate(), picker.hour, picker.minute));
+  emitDatePicker(picker, new Date(base.getFullYear(), base.getMonth(), base.getDate(), picker.hour, picker.minute));
 }
 
-function placeDtp(picker) {
+function placeDatePicker(picker) {
   const pop = picker.parts.pop;
   const box = picker.input.getBoundingClientRect();
   const size = pop.getBoundingClientRect();
@@ -1231,28 +1235,31 @@ function placeDtp(picker) {
 }
 
 function openDatePicker(picker) {
-  if (openDtp && openDtp !== picker) closeDatePicker(openDtp);
+  if (openedDatePicker && openedDatePicker !== picker) closeDatePicker(openedDatePicker);
 
-  const value = dtpValue(picker) || new Date();
-  picker.chosen = dtpValue(picker);
+  const value = datePickerValue(picker) || new Date();
+  picker.chosen = datePickerValue(picker);
   picker.year = value.getFullYear();
   picker.month = value.getMonth();
   picker.hour = value.getHours();
   picker.minute = value.getMinutes();
 
-  renderDtp(picker);
+  renderDatePicker(picker);
   picker.parts.pop.hidden = false;
   syncWheels(picker);
-  placeDtp(picker);
+  placeDatePicker(picker);
   requestAnimationFrame(() => picker.parts.pop.classList.add("is-open"));
-  openDtp = picker;
+  openedDatePicker = picker;
 }
 
 function closeDatePicker(picker) {
   if (!picker) return;
   picker.parts.pop.classList.remove("is-open");
-  picker.parts.pop.hidden = true;
-  if (openDtp === picker) openDtp = null;
+  if (openedDatePicker === picker) openedDatePicker = null;
+  window.clearTimeout(picker.timer);
+  picker.timer = window.setTimeout(() => {
+    if (openedDatePicker !== picker) picker.parts.pop.hidden = true;
+  }, 200);
   picker.input.dispatchEvent(new Event("change", { bubbles: true }));
 }
 
@@ -1263,8 +1270,9 @@ function mountDatePicker(id) {
 
   const picker = {
     input,
-    parts: buildDtp(),
+    parts: buildDatePicker(),
     chosen: null,
+    timer: null,
     year: new Date().getFullYear(),
     month: new Date().getMonth(),
     hour: 12,
@@ -1276,10 +1284,15 @@ function mountDatePicker(id) {
   button.addEventListener("mousedown", (event) => event.preventDefault());
   button.addEventListener("click", (event) => {
     event.stopPropagation();
-    if (openDtp === picker) closeDatePicker(picker);
+    if (openedDatePicker === picker) closeDatePicker(picker);
     else openDatePicker(picker);
   });
-  input.addEventListener("focus", () => openDatePicker(picker));
+  input.addEventListener("focus", () => {
+    if (openedDatePicker !== picker) openDatePicker(picker);
+  });
+  input.addEventListener("click", () => {
+    if (openedDatePicker !== picker) openDatePicker(picker);
+  });
 
   parts.pop.addEventListener("mousedown", (event) => event.preventDefault());
   parts.pop.addEventListener("click", (event) => event.stopPropagation());
@@ -1288,13 +1301,13 @@ function mountDatePicker(id) {
     const step = new Date(picker.year, picker.month - 1, 1);
     picker.year = step.getFullYear();
     picker.month = step.getMonth();
-    renderDtp(picker);
+    renderDatePicker(picker);
   });
   parts.next.addEventListener("click", () => {
     const step = new Date(picker.year, picker.month + 1, 1);
     picker.year = step.getFullYear();
     picker.month = step.getMonth();
-    renderDtp(picker);
+    renderDatePicker(picker);
   });
   parts.grid.addEventListener("click", (event) => {
     const cell = event.target.closest("[data-day]");
@@ -1311,7 +1324,7 @@ function mountDatePicker(id) {
         const value = Math.max(0, Math.min(limit, wheelAt(col)));
         if (picker[unit] === value) return;
         picker[unit] = value;
-        slideDtp(picker);
+        slideDatePicker(picker);
       }, 110);
     });
   }
@@ -1321,7 +1334,7 @@ function mountDatePicker(id) {
     picker.month = at.getMonth();
     picker.hour = at.getHours();
     picker.minute = at.getMinutes();
-    emitDtp(picker, at);
+    emitDatePicker(picker, at);
     syncWheels(picker);
   });
   parts.wipe.addEventListener("click", () => {
@@ -1333,46 +1346,45 @@ function mountDatePicker(id) {
   parts.done.addEventListener("click", () => closeDatePicker(picker));
 
   input.addEventListener("keydown", (event) => {
-    if (event.key === "Escape" && openDtp === picker) closeDatePicker(picker);
-    if (event.key === "Enter" && openDtp === picker) closeDatePicker(picker);
+    if (event.key === "Enter" && openedDatePicker === picker) closeDatePicker(picker);
   });
   input.addEventListener("input", () => {
-    if (openDtp !== picker || picker.echo) return;
-    const value = dtpValue(picker);
+    if (openedDatePicker !== picker || picker.echo) return;
+    const value = datePickerValue(picker);
     if (!value) return;
     picker.chosen = value;
     picker.year = value.getFullYear();
     picker.month = value.getMonth();
     picker.hour = value.getHours();
     picker.minute = value.getMinutes();
-    renderDtp(picker);
+    renderDatePicker(picker);
     syncWheels(picker);
   });
 }
 
 document.addEventListener("pointerdown", (event) => {
-  if (!openDtp) return;
+  if (!openedDatePicker) return;
   if (event.target.closest(".dtp") || event.target.closest(".dtp-field")) return;
-  closeDatePicker(openDtp);
+  closeDatePicker(openedDatePicker);
 });
 
 document.addEventListener("keydown", (event) => {
-  if (event.key === "Escape" && openDtp) closeDatePicker(openDtp);
+  if (event.key === "Escape" && openedDatePicker) closeDatePicker(openedDatePicker);
 });
 
-function trackDtp() {
-  if (!openDtp) return;
-  const box = openDtp.input.getBoundingClientRect();
-  if (box.bottom < 0 || box.top > window.innerHeight) closeDatePicker(openDtp);
-  else placeDtp(openDtp);
+function trackDatePicker() {
+  if (!openedDatePicker) return;
+  const box = openedDatePicker.input.getBoundingClientRect();
+  if (box.bottom < 0 || box.top > window.innerHeight) closeDatePicker(openedDatePicker);
+  else placeDatePicker(openedDatePicker);
 }
 
-window.addEventListener("resize", trackDtp);
-document.addEventListener("scroll", trackDtp, true);
+window.addEventListener("resize", trackDatePicker);
+document.addEventListener("scroll", trackDatePicker, true);
 
 function renderViewCutoff() {
   viewCutoffEl.classList.toggle("is-bad", !readCutoff(viewCutoffEl.value).ok);
-  reveal($("view-cutoff-clear"), Boolean(ui.viewCutoffText));
+  reveal($("view-cutoff-clear"), Boolean(ui.viewCutoff));
 }
 
 function renderResults(payload, fresh) {
@@ -1414,7 +1426,7 @@ function readCutoff(raw) {
   const text = String(raw || "").trim();
   if (!text) return { ok: true, text: "", at: 0 };
 
-  const parts = CUTOFF_RE.exec(text);
+  const parts = text.match(CUTOFF_RE);
   if (!parts) return { ok: false, text, at: 0 };
 
   const day = Number(parts[1]);
@@ -1439,7 +1451,7 @@ function cutoffNow() {
   return ui.viewCutoff || readCutoff(ui.finished?.cutoffText).at || Date.now();
 }
 
-function dateColumnOf(report) {
+function dateColumnAt(report) {
   const columns = report?.columns;
   if (!Array.isArray(columns) || !columns.length) return 1;
   const at = columns.findIndex((title) => /^дата/i.test(String(title || "")));
@@ -1447,8 +1459,9 @@ function dateColumnOf(report) {
 }
 
 function hitsOf(report) {
+  const list = Array.isArray(report?.hits) ? report.hits : [];
   const found = [];
-  for (const hit of Array.isArray(report?.hits) ? report.hits : []) {
+  for (const hit of list) {
     const at = parseHubDate(hit?.at);
     if (at) found.push({ ms: at.getTime(), at: String(hit.at), cell: String(hit?.cell || "") });
   }
@@ -1470,7 +1483,7 @@ function cutItem(item, at) {
   const kind = classify(item);
   if (!report || kind === "issue") return item;
 
-  const dateAt = dateColumnOf(report);
+  const dateAt = dateColumnAt(report);
   const source = Array.isArray(report.lastRows) ? report.lastRows : [];
   const codes = Array.isArray(report.codes) ? report.codes : [];
   const rows = [];
@@ -1482,21 +1495,24 @@ function cutItem(item, at) {
     kept.push(codes[index] ?? "");
   });
 
-  const top = hitsOf(report).find((hit) => hit.ms <= at) || null;
+  const list = hitsOf(report);
+  const top = list.find((hit) => hit.ms <= at) || null;
+  const dated = list.length > 0;
+
   const next = {
     ...item,
-    found: Boolean(top),
+    found: top ? true : !dated && Boolean(item.found),
     report: {
       ...report,
       lastRows: rows,
       codes: kept,
-      warehouseAt: top ? top.at : "",
-      warehouseCell: top ? top.cell : "",
+      warehouseAt: top ? top.at : dated ? "" : report.warehouseAt,
+      warehouseCell: top ? top.cell : dated ? "" : report.warehouseCell,
       lastPlace: ""
     }
   };
 
-  if (!top && kind === "hit") {
+  if (!top && dated && kind === "hit") {
     next.ok = false;
     next.status = "later";
   }
@@ -1662,7 +1678,7 @@ function exportName(extension) {
   const stamp = `${at.getFullYear()}-${pad(at.getMonth() + 1)}-${pad(at.getDate())}-${pad(at.getHours())}-${pad(at.getMinutes())}`;
   const marks = [];
   if (ui.finished?.cutoffText) marks.push("timed");
-  if (ui.viewCutoffText) marks.push("cut");
+  if (ui.viewCutoff) marks.push("cut");
   const tag = marks.length ? `${marks.join("-")}-` : "";
   return `hub-trace-${tag}${stamp}.${extension}`;
 }
@@ -1774,7 +1790,6 @@ warehouseEl.addEventListener("change", () => rememberWarehouse(warehouseEl.value
 
 cutoffEl.addEventListener("input", () => {
   updateFormState();
-  renderBrief();
   patchSettings({ cutoffText: cutoffEl.value.trim() });
 });
 viewCutoffEl.addEventListener("input", () => setViewCutoff(viewCutoffEl.value));
@@ -1786,7 +1801,6 @@ viewCutoffEl.addEventListener("change", () => {
 $("view-cutoff-clear").addEventListener("click", () => {
   viewCutoffEl.value = "";
   setViewCutoff("");
-  viewCutoffEl.focus();
 });
 
 cutoffEl.addEventListener("change", () => {
@@ -2699,12 +2713,18 @@ function mountDetail() {
   });
 }
 
+const DETAIL_SELECTS = { verdict: "filter-verdict", bucket: "filter-bucket", status: "filter-status" };
+
 function resetDetailFilters() {
   detailQuery = [];
   for (const key of Object.keys(detailFilters)) detailFilters[key] = [];
   const search = $("detail-search");
   if (search) search.value = "";
-  for (const id of ["filter-verdict", "filter-bucket", "filter-status"]) setPickerValues(id, []);
+  for (const id of Object.values(DETAIL_SELECTS)) setPickerValues(id, []);
+}
+
+function syncDetailControls() {
+  for (const [key, id] of Object.entries(DETAIL_SELECTS)) setPickerValues(id, detailFilters[key]);
 }
 
 mountDetail();
@@ -2846,7 +2866,7 @@ const BLAME_TAGS = { cell: "ячейка", place: "склад" };
 function topUserOf(report) {
   const rows = withLabels(report);
   if (!rows.length) return "";
-  const value = String(rows[0]?.[userColumnOf(report)] || "").trim();
+  const value = String(rows[0]?.[userColumnAt(report)] || "").trim();
   return value === "—" ? "" : value;
 }
 

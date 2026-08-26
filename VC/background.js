@@ -1560,8 +1560,8 @@ async function runScan(payload, postings, warehouse, cutoff, cutoffText) {
   state.stopping = false;
   state.jobId = payload?.jobId || `job-${Date.now()}`;
   state.warehouse = warehouse;
-  state.cutoff = Number(cutoff) || 0;
-  state.cutoffText = String(cutoffText || "");
+  state.cutoff = cutoff;
+  state.cutoffText = cutoffText;
   state.postings = postings;
   state.results = new Array(postings.length).fill(null);
   state.cursor = 0;
