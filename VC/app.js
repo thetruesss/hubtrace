@@ -11,6 +11,7 @@ const $$ = (selector, root) => [...(root || document).querySelectorAll(selector)
 const postingsEl = $("postings");
 const warehouseEl = $("warehouse");
 const cutoffEl = $("cutoff");
+const viewCutoffEl = $("view-cutoff");
 const inputError = $("input-error");
 
 const screens = {
@@ -48,6 +49,9 @@ const ui = {
   retryLeft: 0,
   lists: { hits: [], misses: [], issues: [] },
   finished: null,
+  viewCutoff: 0,
+  viewCutoffText: "",
+  laterCount: 0,
   reportSaved: false,
   recentWarehouses: [],
   rates: {},
@@ -352,6 +356,7 @@ function classify(item) {
 
 const STATUS_LABELS = {
   complete: "нет",
+  later: "позже потолка",
   missing: "нет страницы",
   partial: "мало строк",
   auth: "нет входа",
@@ -1007,29 +1012,25 @@ chrome.storage.onChanged.addListener((changes, area) => {
   renderRuns();
 });
 
-function renderResults(payload, fresh) {
-  const results = (payload?.results || []).filter(Boolean);
-  changeLabels = payload?.changeLabels || {};
-  ui.finished = payload || null;
-  ui.reportSaved = false;
-  ui.lists = splitResults(results);
+function renderResultHead() {
+  const payload = ui.finished;
+  const total = (payload?.results || []).filter(Boolean).length;
+  const inputCount = payload?.inputCount || total;
+  $("result-title").textContent = `Было ${inputCount}, нашлось ${ui.lists.hits.length}`;
 
-  const inputCount = payload?.inputCount || results.length;
-  const hits = ui.lists.hits.length;
-  $("result-title").textContent = `Было ${inputCount}, нашлось ${hits}`;
-  const ceiling = payload?.cutoffText ? ` История взята до ${payload.cutoffText} по Москве.` : "";
-  $("result-sub").textContent = payload?.error
-    ? payload.error
-    : payload?.warehouse
-      ? `Склад ${payload.warehouse} есть в истории этих номеров.${ceiling}`
-      : `Номера, у которых этот склад есть в истории.${ceiling}`;
+  const parts = [];
+  if (payload?.warehouse) parts.push(`Склад ${payload.warehouse} есть в истории этих номеров.`);
+  else parts.push("Номера, у которых этот склад есть в истории.");
+  if (payload?.cutoffText) parts.push(`История взята до ${payload.cutoffText} по Москве.`);
+  if (ui.viewCutoffText) parts.push(`Показано по состоянию на ${ui.viewCutoffText}.`);
+  $("result-sub").textContent = payload?.error ? payload.error : parts.join(" ");
 
   const meta = $("result-meta");
   meta.innerHTML = "";
   const chips = [];
   if (payload?.durationMs) chips.push(["Время", fmtDuration(payload.durationMs)]);
-  if (payload?.durationMs && results.length) {
-    chips.push(["Скорость", fmtRate((results.length / payload.durationMs) * 60000)]);
+  if (payload?.durationMs && total) {
+    chips.push(["Скорость", fmtRate((total / payload.durationMs) * 60000)]);
   }
   if (payload?.cutoffText) chips.push(["Потолок", payload.cutoffText]);
   if (payload?.stopped) chips.push(["Статус", "остановлено"]);
@@ -1042,21 +1043,72 @@ function renderResults(payload, fresh) {
     chip.appendChild(bold);
     meta.appendChild(chip);
   }
+}
+
+function indexResults(keepFilters) {
+  const results = shownResults();
+  ui.lists = splitResults(results);
+  ui.laterCount = results.filter((item) => item?.status === "later").length;
 
   for (const name of ["hits", "misses", "issues"]) {
     const filterEl = document.querySelector(`[data-filter="${name}"]`);
-    if (filterEl) filterEl.value = "";
+    if (filterEl && !keepFilters) filterEl.value = "";
     renderList(name);
   }
 
   buildDetailIndex(results);
-  resetDetailFilters();
+  if (!keepFilters) resetDetailFilters();
   fillFilterOptions();
   buildStatsIndex(results);
-  resetStatsFilters();
+  if (!keepFilters) resetStatsFilters();
   fillStatsOptions();
-  setResultView(resultView);
   renderDetail();
+  if (resultView === "stats") renderStats();
+}
+
+function setViewCutoff(raw, quiet) {
+  const cut = readCutoff(raw);
+  const at = cut.ok && cut.text ? parseHubDate(cut.text) : null;
+  const next = at ? at.getTime() : 0;
+  const changed = next !== ui.viewCutoff;
+
+  ui.viewCutoff = next;
+  ui.viewCutoffText = at ? cut.text : "";
+  if (quiet) return;
+
+  if (changed) indexResults(true);
+  renderResultHead();
+  renderViewCutoff();
+}
+
+function renderViewCutoff() {
+  const note = $("view-cutoff-note");
+  const clear = $("view-cutoff-clear");
+  const bad = !readCutoff(viewCutoffEl.value).ok;
+
+  viewCutoffEl.classList.toggle("is-bad", bad);
+  reveal(clear, Boolean(ui.viewCutoffText));
+  if (!note) return;
+
+  if (bad) note.textContent = "Пишем как 26.08.2026 12:00";
+  else if (!ui.viewCutoffText) note.textContent = "Срез по уже собранным данным, без нового прогона";
+  else if (ui.laterCount) {
+    note.textContent = `${ui.laterCount} ID со следом позже среза — точно скажет только прогон с потолком`;
+  } else note.textContent = "Срез по уже собранным данным, без нового прогона";
+}
+
+function renderResults(payload, fresh) {
+  const results = (payload?.results || []).filter(Boolean);
+  changeLabels = payload?.changeLabels || {};
+  ui.finished = payload || null;
+  ui.reportSaved = false;
+  viewCutoffEl.value = "";
+  setViewCutoff("", true);
+
+  indexResults(false);
+  renderResultHead();
+  renderViewCutoff();
+  setResultView(resultView);
 
   const duration = Number(payload?.durationMs) || 0;
   setText($("gauge-elapsed"), duration ? fmtDuration(duration) : "—");
@@ -1107,8 +1159,79 @@ function readCutoff(raw) {
 }
 
 function cutoffNow() {
+  if (ui.viewCutoff) return ui.viewCutoff;
   const at = parseHubDate(ui.finished?.cutoffText);
   return at ? at.getTime() : Date.now();
+}
+
+function dateColumnOf(report) {
+  const columns = report?.columns;
+  if (!Array.isArray(columns) || !columns.length) return 1;
+  const at = columns.findIndex((title) => /^дата/i.test(String(title || "")));
+  return at < 0 ? 1 : at;
+}
+
+function hitsOf(report) {
+  const found = [];
+  for (const hit of Array.isArray(report?.hits) ? report.hits : []) {
+    const at = parseHubDate(hit?.at);
+    if (at) found.push({ ms: at.getTime(), at: String(hit.at), cell: String(hit?.cell || "") });
+  }
+  if (found.length) return found.sort((a, b) => b.ms - a.ms);
+
+  const single = parseHubDate(report?.warehouseAt);
+  if (!single) return [];
+  return [
+    {
+      ms: single.getTime(),
+      at: String(report.warehouseAt),
+      cell: String(report?.warehouseCell || "")
+    }
+  ];
+}
+
+function cutItem(item, at) {
+  const report = item?.report;
+  const kind = classify(item);
+  if (!report || kind === "issue") return item;
+
+  const dateAt = dateColumnOf(report);
+  const source = Array.isArray(report.lastRows) ? report.lastRows : [];
+  const codes = Array.isArray(report.codes) ? report.codes : [];
+  const rows = [];
+  const kept = [];
+  source.forEach((row, index) => {
+    const stamp = parseHubDate(Array.isArray(row) ? row[dateAt] : "");
+    if (stamp && stamp.getTime() > at) return;
+    rows.push(row);
+    kept.push(codes[index] ?? "");
+  });
+
+  const top = hitsOf(report).find((hit) => hit.ms <= at) || null;
+  const next = {
+    ...item,
+    found: Boolean(top),
+    report: {
+      ...report,
+      lastRows: rows,
+      codes: kept,
+      warehouseAt: top ? top.at : "",
+      warehouseCell: top ? top.cell : "",
+      lastPlace: ""
+    }
+  };
+
+  if (!top && kind === "hit") {
+    next.ok = false;
+    next.status = "later";
+  }
+  return next;
+}
+
+function shownResults() {
+  const results = (ui.finished?.results || []).filter(Boolean);
+  if (!ui.viewCutoff) return results;
+  return results.map((item) => cutItem(item, ui.viewCutoff));
 }
 
 function parseHubDate(raw) {
@@ -1154,6 +1277,7 @@ function hubUrl(posting) {
 
 const CHECK_STATUS = {
   complete: "проверено",
+  later: "след позже потолка",
   partial: "мало строк",
   missing: "нет страницы",
   auth: "нет входа",
@@ -1260,8 +1384,11 @@ function saveBlob(blob, name) {
 
 function exportName(extension) {
   const stamp = new Date().toISOString().slice(0, 16).replace(/[:T]/g, "-");
-  const timed = ui.finished?.cutoffText ? "timed-" : "";
-  return `hub-trace-${timed}${stamp}.${extension}`;
+  const marks = [];
+  if (ui.finished?.cutoffText) marks.push("timed");
+  if (ui.viewCutoffText) marks.push("cut");
+  const tag = marks.length ? `${marks.join("-")}-` : "";
+  return `hub-trace-${tag}${stamp}.${extension}`;
 }
 
 function rememberWarehouse(value) {
@@ -1374,6 +1501,18 @@ cutoffEl.addEventListener("input", () => {
   renderBrief();
   patchSettings({ cutoffText: cutoffEl.value.trim() });
 });
+viewCutoffEl.addEventListener("input", () => setViewCutoff(viewCutoffEl.value));
+viewCutoffEl.addEventListener("change", () => {
+  const cut = readCutoff(viewCutoffEl.value);
+  if (cut.ok && cut.text) viewCutoffEl.value = cut.text;
+  setViewCutoff(viewCutoffEl.value);
+});
+$("view-cutoff-clear").addEventListener("click", () => {
+  viewCutoffEl.value = "";
+  setViewCutoff("");
+  viewCutoffEl.focus();
+});
+
 cutoffEl.addEventListener("change", () => {
   const cutoff = readCutoff(cutoffEl.value);
   if (cutoff.ok && cutoff.text) cutoffEl.value = cutoff.text;
@@ -2053,7 +2192,8 @@ function detailCard(item) {
 
   const rows = withLabels(report);
   if (!rows.length) {
-    card.appendChild(el("p", "card__none", "Строки истории не прочитались."));
+    const why = ui.viewCutoff ? "До этого момента записей нет." : "Строки истории не прочитались.";
+    card.appendChild(el("p", "card__none", why));
     return card;
   }
 

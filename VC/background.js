@@ -808,6 +808,7 @@ function mergeReports(a, b) {
     status: strong.status || weak.status || "",
     warehouseAt: strong.warehouseAt || weak.warehouseAt || "",
     warehouseCell: strong.warehouseCell || weak.warehouseCell || "",
+    hits: strong.hits?.length ? strong.hits : weak.hits || [],
     lastPlace: strong.lastPlace || weak.lastPlace || "",
     columns: strong.columns?.length ? strong.columns : weak.columns || [],
     lastRows: strong.lastRows?.length ? strong.lastRows : weak.lastRows || [],

@@ -853,8 +853,13 @@
       codes: rows.map((record) => String(record?.changeType || "")),
       warehouseAt: top ? formatEventTime(top.eventTime) : "",
       warehouseCell: withCell ? auditCell(withCell) : "",
+      hits: matched.slice(0, 12).map(hitOf).filter((hit) => hit.at),
       lastPlace: ""
     };
+  }
+
+  function hitOf(record) {
+    return { at: formatEventTime(record?.eventTime), cell: auditCell(record) || "" };
   }
 
   const CARD_KEYS = ["postingName", "stateName", "postingNumber"];
@@ -2120,6 +2125,7 @@
     let warehouseFields = null;
     let warehouseDate = "";
     let warehouseCell = "";
+    const hitRows = new Map();
 
     let typeAt = null;
     function typeColumn() {
@@ -2156,6 +2162,7 @@
         seen.add(key);
         if (!value.toLowerCase().includes(needle)) continue;
         const fields = rowFields(rows[i]);
+        const cell = fields["Ячейка"] || findCell(rowCells(rows[i]));
         if (!found) {
           found = true;
           sample = value.slice(0, 280);
@@ -2163,7 +2170,11 @@
           warehouseFields = fields;
           warehouseDate = rowDate(rows[i]);
         }
-        if (!warehouseCell) warehouseCell = fields["Ячейка"] || findCell(rowCells(rows[i]));
+        if (!warehouseCell) warehouseCell = cell;
+        if (hitRows.size < 12 && !hitRows.has(key)) {
+          const at = rowDate(rows[i]);
+          if (at) hitRows.set(key, { at, cell: cell || "" });
+        }
       }
       prevLength = length;
       return found;
@@ -2326,7 +2337,8 @@
       lastRows: [...tableRows].slice(0, 3).map(rowCells),
       warehouseAt: warehouseDate || (warehouseCells ? findDate(warehouseCells) : ""),
       warehouseCell:
-        warehouseFields?.["Ячейка"] || warehouseCell || (warehouseCells ? findCell(warehouseCells) : "")
+        warehouseFields?.["Ячейка"] || warehouseCell || (warehouseCells ? findCell(warehouseCells) : ""),
+      hits: [...hitRows.values()]
     };
 
     const loaded = seen.size;
@@ -2366,6 +2378,10 @@
       status: String(report.status || ""),
       warehouseAt: String(report.warehouseAt || ""),
       warehouseCell: String(report.warehouseCell || ""),
+      hits: (Array.isArray(report.hits) ? report.hits : []).slice(0, 12).map((hit) => ({
+        at: String(hit?.at || ""),
+        cell: String(hit?.cell || "")
+      })),
       lastPlace: String(report.lastPlace || ""),
       columns: (Array.isArray(report.columns) ? report.columns : []).map((value) => String(value || "")),
       lastRows: rows.map((row) =>
