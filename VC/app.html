@@ -89,6 +89,112 @@
           <h1>Hub Trace</h1>
           <p>Разбор OnTime</p>
           <span class="splash__load" aria-hidden="true"><i></i></span>
+
+          <div class="crest" aria-hidden="true">
+            <svg class="crest__svg" viewBox="0 0 120 140">
+              <defs>
+                <linearGradient id="crest-face" x1=".5" y1="0" x2=".5" y2="1">
+                  <stop offset="0%" stop-color="#4189ff" />
+                  <stop offset="34%" stop-color="#1268ff" />
+                  <stop offset="70%" stop-color="#0047d6" />
+                  <stop offset="100%" stop-color="#06225a" />
+                </linearGradient>
+                <linearGradient id="crest-rim" x1="0" y1="0" x2="1" y2="1">
+                  <stop offset="0%" stop-color="#f2f8ff" />
+                  <stop offset="24%" stop-color="#93c2ff" />
+                  <stop offset="50%" stop-color="#2f6fd8" stop-opacity=".85" />
+                  <stop offset="76%" stop-color="#b1dcff" />
+                  <stop offset="100%" stop-color="#5f9dff" />
+                </linearGradient>
+                <radialGradient id="crest-glow" cx="50%" cy="24%" r="64%">
+                  <stop offset="0%" stop-color="#cfe6ff" stop-opacity=".5" />
+                  <stop offset="58%" stop-color="#79b4ff" stop-opacity=".12" />
+                  <stop offset="100%" stop-color="#79b4ff" stop-opacity="0" />
+                </radialGradient>
+                <linearGradient id="crest-gloss" x1=".5" y1="0" x2=".5" y2="1">
+                  <stop offset="0%" stop-color="#ffffff" stop-opacity=".46" />
+                  <stop offset="58%" stop-color="#ffffff" stop-opacity=".12" />
+                  <stop offset="100%" stop-color="#ffffff" stop-opacity="0" />
+                </linearGradient>
+                <linearGradient id="crest-flare" x1="0" y1="0" x2="1" y2="0">
+                  <stop offset="0%" stop-color="#ffffff" stop-opacity="0" />
+                  <stop offset="38%" stop-color="#ffffff" stop-opacity=".08" />
+                  <stop offset="50%" stop-color="#ffffff" stop-opacity=".85" />
+                  <stop offset="62%" stop-color="#ffffff" stop-opacity=".08" />
+                  <stop offset="100%" stop-color="#ffffff" stop-opacity="0" />
+                </linearGradient>
+                <linearGradient id="crest-text" x1=".5" y1="0" x2=".5" y2="1">
+                  <stop offset="0%" stop-color="#ffffff" />
+                  <stop offset="100%" stop-color="#cbe0ff" />
+                </linearGradient>
+                <clipPath id="crest-clip">
+                  <path d="M60 7 112 25V73C112 104 86 128.5 60 137 34 128.5 8 104 8 73V25Z" />
+                </clipPath>
+              </defs>
+
+              <path
+                class="crest__body"
+                d="M60 7 112 25V73C112 104 86 128.5 60 137 34 128.5 8 104 8 73V25Z"
+                fill="url(#crest-face)"
+                stroke="url(#crest-rim)"
+                stroke-width="5.5"
+                stroke-linejoin="round"
+              />
+
+              <g clip-path="url(#crest-clip)">
+                <ellipse cx="60" cy="26" rx="72" ry="48" fill="url(#crest-glow)" />
+                <path d="M60 7 112 25V59C95 71 25 71 8 59V25Z" fill="url(#crest-gloss)" />
+                <path
+                  d="M11 28.5 60 11.5 109 28.5"
+                  fill="none"
+                  stroke="#eef6ff"
+                  stroke-opacity=".34"
+                  stroke-width="2.6"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                />
+                <path
+                  d="M9 96C18 111 36 126 60 134 84 126 102 111 111 96"
+                  fill="none"
+                  stroke="#02102c"
+                  stroke-opacity=".3"
+                  stroke-width="7"
+                />
+                <path
+                  d="M24 105C34.5 117 46.5 125.5 60 131 73.5 125.5 85.5 117 96 105"
+                  fill="none"
+                  stroke="#eaf4ff"
+                  stroke-opacity=".26"
+                  stroke-width="2.6"
+                  stroke-linecap="round"
+                />
+                <rect class="crest__flare" x="-74" y="-26" width="46" height="196" fill="url(#crest-flare)" />
+              </g>
+
+              <path
+                class="crest__frame"
+                d="M60 7 112 25V73C112 104 86 128.5 60 137 34 128.5 8 104 8 73V25Z"
+                fill="none"
+                stroke="#e2efff"
+                stroke-opacity=".46"
+                stroke-width="1.5"
+                stroke-linejoin="round"
+                transform="translate(60 71) scale(.875) translate(-60 -71)"
+              />
+              <path
+                class="crest__frame"
+                d="M60 7 112 25V73C112 104 86 128.5 60 137 34 128.5 8 104 8 73V25Z"
+                fill="none"
+                stroke="#9fc6ff"
+                stroke-opacity=".2"
+                stroke-width="1"
+                stroke-linejoin="round"
+                transform="translate(60 71) scale(.73) translate(-60 -71)"
+              />
+
+              <text class="crest__mark" x="60" y="80" text-anchor="middle">СБ</text>
+            </svg>
+          </div>
         </div>
       </div>
     </div>
@@ -127,6 +233,17 @@
                 </label>
                 <datalist id="warehouse-recent"></datalist>
                 <p class="hint hint--tight">Как в Hub: целиком или кусок названия.</p>
+              </section>
+
+              <section class="panel glass">
+                <h2>Отпечаток времени</h2>
+                <label class="field">
+                  <span>Смотрим хаб до момента</span>
+                  <input id="cutoff" type="text" placeholder="26.08.2026 12:00" autocomplete="off" maxlength="19" />
+                </label>
+                <p class="hint hint--tight">
+                  Пусто — смотрим сейчас. С датой берём хаб до этого момента по Москве, в выгрузке будет timed.
+                </p>
               </section>
 
               <section class="panel glass panel--last" id="last-run">
@@ -286,6 +403,15 @@
               <h2 id="result-title">Было 0, нашлось 0</h2>
               <p id="result-sub" class="hint">Номера, у которых этот склад есть в истории.</p>
               <div class="result-meta" id="result-meta"></div>
+              <div class="result-cut">
+                <label class="result-cut__field">
+                  <span>Срез по времени</span>
+                  <input id="view-cutoff" type="text" placeholder="26.08.2026 12:00" autocomplete="off"
+                         maxlength="19" />
+                </label>
+                <button id="view-cutoff-clear" class="btn btn--ghost btn--sm" type="button" hidden>Сбросить</button>
+                <span class="result-cut__note" id="view-cutoff-note"></span>
+              </div>
             </div>
             <div class="hero-actions">
               <div class="seg seg--tabs" id="result-tabs" role="tablist">
@@ -461,10 +587,6 @@
                     <div class="pick">
                       <span>Операция</span>
                       <div class="mselect" id="stats-op" data-any="любая"></div>
-                    </div>
-                    <div class="pick">
-                      <span>Цена</span>
-                      <div class="mselect" id="stats-price" data-any="любая"></div>
                     </div>
                   </div>
                 </div>
