@@ -239,7 +239,12 @@
                 <h2>Отпечаток времени</h2>
                 <label class="field">
                   <span>Смотрим хаб до момента</span>
-                  <input id="cutoff" type="text" placeholder="26.08.2026 12:00" autocomplete="off" maxlength="19" />
+                  <span class="dtp-field">
+                    <input id="cutoff" type="text" placeholder="26.08.2026 12:00" autocomplete="off"
+                           maxlength="19" />
+                    <button class="dtp-field__btn" type="button" data-picker="cutoff"
+                            aria-label="Выбрать дату и время"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="5" width="17" height="15.5" rx="3.2" fill="none" stroke="currentColor" stroke-width="1.7" /><path d="M3.5 9.6h17M8.4 3.2v3.4M15.6 3.2v3.4" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" /><circle cx="8.4" cy="13.6" r="1.15" fill="currentColor" /><circle cx="12" cy="13.6" r="1.15" fill="currentColor" /><circle cx="15.6" cy="13.6" r="1.15" fill="currentColor" /><circle cx="8.4" cy="17" r="1.15" fill="currentColor" /><circle cx="12" cy="17" r="1.15" fill="currentColor" /></svg></button>
+                  </span>
                 </label>
                 <p class="hint hint--tight">
                   Пусто — смотрим сейчас. С датой берём хаб до этого момента по Москве, в выгрузке будет timed.
@@ -406,8 +411,12 @@
               <div class="result-cut">
                 <label class="result-cut__field">
                   <span>Срез по времени</span>
-                  <input id="view-cutoff" type="text" placeholder="26.08.2026 12:00" autocomplete="off"
-                         maxlength="19" />
+                  <span class="dtp-field">
+                    <input id="view-cutoff" type="text" placeholder="26.08.2026 12:00" autocomplete="off"
+                           maxlength="19" />
+                    <button class="dtp-field__btn" type="button" data-picker="view-cutoff"
+                            aria-label="Выбрать дату и время"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="5" width="17" height="15.5" rx="3.2" fill="none" stroke="currentColor" stroke-width="1.7" /><path d="M3.5 9.6h17M8.4 3.2v3.4M15.6 3.2v3.4" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" /><circle cx="8.4" cy="13.6" r="1.15" fill="currentColor" /><circle cx="12" cy="13.6" r="1.15" fill="currentColor" /><circle cx="15.6" cy="13.6" r="1.15" fill="currentColor" /><circle cx="8.4" cy="17" r="1.15" fill="currentColor" /><circle cx="12" cy="17" r="1.15" fill="currentColor" /></svg></button>
+                  </span>
                 </label>
                 <button id="view-cutoff-clear" class="btn btn--ghost btn--sm" type="button" hidden>Сбросить</button>
                 <span class="result-cut__note" id="view-cutoff-note"></span>

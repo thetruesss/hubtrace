@@ -1081,6 +1081,282 @@ function setViewCutoff(raw, quiet) {
   renderViewCutoff();
 }
 
+const MONTH_NAMES = [
+  "Январь", "Февраль", "Март", "Апрель", "Май", "Июнь",
+  "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь"
+];
+const WEEK_DAYS = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"];
+const HOUR_TICKS = [0, 6, 12, 18, 23];
+const MINUTE_TICKS = [0, 15, 30, 45, 59];
+
+const datePickers = new Map();
+let openDtp = null;
+
+function stampText(date) {
+  return `${pad(date.getDate())}.${pad(date.getMonth() + 1)}.${date.getFullYear()} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+function sameDay(a, b) {
+  return (
+    a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate()
+  );
+}
+
+function slider(kind, max, ticks) {
+  const box = el("div", `dtp__slider dtp__slider--${kind}`);
+  const range = document.createElement("input");
+  range.type = "range";
+  range.min = "0";
+  range.max = String(max);
+  range.step = "1";
+  range.className = "dtp__range";
+  const marks = el("div", "dtp__ticks");
+  for (const tick of ticks) marks.appendChild(el("span", null, pad(tick)));
+  box.append(range, marks);
+  return { box, range };
+}
+
+function buildDtp() {
+  const pop = el("div", "dtp");
+  pop.hidden = true;
+
+  const head = el("div", "dtp__head");
+  const prev = el("button", "dtp__nav", "‹");
+  prev.type = "button";
+  prev.title = "Предыдущий месяц";
+  const next = el("button", "dtp__nav", "›");
+  next.type = "button";
+  next.title = "Следующий месяц";
+  const title = el("b", "dtp__title");
+  head.append(prev, title, next);
+
+  const week = el("div", "dtp__week");
+  for (const day of WEEK_DAYS) week.appendChild(el("span", null, day));
+
+  const grid = el("div", "dtp__grid");
+
+  const clock = el("div", "dtp__clock");
+  const clockValue = el("b", null, "00:00");
+  clock.append(el("span", null, "Время"), clockValue);
+
+  const hours = slider("h", 23, HOUR_TICKS);
+  const minutes = slider("m", 59, MINUTE_TICKS);
+
+  const foot = el("div", "dtp__foot");
+  const now = el("button", "dtp__link", "Сейчас");
+  now.type = "button";
+  const wipe = el("button", "dtp__link", "Очистить");
+  wipe.type = "button";
+  const done = el("button", "dtp__done", "Готово");
+  done.type = "button";
+  foot.append(now, wipe, done);
+
+  pop.append(head, week, grid, clock, hours.box, minutes.box, foot);
+  document.body.appendChild(pop);
+
+  return { pop, prev, next, title, grid, clockValue, hours: hours.range, minutes: minutes.range, now, wipe, done };
+}
+
+function dtpValue(picker) {
+  const cut = readCutoff(picker.input.value);
+  if (!cut.ok || !cut.text) return null;
+  return parseHubDate(cut.text);
+}
+
+function renderDtp(picker) {
+  const parts = picker.parts;
+  const chosen = picker.chosen;
+  parts.title.textContent = `${MONTH_NAMES[picker.month]} ${picker.year}`;
+  parts.clockValue.textContent = `${pad(picker.hour)}:${pad(picker.minute)}`;
+  parts.hours.value = String(picker.hour);
+  parts.minutes.value = String(picker.minute);
+  parts.hours.style.setProperty("--fill", `${(picker.hour / 23) * 100}%`);
+  parts.minutes.style.setProperty("--fill", `${(picker.minute / 59) * 100}%`);
+
+  const first = new Date(picker.year, picker.month, 1);
+  const shift = (first.getDay() + 6) % 7;
+  const start = new Date(picker.year, picker.month, 1 - shift);
+  const today = new Date();
+
+  parts.grid.innerHTML = "";
+  for (let i = 0; i < 42; i += 1) {
+    const day = new Date(start.getFullYear(), start.getMonth(), start.getDate() + i);
+    const cell = el("button", "dtp__day", String(day.getDate()));
+    cell.type = "button";
+    cell.dataset.day = `${day.getFullYear()}-${day.getMonth()}-${day.getDate()}`;
+    cell.classList.toggle("is-out", day.getMonth() !== picker.month);
+    cell.classList.toggle("is-today", sameDay(day, today));
+    cell.classList.toggle("is-on", Boolean(chosen) && sameDay(day, chosen));
+    parts.grid.appendChild(cell);
+  }
+}
+
+function emitDtp(picker, date) {
+  picker.chosen = date;
+  picker.input.value = stampText(date);
+  picker.input.dispatchEvent(new Event("input", { bubbles: true }));
+  renderDtp(picker);
+}
+
+function pickDay(picker, key) {
+  const [year, month, day] = String(key).split("-").map(Number);
+  emitDtp(picker, new Date(year, month, day, picker.hour, picker.minute));
+}
+
+function slideDtp(picker) {
+  const base = picker.chosen || new Date();
+  emitDtp(picker, new Date(base.getFullYear(), base.getMonth(), base.getDate(), picker.hour, picker.minute));
+}
+
+function placeDtp(picker) {
+  const pop = picker.parts.pop;
+  const box = picker.input.getBoundingClientRect();
+  const size = pop.getBoundingClientRect();
+  const room = 10;
+
+  let left = box.left;
+  if (left + size.width > window.innerWidth - room) left = window.innerWidth - size.width - room;
+  if (left < room) left = room;
+
+  const under = box.bottom + 8;
+  const above = box.top - size.height - 8;
+  const wanted = under + size.height > window.innerHeight - room && above > room ? above : under;
+  const roof = Math.max(room, window.innerHeight - size.height - room);
+
+  pop.style.left = `${Math.round(left)}px`;
+  pop.style.top = `${Math.round(Math.min(Math.max(wanted, room), roof))}px`;
+}
+
+function openDatePicker(picker) {
+  if (openDtp && openDtp !== picker) closeDatePicker(openDtp);
+
+  const value = dtpValue(picker) || new Date();
+  picker.chosen = dtpValue(picker);
+  picker.year = value.getFullYear();
+  picker.month = value.getMonth();
+  picker.hour = value.getHours();
+  picker.minute = value.getMinutes();
+
+  renderDtp(picker);
+  picker.parts.pop.hidden = false;
+  placeDtp(picker);
+  requestAnimationFrame(() => picker.parts.pop.classList.add("is-open"));
+  openDtp = picker;
+}
+
+function closeDatePicker(picker) {
+  if (!picker) return;
+  picker.parts.pop.classList.remove("is-open");
+  picker.parts.pop.hidden = true;
+  if (openDtp === picker) openDtp = null;
+  picker.input.dispatchEvent(new Event("change", { bubbles: true }));
+}
+
+function mountDatePicker(id) {
+  const input = $(id);
+  const button = document.querySelector(`[data-picker="${id}"]`);
+  if (!input || !button || datePickers.has(id)) return;
+
+  const picker = {
+    input,
+    parts: buildDtp(),
+    chosen: null,
+    year: new Date().getFullYear(),
+    month: new Date().getMonth(),
+    hour: 12,
+    minute: 0
+  };
+  datePickers.set(id, picker);
+  const parts = picker.parts;
+
+  button.addEventListener("mousedown", (event) => event.preventDefault());
+  button.addEventListener("click", (event) => {
+    event.stopPropagation();
+    if (openDtp === picker) closeDatePicker(picker);
+    else openDatePicker(picker);
+  });
+  input.addEventListener("focus", () => openDatePicker(picker));
+
+  parts.pop.addEventListener("mousedown", (event) => event.preventDefault());
+  parts.pop.addEventListener("click", (event) => event.stopPropagation());
+
+  parts.prev.addEventListener("click", () => {
+    const step = new Date(picker.year, picker.month - 1, 1);
+    picker.year = step.getFullYear();
+    picker.month = step.getMonth();
+    renderDtp(picker);
+  });
+  parts.next.addEventListener("click", () => {
+    const step = new Date(picker.year, picker.month + 1, 1);
+    picker.year = step.getFullYear();
+    picker.month = step.getMonth();
+    renderDtp(picker);
+  });
+  parts.grid.addEventListener("click", (event) => {
+    const cell = event.target.closest("[data-day]");
+    if (cell) pickDay(picker, cell.dataset.day);
+  });
+  parts.hours.addEventListener("input", () => {
+    picker.hour = Number(parts.hours.value);
+    slideDtp(picker);
+  });
+  parts.minutes.addEventListener("input", () => {
+    picker.minute = Number(parts.minutes.value);
+    slideDtp(picker);
+  });
+  parts.now.addEventListener("click", () => {
+    const at = new Date();
+    picker.year = at.getFullYear();
+    picker.month = at.getMonth();
+    picker.hour = at.getHours();
+    picker.minute = at.getMinutes();
+    emitDtp(picker, at);
+  });
+  parts.wipe.addEventListener("click", () => {
+    picker.chosen = null;
+    picker.input.value = "";
+    picker.input.dispatchEvent(new Event("input", { bubbles: true }));
+    closeDatePicker(picker);
+  });
+  parts.done.addEventListener("click", () => closeDatePicker(picker));
+
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && openDtp === picker) closeDatePicker(picker);
+    if (event.key === "Enter" && openDtp === picker) closeDatePicker(picker);
+  });
+  input.addEventListener("input", () => {
+    if (openDtp !== picker) return;
+    const value = dtpValue(picker);
+    if (!value) return;
+    picker.chosen = value;
+    picker.year = value.getFullYear();
+    picker.month = value.getMonth();
+    picker.hour = value.getHours();
+    picker.minute = value.getMinutes();
+    renderDtp(picker);
+  });
+}
+
+document.addEventListener("pointerdown", (event) => {
+  if (!openDtp) return;
+  if (event.target.closest(".dtp") || event.target.closest(".dtp-field")) return;
+  closeDatePicker(openDtp);
+});
+
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && openDtp) closeDatePicker(openDtp);
+});
+
+function trackDtp() {
+  if (!openDtp) return;
+  const box = openDtp.input.getBoundingClientRect();
+  if (box.bottom < 0 || box.top > window.innerHeight) closeDatePicker(openDtp);
+  else placeDtp(openDtp);
+}
+
+window.addEventListener("resize", trackDtp);
+document.addEventListener("scroll", trackDtp, true);
+
 function renderViewCutoff() {
   const note = $("view-cutoff-note");
   const clear = $("view-cutoff-clear");
@@ -1775,6 +2051,8 @@ function applySavedSettings(saved) {
 
 async function boot() {
   ensureKeepAlive();
+  mountDatePicker("cutoff");
+  mountDatePicker("view-cutoff");
 
   const saved = await storageGet([STORAGE_SETTINGS, STORAGE_FINISHED]);
   applySavedSettings(saved[STORAGE_SETTINGS]);
