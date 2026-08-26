@@ -4234,8 +4234,8 @@ a.t-id__code:hover {
   position: absolute;
   left: clamp(18px, 4.5vw, 62px);
   bottom: clamp(18px, 5vh, 54px);
-  width: clamp(112px, 13vw, 148px);
-  aspect-ratio: 200 / 216;
+  width: clamp(88px, 9.5vw, 112px);
+  aspect-ratio: 200 / 212;
   opacity: 0;
   transform: translateY(12px) scale(0.84);
 }
