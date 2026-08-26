@@ -168,6 +168,62 @@
     return out;
   }
 
+  const MSK_SHIFT_MS = 3 * 3600000;
+  const STAMP_RE = /(\d{2})\.(\d{2})\.(\d{4})[,\s]+(\d{2}):(\d{2})(?::(\d{2}))?/;
+
+  let cutoffAt = 0;
+
+  function setCutoff(raw) {
+    const at = Number(raw);
+    cutoffAt = Number.isFinite(at) && at > 0 ? at : 0;
+  }
+
+  function mskStamp(text) {
+    const parts = String(text || "").match(STAMP_RE);
+    if (!parts) return null;
+    const at = Date.UTC(
+      Number(parts[3]),
+      Number(parts[2]) - 1,
+      Number(parts[1]),
+      Number(parts[4]),
+      Number(parts[5]),
+      Number(parts[6] || 0)
+    );
+    return Number.isFinite(at) ? at - MSK_SHIFT_MS : null;
+  }
+
+  function underCutoff(stamp) {
+    if (!cutoffAt) return true;
+    return stamp == null || stamp <= cutoffAt;
+  }
+
+  function stampOf(value) {
+    const text = String(value || "").trim();
+    if (!text) return null;
+    const shown = mskStamp(text);
+    if (shown != null) return shown;
+    const at = Date.parse(text);
+    return Number.isFinite(at) ? at : null;
+  }
+
+  function recordStamp(record) {
+    if (!record || typeof record !== "object") return null;
+    const direct = stampOf(record.eventTime);
+    if (direct != null) return direct;
+    const flat = flattenRow(record, "", {}, 0);
+    for (const key of Object.keys(flat)) {
+      if (!DATE_KEY_RE.test(key)) continue;
+      const at = stampOf(flat[key]);
+      if (at != null) return at;
+    }
+    return null;
+  }
+
+  function recordUnderCutoff(record) {
+    if (!cutoffAt) return true;
+    return underCutoff(recordStamp(record));
+  }
+
   function findDate(values) {
     for (const value of values) {
       const match = String(value || "").match(ROW_DATE_RE);
@@ -683,11 +739,26 @@
     return parts.join("; ");
   }
 
+  const LOGIN_RE = /^[A-Za-z][A-Za-z0-9._-]*$/;
+  const LOGIN_KEYS = ["login", "userName", "username", "email", "uiName", "id", "name"];
+
+  function loginFrom(raw) {
+    const value = String(raw || "").trim();
+    if (!value) return "";
+    const at = value.indexOf("@");
+    const head = at > 0 ? value.slice(0, at) : value;
+    return LOGIN_RE.test(head) ? head : "";
+  }
+
   function userText(record) {
     const user = record?.userInfo;
     if (!user) return "—";
-    const parts = [user.name, user.id, user.uiName].filter((value) => value && String(value).trim());
-    return parts.length ? [...new Set(parts.map(String))].join(" · ") : "—";
+    for (const key of LOGIN_KEYS) {
+      const login = loginFrom(user[key]);
+      if (login) return login;
+    }
+    const id = String(user.id || "").trim();
+    return /^\d+$/.test(id) ? id : "—";
   }
 
   function descriptionText(record) {
@@ -786,30 +857,7 @@
     };
   }
 
-  function priceText(value, symbol) {
-    const number = Number(value);
-    if (!Number.isFinite(number)) return "";
-    let text;
-    try {
-      text = new Intl.NumberFormat("ru-RU", {
-        maximumFractionDigits: 2,
-        minimumFractionDigits: 2
-      }).format(number);
-    } catch (_err) {
-      text = number.toFixed(2);
-    }
-    const sign = String(symbol || "").trim();
-    return sign ? `${text} ${sign}` : text;
-  }
-
-  function cardMoney(info) {
-    return {
-      price: priceText(info?.moneyPrice, info?.moneyCurrencySymbol),
-      fairPrice: priceText(info?.fairPrice, info?.fairCurrencySymbol)
-    };
-  }
-
-  const CARD_KEYS = ["postingName", "stateName", "moneyPrice", "fairPrice", "postingNumber"];
+  const CARD_KEYS = ["postingName", "stateName", "postingNumber"];
 
   function findPostingInfo(json) {
     const queue = [{ node: json, depth: 0 }];
@@ -833,10 +881,9 @@
     if (!info) return null;
     const out = {
       number: String(info.postingName || info.postingNumber || info.name || ""),
-      status: String(info.stateName || info.statusName || info.state || ""),
-      ...cardMoney(info)
+      status: String(info.stateName || info.statusName || info.state || "")
     };
-    return out.number || out.status || out.price || out.fairPrice ? out : null;
+    return out.number || out.status ? out : null;
   }
 
   function readCard(response) {
@@ -849,11 +896,11 @@
   }
 
   function emptyCard() {
-    return { number: "", status: "", price: "", fairPrice: "" };
+    return { number: "", status: "" };
   }
 
   function cardFilled(card) {
-    return Boolean(card && (card.number || card.status || card.price || card.fairPrice));
+    return Boolean(card && (card.number || card.status));
   }
 
   function fillCard(card, from) {
@@ -938,6 +985,8 @@
     let foundAt = -1;
     let lastPlace = "";
     let loosePlace = "";
+    let stateUnder = "";
+    let stateOver = "";
     let size = apiTune.pageSize;
     let retuned = false;
     let trimmed = false;
@@ -998,6 +1047,19 @@
       const raw = Array.isArray(json.records) ? json.records : [];
       const records = keepTransitions(raw);
       if (records.length !== raw.length) trimmed = true;
+
+      if (cutoffAt) {
+        for (const record of raw) {
+          const change = record?.stateChanges?.status;
+          if (!change) continue;
+          if (recordUnderCutoff(record)) {
+            if (!stateUnder) stateUnder = itemState(change.to);
+          } else {
+            stateOver = itemState(change.from);
+          }
+        }
+      }
+
       if (page === 0) {
         digest = digestOf(response.text);
         if (Number.isFinite(json.totalCount)) total = Number(json.totalCount);
@@ -1035,9 +1097,7 @@
     report.lastPlace = lastPlace || loosePlace;
     const card = await collectCard(posting, deadline, null);
     report.number = card.number;
-    report.status = card.status;
-    report.price = card.price;
-    report.fairPrice = card.fairPrice;
+    report.status = cutoffAt ? stateUnder || stateOver : card.status;
 
     return {
       ok: true,
@@ -1255,8 +1315,6 @@
   function extractCardFrom(json) {
     const out = emptyCard();
     if (!json) return out;
-    const info = findPostingInfo(json);
-    if (info) Object.assign(out, cardMoney(info));
     const match = JSON.stringify(json).match(POSTING_NUMBER_RE);
     if (match) out.number = match[0];
 
@@ -1329,13 +1387,11 @@
 
   function keepTransitions(rows) {
     if (!Array.isArray(rows) || !rows.length) return rows || [];
-    if (!looksLikeAudit(rows)) return rows;
+    if (!looksLikeAudit(rows)) return rows.filter(recordUnderCutoff);
     const kept = rows.filter((record) => auditTypes.includes(String(record?.changeType || "")));
-    if (kept.length) {
-      typesConfirmed = true;
-      return kept;
-    }
-    return typesConfirmed ? kept : rows;
+    if (kept.length) typesConfirmed = true;
+    const list = kept.length || typesConfirmed ? kept : rows;
+    return list.filter(recordUnderCutoff);
   }
 
   function reportFromRows(rows, needle) {
@@ -1362,6 +1418,7 @@
   }
 
   async function apiScan(job) {
+    setCutoff(job.cutoff);
     let nativeFail = null;
     if (!nativeOff()) {
       const native = await nativeScan(job);
@@ -1484,9 +1541,7 @@
 
       const card = await collectCard(posting, deadline, firstJson);
       report.number = card.number;
-      report.status = card.status;
-      report.price = card.price;
-      report.fairPrice = card.fairPrice;
+      report.status = cutoffAt ? "" : card.status;
 
       return {
         ok: true,
@@ -1841,8 +1896,12 @@
   }
 
   function keepTransitionRows(rows, words, at) {
-    const list = [...rows];
+    let list = [...rows];
     if (!list.length) return list;
+    if (cutoffAt) {
+      const titles = tableColumns();
+      list = list.filter((row) => underCutoff(mskStamp(rowDate(row, titles))));
+    }
     const foreign = words || foreignWords();
     if (!foreign.size) return list;
     const column = at == null ? typeColumnAt() : at;
@@ -2197,7 +2256,7 @@
     ensureScrollCss();
     harvest();
 
-    if (!found && fallbackHistoryText().includes(needle)) {
+    if (!found && !cutoffAt && fallbackHistoryText().includes(needle)) {
       found = true;
       sample = needle;
     }
@@ -2245,31 +2304,29 @@
 
     harvest();
 
-    if (!found && fallbackHistoryText().includes(needle)) {
+    if (!found && !cutoffAt && fallbackHistoryText().includes(needle)) {
       found = true;
       sample = needle;
     }
 
     const card = readItemCard();
-    let money = emptyCard();
+    let api = emptyCard();
     if (!dead()) {
       try {
-        money = await collectCard(job.posting, deadline, null);
+        api = await collectCard(job.posting, deadline, null);
       } catch (_err) {
-        money = emptyCard();
+        api = emptyCard();
       }
     }
     const tableRows = keepTransitionRows(rowNodes(), foreignWords(), typeColumn());
     const report = {
-      number: card.number || money.number || "",
-      status: card.status || money.status || "",
+      number: card.number || api.number || "",
+      status: cutoffAt ? "" : card.status || api.status || "",
       columns: tableColumns(),
       lastRows: [...tableRows].slice(0, 3).map(rowCells),
       warehouseAt: warehouseDate || (warehouseCells ? findDate(warehouseCells) : ""),
       warehouseCell:
-        warehouseFields?.["Ячейка"] || warehouseCell || (warehouseCells ? findCell(warehouseCells) : ""),
-      price: money.price || "",
-      fairPrice: money.fairPrice || ""
+        warehouseFields?.["Ячейка"] || warehouseCell || (warehouseCells ? findCell(warehouseCells) : "")
     };
 
     const loaded = seen.size;
@@ -2310,8 +2367,6 @@
       warehouseAt: String(report.warehouseAt || ""),
       warehouseCell: String(report.warehouseCell || ""),
       lastPlace: String(report.lastPlace || ""),
-      price: String(report.price || ""),
-      fairPrice: String(report.fairPrice || ""),
       columns: (Array.isArray(report.columns) ? report.columns : []).map((value) => String(value || "")),
       lastRows: rows.map((row) =>
         (Array.isArray(row) ? row : []).map((value) => String(value || "").slice(0, 600))
@@ -2348,6 +2403,7 @@
 
   async function runDomJob(job) {
     abortFlag = false;
+    setCutoff(job.cutoff);
     try {
       const raw = await domScan(job);
       return normalizeResult(raw);

@@ -10,6 +10,7 @@ const $$ = (selector, root) => [...(root || document).querySelectorAll(selector)
 
 const postingsEl = $("postings");
 const warehouseEl = $("warehouse");
+const cutoffEl = $("cutoff");
 const inputError = $("input-error");
 
 const screens = {
@@ -735,6 +736,8 @@ function renderBrief(parsed) {
 
   const rows = [["", `<b>${count}</b> ${plural(count, ["номер", "номера", "номеров"])} в очереди`]];
   if (count && rate) rows.push(["", `Примерно <b>${fmtDuration((count / rate) * 60000)}</b> по прошлым запускам`]);
+  const cutoff = readCutoff(cutoffEl.value);
+  if (cutoff.ok && cutoff.text) rows.push(["", `Потолок <b>${cutoff.text}</b>, всё что позже — мимо`]);
   rows.push(["", "Итог придёт списком, детализацией и аналитикой"]);
   rows.push([
     "is-hint",
@@ -772,7 +775,9 @@ function updateCount() {
 function updateFormState(parsed) {
   const hasPostings = (parsed || parsePostings(postingsEl.value)).length > 0;
   const hasWarehouse = warehouseEl.value.trim().length > 0;
-  $("btn-start").disabled = ui.running || !(hasPostings && hasWarehouse);
+  const cutoff = readCutoff(cutoffEl.value);
+  cutoffEl.classList.toggle("is-bad", !cutoff.ok);
+  $("btn-start").disabled = ui.running || !(hasPostings && hasWarehouse && cutoff.ok);
   $("btn-clear").disabled = !postingsEl.value.trim();
 
   for (const name of ["hits", "misses", "issues"]) {
@@ -838,14 +843,39 @@ function renderList(name) {
 
 let changeLabels = {};
 
+const LOGIN_RE = /^[A-Za-z][A-Za-z0-9._-]*$/;
+
+function loginOnly(raw) {
+  const text = String(raw || "").trim();
+  if (!text) return "";
+  for (const chunk of text.split(/[\s()·,;|]+/)) {
+    const at = chunk.indexOf("@");
+    const head = at > 0 ? chunk.slice(0, at) : chunk;
+    if (LOGIN_RE.test(head)) return head;
+  }
+  if (/^\d+$/.test(text)) return text;
+  return "—";
+}
+
+function userColumnOf(report) {
+  const columns = report?.columns;
+  if (!Array.isArray(columns) || !columns.length) return 2;
+  const at = columns.findIndex((title) => /^польз/i.test(String(title || "")));
+  return at < 0 ? 2 : at;
+}
+
 function withLabels(report) {
   const rows = report?.lastRows;
+  if (!Array.isArray(rows)) return [];
   const codes = report?.codes;
-  if (!Array.isArray(rows) || !Array.isArray(codes) || !codes.length) return rows || [];
+  const userAt = userColumnOf(report);
   return rows.map((row, index) => {
-    const label = changeLabels[codes[index]];
-    if (!label || !row?.length || row[0] === label) return row;
-    return [label, ...row.slice(1)];
+    if (!Array.isArray(row)) return row;
+    const out = [...row];
+    const label = Array.isArray(codes) ? changeLabels[codes[index]] : "";
+    if (label && out.length && out[0] !== label) out[0] = label;
+    if (userAt < out.length) out[userAt] = loginOnly(out[userAt]);
+    return out;
   });
 }
 
@@ -914,6 +944,7 @@ function runLine(run) {
   const total = Number(run.inputCount) || 0;
   const foot = [`из ${total} ${plural(total, ["номера", "номеров", "номеров"])}`];
   if (run.durationMs) foot.push(fmtDuration(run.durationMs));
+  if (run.cutoffText) foot.push(`до ${run.cutoffText}`);
   if (run.stopped) foot.push("остановлено");
   inner.appendChild(el("p", "last__foot", foot.join(" · ")));
 
@@ -986,11 +1017,12 @@ function renderResults(payload, fresh) {
   const inputCount = payload?.inputCount || results.length;
   const hits = ui.lists.hits.length;
   $("result-title").textContent = `Было ${inputCount}, нашлось ${hits}`;
+  const ceiling = payload?.cutoffText ? ` История взята до ${payload.cutoffText} по Москве.` : "";
   $("result-sub").textContent = payload?.error
     ? payload.error
     : payload?.warehouse
-      ? `Склад ${payload.warehouse} есть в истории этих номеров.`
-      : "Номера, у которых этот склад есть в истории.";
+      ? `Склад ${payload.warehouse} есть в истории этих номеров.${ceiling}`
+      : `Номера, у которых этот склад есть в истории.${ceiling}`;
 
   const meta = $("result-meta");
   meta.innerHTML = "";
@@ -999,6 +1031,7 @@ function renderResults(payload, fresh) {
   if (payload?.durationMs && results.length) {
     chips.push(["Скорость", fmtRate((results.length / payload.durationMs) * 60000)]);
   }
+  if (payload?.cutoffText) chips.push(["Потолок", payload.cutoffText]);
   if (payload?.stopped) chips.push(["Статус", "остановлено"]);
   for (const [label, value] of chips) {
     const chip = document.createElement("span");
@@ -1044,6 +1077,39 @@ function renderResults(payload, fresh) {
 
 const REPORT_SHEET = "Все ID";
 const DETAIL_SHEET = "Последние действия";
+
+const CUTOFF_RE = /^(\d{1,2})[.\-/](\d{1,2})[.\-/](\d{4})[\s,]+(\d{1,2}):(\d{2})(?::(\d{2}))?$/;
+const MSK_SHIFT_MS = 3 * 3600000;
+
+function readCutoff(raw) {
+  const text = String(raw || "").trim();
+  if (!text) return { ok: true, text: "", at: 0 };
+
+  const parts = CUTOFF_RE.exec(text);
+  if (!parts) return { ok: false, text, at: 0 };
+
+  const day = Number(parts[1]);
+  const month = Number(parts[2]);
+  const year = Number(parts[3]);
+  const hour = Number(parts[4]);
+  const minute = Number(parts[5]);
+  const second = Number(parts[6] || 0);
+  if (hour > 23 || minute > 59 || second > 59) return { ok: false, text, at: 0 };
+
+  const at = Date.UTC(year, month - 1, day, hour, minute, second) - MSK_SHIFT_MS;
+  const back = new Date(at + MSK_SHIFT_MS);
+  if (back.getUTCFullYear() !== year || back.getUTCMonth() !== month - 1 || back.getUTCDate() !== day) {
+    return { ok: false, text, at: 0 };
+  }
+
+  const tail = second ? `:${pad(second)}` : "";
+  return { ok: true, text: `${pad(day)}.${pad(month)}.${year} ${pad(hour)}:${pad(minute)}${tail}`, at };
+}
+
+function cutoffNow() {
+  const at = parseHubDate(ui.finished?.cutoffText);
+  return at ? at.getTime() : Date.now();
+}
 
 function parseHubDate(raw) {
   const text = String(raw || "").trim();
@@ -1139,10 +1205,6 @@ function buildXlsx() {
   entries.forEach((entry, index) => {
     const row = cols.map((key) => {
       const column = STATS_COLUMNS[key];
-      const value = column.number ? column.number(entry) : null;
-      if (Number.isFinite(value)) {
-        return column.money ? { number: value, style: xlsxStyles.STYLE_MONEY } : { number: value };
-      }
       const cell = { text: column.text(entry) };
       if (column.link) cell.link = column.link(entry);
       return cell;
@@ -1198,7 +1260,8 @@ function saveBlob(blob, name) {
 
 function exportName(extension) {
   const stamp = new Date().toISOString().slice(0, 16).replace(/[:T]/g, "-");
-  return `hub-trace-${stamp}.${extension}`;
+  const timed = ui.finished?.cutoffText ? "timed-" : "";
+  return `hub-trace-${timed}${stamp}.${extension}`;
 }
 
 function rememberWarehouse(value) {
@@ -1223,11 +1286,18 @@ function renderRecentWarehouses() {
 async function startScan() {
   const postings = parsePostings(postingsEl.value);
   const warehouse = warehouseEl.value.trim();
+  const cutoff = readCutoff(cutoffEl.value);
   showError("");
+  if (!cutoff.ok) {
+    updateFormState();
+    showError("Отпечаток времени пишем как 26.08.2026 12:00");
+    return;
+  }
   if (!postings.length || !warehouse) {
     updateFormState();
     return;
   }
+  cutoffEl.value = cutoff.text;
 
   ui.jobId = `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
   ui.running = true;
@@ -1238,7 +1308,7 @@ async function startScan() {
   ui.reportSaved = false;
 
   rememberWarehouse(warehouse);
-  patchSettings({ ...settings, warehouse, lastPostings: postingsEl.value });
+  patchSettings({ ...settings, warehouse, cutoffText: cutoff.text, lastPostings: postingsEl.value });
   await flushSettings();
 
   ensureKeepAlive();
@@ -1250,6 +1320,8 @@ async function startScan() {
     jobId: ui.jobId,
     postings: [...postings],
     warehouse,
+    cutoff: cutoff.at,
+    cutoffText: cutoff.text,
     lastPostings: postingsEl.value,
     settings: { ...settings }
   });
@@ -1296,6 +1368,18 @@ warehouseEl.addEventListener("input", () => {
   patchSettings({ warehouse: warehouseEl.value.trim() });
 });
 warehouseEl.addEventListener("change", () => rememberWarehouse(warehouseEl.value));
+
+cutoffEl.addEventListener("input", () => {
+  updateFormState();
+  renderBrief();
+  patchSettings({ cutoffText: cutoffEl.value.trim() });
+});
+cutoffEl.addEventListener("change", () => {
+  const cutoff = readCutoff(cutoffEl.value);
+  if (cutoff.ok && cutoff.text) cutoffEl.value = cutoff.text;
+  updateFormState();
+  patchSettings({ cutoffText: cutoffEl.value.trim() });
+});
 
 $("btn-clear").addEventListener("click", () => {
   postingsEl.value = "";
@@ -1544,6 +1628,7 @@ function applySavedSettings(saved) {
     if (panels.length) statsPanels = panels;
   }
   if (saved.warehouse) warehouseEl.value = saved.warehouse;
+  if (saved.cutoffText) cutoffEl.value = saved.cutoffText;
   if (Array.isArray(saved.recentWarehouses)) ui.recentWarehouses = saved.recentWarehouses;
   if (saved.rates && typeof saved.rates === "object") ui.rates = saved.rates;
   if (saved.lastPostings) postingsEl.value = saved.lastPostings;
@@ -1608,9 +1693,7 @@ function haystackOf(item) {
     report.warehouseAt,
     report.warehouseCell,
     report.lastPlace,
-    ...priceNeedles(report.price),
-    ...priceNeedles(report.fairPrice),
-    bucketOf(bucketDateOf(report), Date.now()),
+    bucketOf(bucketDateOf(report), cutoffNow()),
     kind === "hit" ? "есть склад" : kind === "miss" ? "нет склада" : "не вышло",
     CHECK_STATUS[item.status] || item.status,
     ...(report.columns || []),
@@ -1629,7 +1712,7 @@ function fillFilterOptions() {
   const buckets = [];
   const statuses = [];
   for (const { item } of detailIndex) {
-    const bucket = bucketOf(bucketDateOf(item.report), Date.now());
+    const bucket = bucketOf(bucketDateOf(item.report), cutoffNow());
     if (bucket && !buckets.includes(bucket)) buckets.push(bucket);
     const status = item.report?.status;
     if (status && !statuses.includes(status)) statuses.push(status);
@@ -1644,7 +1727,7 @@ function fillFilterOptions() {
 function passesFilters(item) {
   if (!detailFits("verdict", classify(item))) return false;
   if (!detailFits("status", item.report?.status || "")) return false;
-  if (!detailFits("bucket", bucketOf(bucketDateOf(item.report), Date.now()))) return false;
+  if (!detailFits("bucket", bucketOf(bucketDateOf(item.report), cutoffNow()))) return false;
   return true;
 }
 
@@ -1962,10 +2045,8 @@ function detailCard(item) {
     fact.appendChild(el("span", null, value));
     facts.appendChild(fact);
   };
-  addFact("Корзинка", bucketOf(bucketDateOf(report), Date.now()));
+  addFact("Корзинка", bucketOf(bucketDateOf(report), cutoffNow()));
   addFact("Когда", report.warehouseAt || topDateOf(report));
-  addFact("Цена реализации", report.price);
-  addFact("Цена", report.fairPrice);
   addFact("Последняя ячейка", report.warehouseCell);
   if (classify(item) !== "hit") addFact("Предыдущий склад", report.lastPlace || topPlaceOf(withLabels(report)));
   if (facts.childElementCount) card.appendChild(facts);
@@ -2222,8 +2303,7 @@ const statsFilters = {
   op: [],
   day: [],
   user: [],
-  hour: [],
-  priceBand: []
+  hour: []
 };
 
 function filterList(key) {
@@ -2284,8 +2364,7 @@ const STATS_SELECTS = {
   place: "stats-place",
   bucket: "stats-bucket",
   status: "stats-status",
-  op: "stats-op",
-  priceBand: "stats-price"
+  op: "stats-op"
 };
 
 function lastCellOf(raw) {
@@ -2346,89 +2425,31 @@ function blameOf(item) {
 
 const BLAME_TAGS = { cell: "ячейка", place: "склад" };
 
-function priceNeedles(text) {
-  const value = priceValue(text);
-  if (value == null) return [];
-  const exact = value.toFixed(2);
-  const plain = String(value);
-  return [
-    String(text),
-    exact,
-    exact.replace(".", ","),
-    plain,
-    plain.replace(".", ",")
-  ];
-}
-
-function priceValue(text) {
-  const clean = String(text || "").replace(/[^0-9,.\s]/g, "").replace(/\s+/g, "").replace(",", ".");
-  const number = Number.parseFloat(clean);
-  return Number.isFinite(number) ? number : null;
-}
-
-function priceNumber(text) {
-  const clean = String(text || "").trim();
-  if (!clean) return null;
-  if (/[^0-9\s.,\u00a0\u20bd]/.test(clean)) return null;
-  return priceValue(clean);
-}
-
-function priceText(value) {
-  try {
-    return `${new Intl.NumberFormat("ru-RU", {
-      maximumFractionDigits: 2,
-      minimumFractionDigits: 2
-    }).format(value)} \u20bd`;
-  } catch (_err) {
-    return `${value.toFixed(2)} \u20bd`;
-  }
-}
-
-const PRICE_STEPS = [
-  { upTo: 500, label: "до 500 ₽" },
-  { upTo: 1000, label: "500–1 000 ₽" },
-  { upTo: 3000, label: "1 000–3 000 ₽" },
-  { upTo: 10000, label: "3 000–10 000 ₽" }
-];
-const PRICE_ORDER = [...PRICE_STEPS.map((step) => step.label), "10 000 ₽+"];
-
-function priceBandOf(text) {
-  const value = priceValue(text);
-  if (value == null) return "";
-  for (const step of PRICE_STEPS) if (value < step.upTo) return step.label;
-  return "10 000 ₽+";
-}
-
 function topUserOf(report) {
-  const rows = report?.lastRows;
-  if (!Array.isArray(rows) || !rows.length) return "";
-  const columns = report.columns || [];
-  let at = columns.findIndex((title) => /^польз/i.test(String(title || "")));
-  if (at < 0) at = 2;
-  return String(rows[0]?.[at] || "").trim();
+  const rows = withLabels(report);
+  if (!rows.length) return "";
+  const value = String(rows[0]?.[userColumnOf(report)] || "").trim();
+  return value === "—" ? "" : value;
 }
 
 function buildStatsIndex(results) {
-  const now = Date.now();
+  const now = cutoffNow();
   statsIndex = results.map((item) => {
     const blame = blameOf(item);
     const stamp = parseHubDate(blame.at);
     const op = String(withLabels(item.report)[0]?.[0] || "").trim();
     const user = topUserOf(item.report);
     const hour = stamp ? `${pad(stamp.getHours())}:00` : "";
-    const price = item.report?.price || "";
     return {
       item,
       blame,
       op,
       user,
       hour,
-      price,
-      priceBand: priceBandOf(price),
       bucket: bucketOf(bucketDateOf(item.report), now),
       day: stamp ? `${pad(stamp.getDate())}.${pad(stamp.getMonth() + 1)}` : "",
       dayTs: stamp ? new Date(stamp.getFullYear(), stamp.getMonth(), stamp.getDate()).getTime() : 0,
-      hay: [haystackOf(item), blame.value, BLAME_TAGS[blame.kind] || "", user, hour, ...priceNeedles(price)]
+      hay: [haystackOf(item), blame.value, BLAME_TAGS[blame.kind] || "", user, hour]
         .join(" ")
         .toLowerCase()
     };
@@ -2454,7 +2475,6 @@ function passesStats(entry, skip) {
   if (!s.has("day") && !filterFits("day", entry.day)) return false;
   if (!s.has("user") && !filterFits("user", entry.user)) return false;
   if (!s.has("hour") && !filterFits("hour", entry.hour)) return false;
-  if (!s.has("priceBand") && !filterFits("priceBand", entry.priceBand)) return false;
   if (statsQuery.length && !statsQuery.some((needle) => entry.hay.includes(needle))) return false;
   return true;
 }
@@ -2488,25 +2508,21 @@ function fillStatsOptions() {
   const buckets = [];
   const statuses = [];
   const ops = [];
-  const bands = [];
   for (const entry of statsIndex) {
     if (entry.bucket && !buckets.includes(entry.bucket)) buckets.push(entry.bucket);
     const status = entry.item.report?.status;
     if (status && !statuses.includes(status)) statuses.push(status);
     if (entry.op && !ops.includes(entry.op)) ops.push(entry.op);
-    if (entry.priceBand && !bands.includes(entry.priceBand)) bands.push(entry.priceBand);
   }
   buckets.sort((a, b) => BUCKET_ORDER.indexOf(a) - BUCKET_ORDER.indexOf(b));
   statuses.sort((a, b) => a.localeCompare(b, "ru"));
   ops.sort((a, b) => a.localeCompare(b, "ru"));
-  bands.sort((a, b) => PRICE_ORDER.indexOf(a) - PRICE_ORDER.indexOf(b));
 
   fill("stats-cell", cells);
   fill("stats-place", places);
   fill("stats-bucket", buckets);
   fill("stats-status", statuses);
   fill("stats-op", ops);
-  fill("stats-price", bands);
 }
 
 function syncStatsControls() {
@@ -2520,8 +2536,6 @@ function renderStatsKpis(shown) {
   let hits = 0;
   let misses = 0;
   let issues = 0;
-  let sum = 0;
-  let priced = 0;
   const cells = new Set();
   const places = new Set();
   for (const entry of shown) {
@@ -2531,11 +2545,6 @@ function renderStatsKpis(shown) {
     else issues += 1;
     if (entry.blame.kind === "cell" && entry.blame.value) cells.add(entry.blame.value);
     if (entry.blame.kind === "place" && entry.blame.value) places.add(entry.blame.value);
-    const value = priceValue(entry.price);
-    if (value != null) {
-      sum += value;
-      priced += 1;
-    }
   }
 
   const tiles = [
@@ -2545,14 +2554,6 @@ function renderStatsKpis(shown) {
     { label: "Последних ячеек", value: cells.size, mod: "cell" },
     { label: "Предыдущих складов", value: places.size, mod: "place" }
   ];
-  if (priced) {
-    tiles.push({
-      label: "Сумма",
-      text: priceText(sum),
-      sub: priced < shown.length ? `по ${priced} из ${shown.length}` : "",
-      mod: "money"
-    });
-  }
 
   host.innerHTML = "";
   for (const tile of tiles) {
@@ -2831,13 +2832,6 @@ const STATS_DIMS = {
     ordered: "hour",
     of: (entry) => entry.hour
   },
-  priceBand: {
-    title: "Цена реализации",
-    sub: "Цена реализации с карточки Hub, разложенная по разрядам.",
-    filter: "priceBand",
-    ordered: "priceBand",
-    of: (entry) => entry.priceBand
-  },
   bucket: {
     title: "Корзинки",
     sub: "Сколько прошло с последней операции по предмету.",
@@ -2862,10 +2856,6 @@ function assignStatsColors() {
 
 function dimOrderKey(dimKey, entry) {
   if (dimKey === "day") return entry.dayTs;
-  if (dimKey === "priceBand") {
-    const at = PRICE_ORDER.indexOf(entry.priceBand);
-    return at < 0 ? PRICE_ORDER.length : at;
-  }
   if (dimKey === "hour") return Number(entry.hour.slice(0, 2));
   if (dimKey === "bucket") {
     const at = BUCKET_ORDER.indexOf(entry.bucket);
@@ -3603,30 +3593,6 @@ const STATS_COLUMNS = {
       td.textContent = entry.op || "—";
     }
   },
-  price: {
-    title: "Цена реализации",
-    width: 16,
-    sort: (entry) => priceValue(entry.price) ?? -1,
-    text: (entry) => entry.price || "",
-    number: (entry) => priceNumber(entry.price),
-    money: true,
-    cell: (entry, td) => {
-      td.className = "t-price";
-      td.textContent = entry.price || "—";
-    }
-  },
-  priceBand: {
-    title: "Разряд цены",
-    width: 16,
-    sort: (entry) => {
-      const at = PRICE_ORDER.indexOf(entry.priceBand);
-      return at < 0 ? PRICE_ORDER.length : at;
-    },
-    text: (entry) => entry.priceBand || "",
-    cell: (entry, td) => {
-      td.textContent = entry.priceBand || "—";
-    }
-  },
   user: {
     title: "Пользователь",
     width: 32,
@@ -3648,7 +3614,7 @@ const STATS_COLUMNS = {
   }
 };
 
-const DEFAULT_STATS_COLS = ["id", "number", "verdict", "blame", "at", "bucket", "price", "status", "op"];
+const DEFAULT_STATS_COLS = ["id", "number", "verdict", "blame", "at", "bucket", "status", "op"];
 let statsCols = DEFAULT_STATS_COLS.slice();
 
 function persistStatsCols() {
@@ -3822,8 +3788,7 @@ function renderStatsChips() {
     ["place", "склад"],
     ["day", "день"],
     ["hour", "час"],
-    ["user", "пользователь"],
-    ["priceBand", "цена"]
+    ["user", "пользователь"]
   ];
   const active = [];
   for (const [key, label] of chips) {
@@ -4228,7 +4193,7 @@ document.addEventListener("dragstart", (event) => {
   event.preventDefault();
 });
 
-const SPLASH_MS = 3050;
+const SPLASH_MS = 3500;
 
 function playSplash() {
   const splash = $("splash");

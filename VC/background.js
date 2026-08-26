@@ -62,6 +62,8 @@ const state = {
 
   jobId: null,
   warehouse: "",
+  cutoff: 0,
+  cutoffText: "",
   postings: [],
   results: [],
   cursor: 0,
@@ -262,6 +264,8 @@ function snapshot() {
     stopping: state.stopping,
     jobId: state.jobId,
     warehouse: state.warehouse,
+    cutoff: state.cutoff,
+    cutoffText: state.cutoffText,
     processed: state.processed,
     total: state.postings.length,
     mode: state.mode,
@@ -660,6 +664,7 @@ async function domScan(worker, posting) {
     job: {
       taskId,
       warehouse: state.warehouse,
+      cutoff: state.cutoff,
       timeoutMs: conf.scanTimeoutMs,
       uncheckCurrentOnly: state.uncheckCurrentOnly
     }
@@ -746,6 +751,7 @@ async function apiScan(worker, posting) {
       action: "ht:apiScan",
       posting,
       warehouse: state.warehouse,
+      cutoff: state.cutoff,
       timeoutMs: conf.apiTimeoutMs
     }),
     sleep(conf.apiTimeoutMs + 4000).then(() => null)
@@ -788,7 +794,6 @@ function reportWeight(item) {
     (report.status ? 3 : 0) +
     (report.warehouseAt ? 2 : 0) +
     (report.warehouseCell ? 2 : 0) +
-    (report.price ? 2 : 0) +
     (report.lastRows?.length ? 1 : 0)
   );
 }
@@ -804,8 +809,6 @@ function mergeReports(a, b) {
     warehouseAt: strong.warehouseAt || weak.warehouseAt || "",
     warehouseCell: strong.warehouseCell || weak.warehouseCell || "",
     lastPlace: strong.lastPlace || weak.lastPlace || "",
-    price: strong.price || weak.price || "",
-    fairPrice: strong.fairPrice || weak.fairPrice || "",
     columns: strong.columns?.length ? strong.columns : weak.columns || [],
     lastRows: strong.lastRows?.length ? strong.lastRows : weak.lastRows || [],
     codes: strong.lastRows?.length ? strong.codes || [] : weak.codes || []
@@ -1374,6 +1377,7 @@ function runSummary(finished, bytes) {
   return {
     jobId: finished.jobId,
     warehouse: finished.warehouse || "",
+    cutoffText: finished.cutoffText || "",
     at: finished.finishedAt || Date.now(),
     inputCount: Number(finished.inputCount) || results.length,
     durationMs: Number(finished.durationMs) || 0,
@@ -1452,6 +1456,8 @@ async function finalize() {
     jobId: state.jobId,
     stopped,
     warehouse: state.warehouse,
+    cutoff: state.cutoff,
+    cutoffText: state.cutoffText,
     mode: state.mode,
     inputCount: state.postings.length,
     durationMs: elapsedMs(),
@@ -1533,13 +1539,16 @@ function retuneThreads() {
 function validateScan(payload) {
   const postings = Array.isArray(payload?.postings) ? payload.postings.filter(Boolean) : [];
   const warehouse = String(payload?.warehouse || "").trim();
+  const cutoffText = String(payload?.cutoffText || "").trim();
+  const cutoff = Number(payload?.cutoff) || 0;
   if (state.running) return { ok: false, error: "Уже идёт проверка" };
   if (!postings.length) return { ok: false, error: "Нет номеров отправлений" };
   if (!warehouse) return { ok: false, error: "Не указан склад" };
-  return { ok: true, postings, warehouse };
+  if (cutoffText && !cutoff) return { ok: false, error: "Не разобрал отпечаток времени" };
+  return { ok: true, postings, warehouse, cutoff, cutoffText };
 }
 
-async function runScan(payload, postings, warehouse) {
+async function runScan(payload, postings, warehouse, cutoff, cutoffText) {
   const settings = normalizeSettings(payload?.settings);
 
   await storageRemove([STORAGE_FINISHED]);
@@ -1550,6 +1559,8 @@ async function runScan(payload, postings, warehouse) {
   state.stopping = false;
   state.jobId = payload?.jobId || `job-${Date.now()}`;
   state.warehouse = warehouse;
+  state.cutoff = Number(cutoff) || 0;
+  state.cutoffText = String(cutoffText || "");
   state.postings = postings;
   state.results = new Array(postings.length).fill(null);
   state.cursor = 0;
@@ -1608,6 +1619,7 @@ async function runScan(payload, postings, warehouse) {
       ...(savedSettings[STORAGE_SETTINGS] || {}),
       ...settings,
       warehouse,
+      cutoffText: state.cutoffText,
       lastPostings: payload?.lastPostings || savedSettings[STORAGE_SETTINGS]?.lastPostings || ""
     }
   });
@@ -1858,7 +1870,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     state.running = true;
     state.finalized = false;
     sendResponse({ ok: true });
-    void runScan(message, check.postings, check.warehouse);
+    void runScan(message, check.postings, check.warehouse, check.cutoff, check.cutoffText);
     return false;
   }
 

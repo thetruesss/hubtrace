@@ -590,6 +590,11 @@ input[type="number"] {
   height: 36px;
 }
 
+.field input.is-bad {
+  border-color: rgba(240, 90, 74, 0.65);
+  box-shadow: 0 0 0 3px rgba(240, 90, 74, 0.16);
+}
+
 .filter {
   height: 30px;
   margin-bottom: 8px;
@@ -3887,6 +3892,109 @@ a.t-id__code:hover {
   animation: splash-load 1.25s var(--ease) 1.72s forwards;
 }
 
+.crest {
+  position: relative;
+  width: 78px;
+  height: 90px;
+  margin-top: 18px;
+  opacity: 0;
+  transform: translateY(8px) scale(0.86);
+}
+
+.crest::before {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 52%;
+  width: 118px;
+  height: 118px;
+  margin: -59px 0 0 -59px;
+  border-radius: 50%;
+  background: radial-gradient(circle, rgba(0, 91, 255, 0.4) 0%, rgba(0, 91, 255, 0) 68%);
+  opacity: 0;
+}
+
+.crest__svg {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+  filter: drop-shadow(0 10px 22px rgba(0, 40, 120, 0.55));
+}
+
+.crest__mark {
+  font-family: "Inter", system-ui, sans-serif;
+  font-size: 24px;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  fill: #ffffff;
+  paint-order: stroke;
+  stroke: rgba(6, 26, 66, 0.32);
+  stroke-width: 0.6;
+}
+
+.crest__flare {
+  transform: rotate(18deg) translateX(0);
+}
+
+.splash.is-on .crest {
+  animation: crest-in 0.62s var(--sp) 1.9s forwards;
+}
+
+.splash.is-on .crest::before {
+  animation: crest-halo 1.7s ease-in-out 2.3s forwards;
+}
+
+.splash.is-on .crest__flare {
+  animation: crest-flare 0.9s cubic-bezier(0.4, 0, 0.2, 1) 2.45s forwards;
+}
+
+@keyframes crest-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.86);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes crest-halo {
+  0% {
+    opacity: 0;
+  }
+  45% {
+    opacity: 0.75;
+  }
+  100% {
+    opacity: 0.38;
+  }
+}
+
+@keyframes crest-flare {
+  from {
+    transform: rotate(18deg) translateX(0);
+  }
+  to {
+    transform: rotate(18deg) translateX(152px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .crest,
+  .splash.is-on .crest {
+    animation: none;
+    opacity: 1;
+    transform: none;
+  }
+
+  .splash.is-on .crest::before,
+  .splash.is-on .crest__flare {
+    animation: none;
+  }
+}
+
 @keyframes splash-grid {
   to {
     opacity: 1;
@@ -4517,20 +4625,6 @@ a.t-id__code:hover {
   .stats {
     animation: none !important;
   }
-}
-
-.t-price {
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-}
-
-.kpi--money::after {
-  background: var(--cyan);
-}
-
-.kpi--money b {
-  font-size: 19px;
-  color: var(--cyan);
 }
 
 img,
