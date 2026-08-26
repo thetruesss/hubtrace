@@ -51,7 +51,6 @@ const ui = {
   finished: null,
   viewCutoff: 0,
   viewCutoffText: "",
-  laterCount: 0,
   reportSaved: false,
   recentWarehouses: [],
   rates: {},
@@ -741,8 +740,6 @@ function renderBrief(parsed) {
 
   const rows = [["", `<b>${count}</b> ${plural(count, ["номер", "номера", "номеров"])} в очереди`]];
   if (count && rate) rows.push(["", `Примерно <b>${fmtDuration((count / rate) * 60000)}</b> по прошлым запускам`]);
-  const cutoff = readCutoff(cutoffEl.value);
-  if (cutoff.ok && cutoff.text) rows.push(["", `Потолок <b>${cutoff.text}</b>, всё что позже — мимо`]);
   rows.push(["", "Итог придёт списком, детализацией и аналитикой"]);
   rows.push([
     "is-hint",
@@ -1018,12 +1015,10 @@ function renderResultHead() {
   const inputCount = payload?.inputCount || total;
   $("result-title").textContent = `Было ${inputCount}, нашлось ${ui.lists.hits.length}`;
 
-  const parts = [];
-  if (payload?.warehouse) parts.push(`Склад ${payload.warehouse} есть в истории этих номеров.`);
-  else parts.push("Номера, у которых этот склад есть в истории.");
-  if (payload?.cutoffText) parts.push(`История взята до ${payload.cutoffText} по Москве.`);
-  if (ui.viewCutoffText) parts.push(`Показано по состоянию на ${ui.viewCutoffText}.`);
-  $("result-sub").textContent = payload?.error ? payload.error : parts.join(" ");
+  const about = payload?.warehouse
+    ? `Склад ${payload.warehouse} есть в истории этих номеров.`
+    : "Номера, у которых этот склад есть в истории.";
+  $("result-sub").textContent = payload?.error || about;
 
   const meta = $("result-meta");
   meta.innerHTML = "";
@@ -1048,7 +1043,6 @@ function renderResultHead() {
 function indexResults(keepFilters) {
   const results = shownResults();
   ui.lists = splitResults(results);
-  ui.laterCount = results.filter((item) => item?.status === "later").length;
 
   for (const name of ["hits", "misses", "issues"]) {
     const filterEl = document.querySelector(`[data-filter="${name}"]`);
@@ -1068,12 +1062,11 @@ function indexResults(keepFilters) {
 
 function setViewCutoff(raw, quiet) {
   const cut = readCutoff(raw);
-  const at = cut.ok && cut.text ? parseHubDate(cut.text) : null;
-  const next = at ? at.getTime() : 0;
+  const next = cut.ok ? cut.at : 0;
   const changed = next !== ui.viewCutoff;
 
   ui.viewCutoff = next;
-  ui.viewCutoffText = at ? cut.text : "";
+  ui.viewCutoffText = next ? cut.text : "";
   if (quiet) return;
 
   if (changed) indexResults(true);
@@ -1086,8 +1079,7 @@ const MONTH_NAMES = [
   "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь"
 ];
 const WEEK_DAYS = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"];
-const HOUR_TICKS = [0, 6, 12, 18, 23];
-const MINUTE_TICKS = [0, 15, 30, 45, 59];
+const WHEEL_ITEM = 30;
 
 const datePickers = new Map();
 let openDtp = null;
@@ -1102,18 +1094,30 @@ function sameDay(a, b) {
   );
 }
 
-function slider(kind, max, ticks) {
-  const box = el("div", `dtp__slider dtp__slider--${kind}`);
-  const range = document.createElement("input");
-  range.type = "range";
-  range.min = "0";
-  range.max = String(max);
-  range.step = "1";
-  range.className = "dtp__range";
-  const marks = el("div", "dtp__ticks");
-  for (const tick of ticks) marks.appendChild(el("span", null, pad(tick)));
-  box.append(range, marks);
-  return { box, range };
+function wheelColumn(count) {
+  const col = el("div", "wheel__col");
+  for (let i = 0; i < count; i += 1) {
+    const item = el("span", "wheel__item", pad(i));
+    item.dataset.at = String(i);
+    col.appendChild(item);
+  }
+  return col;
+}
+
+function wheelAt(col) {
+  return Math.round(col.scrollTop / WHEEL_ITEM);
+}
+
+function paintWheel(col) {
+  const at = wheelAt(col);
+  const items = col.children;
+  for (let i = 0; i < items.length; i += 1) items[i].classList.toggle("is-on", i === at);
+}
+
+function spinWheel(col, value) {
+  const top = value * WHEEL_ITEM;
+  if (Math.abs(col.scrollTop - top) > 1) col.scrollTop = top;
+  paintWheel(col);
 }
 
 function buildDtp() {
@@ -1135,12 +1139,10 @@ function buildDtp() {
 
   const grid = el("div", "dtp__grid");
 
-  const clock = el("div", "dtp__clock");
-  const clockValue = el("b", null, "00:00");
-  clock.append(el("span", null, "Время"), clockValue);
-
-  const hours = slider("h", 23, HOUR_TICKS);
-  const minutes = slider("m", 59, MINUTE_TICKS);
+  const wheel = el("div", "wheel");
+  const hour = wheelColumn(24);
+  const minute = wheelColumn(60);
+  wheel.append(el("i", "wheel__band"), hour, el("b", "wheel__sep", ":"), minute);
 
   const foot = el("div", "dtp__foot");
   const now = el("button", "dtp__link", "Сейчас");
@@ -1151,27 +1153,26 @@ function buildDtp() {
   done.type = "button";
   foot.append(now, wipe, done);
 
-  pop.append(head, week, grid, clock, hours.box, minutes.box, foot);
+  pop.append(head, week, grid, wheel, foot);
   document.body.appendChild(pop);
 
-  return { pop, prev, next, title, grid, clockValue, hours: hours.range, minutes: minutes.range, now, wipe, done };
+  return { pop, prev, next, title, grid, hour, minute, now, wipe, done };
 }
 
 function dtpValue(picker) {
   const cut = readCutoff(picker.input.value);
-  if (!cut.ok || !cut.text) return null;
-  return parseHubDate(cut.text);
+  return cut.ok && cut.at ? new Date(cut.at) : null;
+}
+
+function syncWheels(picker) {
+  spinWheel(picker.parts.hour, picker.hour);
+  spinWheel(picker.parts.minute, picker.minute);
 }
 
 function renderDtp(picker) {
   const parts = picker.parts;
   const chosen = picker.chosen;
   parts.title.textContent = `${MONTH_NAMES[picker.month]} ${picker.year}`;
-  parts.clockValue.textContent = `${pad(picker.hour)}:${pad(picker.minute)}`;
-  parts.hours.value = String(picker.hour);
-  parts.minutes.value = String(picker.minute);
-  parts.hours.style.setProperty("--fill", `${(picker.hour / 23) * 100}%`);
-  parts.minutes.style.setProperty("--fill", `${(picker.minute / 59) * 100}%`);
 
   const first = new Date(picker.year, picker.month, 1);
   const shift = (first.getDay() + 6) % 7;
@@ -1193,8 +1194,10 @@ function renderDtp(picker) {
 
 function emitDtp(picker, date) {
   picker.chosen = date;
+  picker.echo = true;
   picker.input.value = stampText(date);
   picker.input.dispatchEvent(new Event("input", { bubbles: true }));
+  picker.echo = false;
   renderDtp(picker);
 }
 
@@ -1239,6 +1242,7 @@ function openDatePicker(picker) {
 
   renderDtp(picker);
   picker.parts.pop.hidden = false;
+  syncWheels(picker);
   placeDtp(picker);
   requestAnimationFrame(() => picker.parts.pop.classList.add("is-open"));
   openDtp = picker;
@@ -1296,14 +1300,21 @@ function mountDatePicker(id) {
     const cell = event.target.closest("[data-day]");
     if (cell) pickDay(picker, cell.dataset.day);
   });
-  parts.hours.addEventListener("input", () => {
-    picker.hour = Number(parts.hours.value);
-    slideDtp(picker);
-  });
-  parts.minutes.addEventListener("input", () => {
-    picker.minute = Number(parts.minutes.value);
-    slideDtp(picker);
-  });
+  for (const unit of ["hour", "minute"]) {
+    const col = parts[unit];
+    let timer = null;
+    col.addEventListener("scroll", () => {
+      paintWheel(col);
+      window.clearTimeout(timer);
+      timer = window.setTimeout(() => {
+        const limit = unit === "hour" ? 23 : 59;
+        const value = Math.max(0, Math.min(limit, wheelAt(col)));
+        if (picker[unit] === value) return;
+        picker[unit] = value;
+        slideDtp(picker);
+      }, 110);
+    });
+  }
   parts.now.addEventListener("click", () => {
     const at = new Date();
     picker.year = at.getFullYear();
@@ -1311,6 +1322,7 @@ function mountDatePicker(id) {
     picker.hour = at.getHours();
     picker.minute = at.getMinutes();
     emitDtp(picker, at);
+    syncWheels(picker);
   });
   parts.wipe.addEventListener("click", () => {
     picker.chosen = null;
@@ -1325,7 +1337,7 @@ function mountDatePicker(id) {
     if (event.key === "Enter" && openDtp === picker) closeDatePicker(picker);
   });
   input.addEventListener("input", () => {
-    if (openDtp !== picker) return;
+    if (openDtp !== picker || picker.echo) return;
     const value = dtpValue(picker);
     if (!value) return;
     picker.chosen = value;
@@ -1334,6 +1346,7 @@ function mountDatePicker(id) {
     picker.hour = value.getHours();
     picker.minute = value.getMinutes();
     renderDtp(picker);
+    syncWheels(picker);
   });
 }
 
@@ -1358,19 +1371,8 @@ window.addEventListener("resize", trackDtp);
 document.addEventListener("scroll", trackDtp, true);
 
 function renderViewCutoff() {
-  const note = $("view-cutoff-note");
-  const clear = $("view-cutoff-clear");
-  const bad = !readCutoff(viewCutoffEl.value).ok;
-
-  viewCutoffEl.classList.toggle("is-bad", bad);
-  reveal(clear, Boolean(ui.viewCutoffText));
-  if (!note) return;
-
-  if (bad) note.textContent = "Пишем как 26.08.2026 12:00";
-  else if (!ui.viewCutoffText) note.textContent = "Срез по уже собранным данным, без нового прогона";
-  else if (ui.laterCount) {
-    note.textContent = `${ui.laterCount} ID со следом позже среза — точно скажет только прогон с потолком`;
-  } else note.textContent = "Срез по уже собранным данным, без нового прогона";
+  viewCutoffEl.classList.toggle("is-bad", !readCutoff(viewCutoffEl.value).ok);
+  reveal($("view-cutoff-clear"), Boolean(ui.viewCutoffText));
 }
 
 function renderResults(payload, fresh) {
@@ -1407,7 +1409,6 @@ const REPORT_SHEET = "Все ID";
 const DETAIL_SHEET = "Последние действия";
 
 const CUTOFF_RE = /^(\d{1,2})[.\-/](\d{1,2})[.\-/](\d{4})[\s,]+(\d{1,2}):(\d{2})(?::(\d{2}))?$/;
-const MSK_SHIFT_MS = 3 * 3600000;
 
 function readCutoff(raw) {
   const text = String(raw || "").trim();
@@ -1424,20 +1425,18 @@ function readCutoff(raw) {
   const second = Number(parts[6] || 0);
   if (hour > 23 || minute > 59 || second > 59) return { ok: false, text, at: 0 };
 
-  const at = Date.UTC(year, month - 1, day, hour, minute, second) - MSK_SHIFT_MS;
-  const back = new Date(at + MSK_SHIFT_MS);
-  if (back.getUTCFullYear() !== year || back.getUTCMonth() !== month - 1 || back.getUTCDate() !== day) {
+  const back = new Date(year, month - 1, day, hour, minute, second);
+  if (back.getFullYear() !== year || back.getMonth() !== month - 1 || back.getDate() !== day) {
     return { ok: false, text, at: 0 };
   }
+  const at = back.getTime();
 
   const tail = second ? `:${pad(second)}` : "";
   return { ok: true, text: `${pad(day)}.${pad(month)}.${year} ${pad(hour)}:${pad(minute)}${tail}`, at };
 }
 
 function cutoffNow() {
-  if (ui.viewCutoff) return ui.viewCutoff;
-  const at = parseHubDate(ui.finished?.cutoffText);
-  return at ? at.getTime() : Date.now();
+  return ui.viewCutoff || readCutoff(ui.finished?.cutoffText).at || Date.now();
 }
 
 function dateColumnOf(report) {
@@ -1659,7 +1658,8 @@ function saveBlob(blob, name) {
 }
 
 function exportName(extension) {
-  const stamp = new Date().toISOString().slice(0, 16).replace(/[:T]/g, "-");
+  const at = new Date();
+  const stamp = `${at.getFullYear()}-${pad(at.getMonth() + 1)}-${pad(at.getDate())}-${pad(at.getHours())}-${pad(at.getMinutes())}`;
   const marks = [];
   if (ui.finished?.cutoffText) marks.push("timed");
   if (ui.viewCutoffText) marks.push("cut");

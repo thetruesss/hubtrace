@@ -168,7 +168,6 @@
     return out;
   }
 
-  const MSK_SHIFT_MS = 3 * 3600000;
   const STAMP_RE = /(\d{2})\.(\d{2})\.(\d{4})[,\s]+(\d{2}):(\d{2})(?::(\d{2}))?/;
 
   let cutoffAt = 0;
@@ -178,18 +177,18 @@
     cutoffAt = Number.isFinite(at) && at > 0 ? at : 0;
   }
 
-  function mskStamp(text) {
+  function shownStamp(text) {
     const parts = String(text || "").match(STAMP_RE);
     if (!parts) return null;
-    const at = Date.UTC(
+    const at = new Date(
       Number(parts[3]),
       Number(parts[2]) - 1,
       Number(parts[1]),
       Number(parts[4]),
       Number(parts[5]),
       Number(parts[6] || 0)
-    );
-    return Number.isFinite(at) ? at - MSK_SHIFT_MS : null;
+    ).getTime();
+    return Number.isFinite(at) ? at : null;
   }
 
   function underCutoff(stamp) {
@@ -200,7 +199,7 @@
   function stampOf(value) {
     const text = String(value || "").trim();
     if (!text) return null;
-    const shown = mskStamp(text);
+    const shown = shownStamp(text);
     if (shown != null) return shown;
     const at = Date.parse(text);
     return Number.isFinite(at) ? at : null;
@@ -554,7 +553,6 @@
     try {
       if (!hubClock) {
         hubClock = new Intl.DateTimeFormat("ru-RU", {
-          timeZone: "Europe/Moscow",
           year: "numeric",
           month: "2-digit",
           day: "2-digit",
@@ -1905,7 +1903,7 @@
     if (!list.length) return list;
     if (cutoffAt) {
       const titles = tableColumns();
-      list = list.filter((row) => underCutoff(mskStamp(rowDate(row, titles))));
+      list = list.filter((row) => underCutoff(shownStamp(rowDate(row, titles))));
     }
     const foreign = words || foreignWords();
     if (!foreign.size) return list;
