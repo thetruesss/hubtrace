@@ -4234,8 +4234,8 @@ a.t-id__code:hover {
   position: absolute;
   left: clamp(18px, 4.5vw, 62px);
   bottom: clamp(18px, 5vh, 54px);
-  width: clamp(88px, 9.5vw, 112px);
-  aspect-ratio: 200 / 212;
+  width: clamp(76px, 8vw, 96px);
+  aspect-ratio: 176 / 216;
   opacity: 0;
   transform: translateY(12px) scale(0.84);
 }
@@ -4259,6 +4259,10 @@ a.t-id__code:hover {
   height: 100%;
   overflow: visible;
   filter: drop-shadow(0 16px 34px rgba(0, 30, 90, 0.65)) drop-shadow(0 0 16px rgba(90, 157, 255, 0.3));
+}
+
+.crest__zebra {
+  opacity: 0.055;
 }
 
 .crest__title {
@@ -4319,7 +4323,7 @@ a.t-id__code:hover {
     transform: rotate(16deg) translateX(0);
   }
   to {
-    transform: rotate(16deg) translateX(340px);
+    transform: rotate(16deg) translateX(300px);
   }
 }
 
