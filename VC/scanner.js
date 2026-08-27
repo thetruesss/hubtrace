@@ -328,14 +328,25 @@
 
   const AUDIT_PATH = "/p-api/scms-article-gateway/v1/articles/{id}/auditV3";
 
-  const TRANSITION_TYPES = ["InnerWarehouse", "OnWarehouse", "InTripContainer", "InContainer", "OnCell"];
+  // чем сам хаб наполняет вкладку «Перемещения» — из её собственного запроса
+  const TRANSITION_TYPES = [
+    "InTripContainer",
+    "InnerWarehouse",
+    "InContainer",
+    "OnWarehouse",
+    "LeftLogistics",
+    "SupervisorConfirmationRequest"
+  ];
   let auditTypes = TRANSITION_TYPES.slice();
 
   function adoptAuditTypes(next) {
     if (!Array.isArray(next) || !next.length) return false;
-    const clean = next.map((value) => String(value || "")).filter(Boolean);
+    const clean = [...new Set(next.map((value) => String(value || "")).filter(Boolean))].slice(0, 12);
     if (!clean.length) return false;
-    if (!clean.every((code) => TRANSITION_TYPES.includes(code))) return false;
+    // свой список узнаём по пересечению с базовыми типами: незнакомые новые
+    // едут вместе с ними, а фильтр вкладки «Все» по паре чужих типов — нет
+    const core = clean.filter((code) => TRANSITION_TYPES.includes(code));
+    if (core.length < 3) return false;
     if (clean.join("|") === auditTypes.join("|")) return false;
     auditTypes = clean;
     return true;
@@ -979,6 +990,31 @@
     return { at: formatEventTime(record?.eventTime), cell: auditCell(record) || "" };
   }
 
+  const MARKS_LIMIT = 48;
+
+  function markOf(record) {
+    const at = formatEventTime(record?.eventTime);
+    if (!at) return null;
+    const place = placeOfRecord(record);
+    const cell = auditCell(record) || "";
+    if (!place && !cell) return null;
+    return { at, place: place?.name || "", cell };
+  }
+
+  // лента вех для перемотки среза: соседние записи с тем же складом
+  // и ячейкой схлопываются, свежие впереди
+  function pushMarks(list, records) {
+    for (const record of records || []) {
+      if (list.length >= MARKS_LIMIT) return list;
+      const mark = markOf(record);
+      if (!mark) continue;
+      const last = list[list.length - 1];
+      if (last && last.place === mark.place && last.cell === mark.cell) continue;
+      list.push(mark);
+    }
+    return list;
+  }
+
   const CARD_KEYS = ["postingName", "stateName", "postingNumber"];
 
   function walkJson(json, visit) {
@@ -1126,6 +1162,7 @@
     let lastPlace = "";
     let loosePlace = "";
     let edge = null;
+    const marks = [];
     let stateUnder = "";
     let stateOver = "";
     let size = apiTune.pageSize;
@@ -1192,6 +1229,7 @@
       moveScanFlags(raw, records, flags);
       if (records.length !== raw.length) trimmed = true;
       edge = edgeAboveCutoff(raw, edge);
+      pushMarks(marks, records);
       if (dbgOn) {
         dbg("api-page", {
           path: "native",
@@ -1253,6 +1291,7 @@
     }
 
     const report = reportFromAudit(head, hits);
+    report.marks = marks;
     // ниже среза перемещений не нашлось — берём склад из ближайшей
     // записи сверху: на момент среза предмет числился там
     const edgeWarehouse = edge?.warehouse ? edge.name : "";
@@ -1559,11 +1598,13 @@
   const MOVE_SLOTS = ["location", "container", "cell"];
 
   function isMove(record) {
+    const code = String(record?.changeType || "");
+    if (code) return auditTypes.includes(code);
     const changes = record?.stateChanges;
     if (changes && typeof changes === "object") {
       return MOVE_SLOTS.some((slot) => changes[slot] != null);
     }
-    return auditTypes.includes(String(record?.changeType || ""));
+    return false;
   }
 
   function keepTransitions(rows) {
@@ -1749,6 +1790,7 @@
 
       const expected = filtered || total == null ? loaded : total;
       const report = reportFromRows(allRows, needle);
+      report.marks = looksLikeAudit(allRows) ? pushMarks([], allRows) : [];
       if (!report.lastPlace && edge) report.lastPlace = edge.name;
 
       const card = await collectCard(posting, deadline, firstJson);
@@ -2160,6 +2202,24 @@
       }
     }
     return loose;
+  }
+
+  function domMarks(rows) {
+    const titles = tableColumns();
+    const out = [];
+    for (const row of rows || []) {
+      if (out.length >= 48) break;
+      const cells = rowCells(row);
+      const at = rowDate(row, titles);
+      if (!at) continue;
+      const place = placeFromCells(cells);
+      const cell = rowFields(row)["Ячейка"] || findCell(cells) || "";
+      if (!place && !cell) continue;
+      const last = out[out.length - 1];
+      if (last && last.place === place && last.cell === cell) continue;
+      out.push({ at, place, cell });
+    }
+    return out;
   }
 
   function placeAboveCutoff(rows, words, at) {
@@ -2700,6 +2760,7 @@
     }
     const report = {
       lastPlace: tableRows.length ? "" : placeAboveCutoff(rowNodes(), words, typeColumn()),
+      marks: domMarks(tableRows),
       number: card.number || api.number || "",
       cmn: card.cmn || api.cmn || "",
       status: cutoffAt ? "" : card.status || api.status || "",
@@ -2750,6 +2811,12 @@
         cell: String(hit?.cell || "")
       })),
       lastPlace: String(report.lastPlace || ""),
+      lastPlaceAt: String(report.lastPlaceAt || ""),
+      marks: (Array.isArray(report.marks) ? report.marks : []).slice(0, 48).map((mark) => ({
+        at: String(mark?.at || ""),
+        place: String(mark?.place || ""),
+        cell: String(mark?.cell || "")
+      })),
       columns: (Array.isArray(report.columns) ? report.columns : []).map((value) => String(value || "")),
       lastRows: rows.map((row) =>
         (Array.isArray(row) ? row : []).map((value) => String(value || "").slice(0, 600))

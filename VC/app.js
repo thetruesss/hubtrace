@@ -1570,6 +1570,22 @@ function dateColumnAt(report) {
   return columnAt(report, /^дата/i, 1);
 }
 
+function marksOf(report) {
+  const list = Array.isArray(report?.marks) ? report.marks : [];
+  const out = [];
+  for (const mark of list) {
+    const at = parseHubDate(mark?.at);
+    if (!at) continue;
+    out.push({
+      ms: at.getTime(),
+      at: String(mark.at),
+      place: String(mark?.place || ""),
+      cell: String(mark?.cell || "")
+    });
+  }
+  return out.sort((one, two) => two.ms - one.ms);
+}
+
 function hitsOf(report) {
   const list = Array.isArray(report?.hits) ? report.hits : [];
   const found = [];
@@ -1611,11 +1627,17 @@ function cutItem(item, at) {
     kept.push(codes[index] ?? "");
   });
 
-  // под срезом строк не осталось — склад берём из ближайшей строки сверху:
-  // на момент среза предмет числился именно там
+  // где предмет был на момент среза: последняя веха под срезом,
+  // а если вся лента выше — ближайшая к срезу сверху
+  const stamps = marksOf(report);
+  const past = stamps.find((mark) => mark.ms <= at) || stamps[stamps.length - 1] || null;
+
+  // старые прогоны без ленты: склад из ближайшей строки сверху
   above.sort((one, two) => one.ms - two.ms);
   const edgeRow = above[0]?.row;
-  const place = rows.length ? "" : topPlaceOf(edgeRow ? [edgeRow] : []) || report.lastPlace || "";
+  const fallback = rows.length ? "" : topPlaceOf(edgeRow ? [edgeRow] : []) || report.lastPlace || "";
+  const place = past?.place || fallback;
+  const placeAt = past?.at || "";
 
   const list = hitsOf(report);
   const top = list.find((hit) => hit.ms <= at) || null;
@@ -1630,7 +1652,8 @@ function cutItem(item, at) {
       codes: kept,
       warehouseAt: top ? top.at : dated ? "" : report.warehouseAt,
       warehouseCell: top ? top.cell : dated ? "" : report.warehouseCell,
-      lastPlace: place
+      lastPlace: place,
+      lastPlaceAt: placeAt
     }
   };
 
@@ -3227,10 +3250,10 @@ function blameOf(item) {
   }
   if (kind === "miss") {
     const place = report.lastPlace || topPlaceOf(withLabels(report));
-    return { kind: "place", value: place, at: topDateOf(report) };
+    return { kind: "place", value: place, at: report.lastPlaceAt || topDateOf(report) };
   }
   const known = report.lastPlace || topPlaceOf(withLabels(report));
-  return known ? { kind: "place", value: known, at: "" } : { kind: "none", value: "", at: "" };
+  return known ? { kind: "place", value: known, at: report.lastPlaceAt || "" } : { kind: "none", value: "", at: "" };
 }
 
 const BLAME_TAGS = { cell: "ячейка", place: "склад" };
