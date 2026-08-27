@@ -889,12 +889,12 @@
     return found || loose;
   }
 
-  function cardFrom(info, json) {
+  function cardFrom(info) {
     if (!info) return null;
     const out = {
       number: String(info.postingName || info.postingNumber || info.name || ""),
       status: String(info.stateName || info.statusName || info.state || ""),
-      cmn: cmnFrom(json === undefined ? info : json)
+      cmn: String(info.destinationPlaceName || info.destinationPlace?.name || "")
     };
     return out.number || out.status || out.cmn ? out : null;
   }
@@ -902,8 +902,7 @@
   function readCard(response) {
     if (!response?.ok || !response.text) return null;
     try {
-      const json = JSON.parse(response.text);
-      return cardFrom(findPostingInfo(json), json);
+      return cardFrom(findPostingInfo(JSON.parse(response.text)));
     } catch (_err) {
       return null;
     }
@@ -915,33 +914,7 @@
 
   // ЦМН из блока «Где находится». Ищем по имени поля, а не по виду значения:
   // не найдём — столбец останется пустым, но не соврёт чужим складом
-  function isCmnKey(key) {
-    return String(key)
-      .replace(/([a-zа-яё])([A-ZА-ЯЁ])/g, "$1 $2")
-      .split(/[^A-Za-zА-Яа-яЁё]+/)
-      .some((part) => {
-        const word = part.toLowerCase();
-        return word === "cmn" || word === "цмн";
-      });
-  }
 
-  function cmnFrom(json) {
-    let found = "";
-    walkJson(json, (node) => {
-      if (Array.isArray(node)) return false;
-      for (const key of Object.keys(node)) {
-        if (!isCmnKey(key)) continue;
-        const value = node[key];
-        const name = value && typeof value === "object" ? value.name : value;
-        const text = String(name == null ? "" : name).trim();
-        if (!text || text.length > 80) continue;
-        found = text;
-        return true;
-      }
-      return false;
-    });
-    return found;
-  }
 
   function cardFilled(card) {
     return Boolean(card && (card.number || card.status));
@@ -1022,6 +995,8 @@
     let loaded = 0;
     let total = null;
     let found = false;
+    let sawRow = false;
+    let sawMove = false;
     let sample = "";
     let digest = "";
     const head = [];
@@ -1090,6 +1065,8 @@
 
       const raw = Array.isArray(json.records) ? json.records : [];
       const records = keepTransitions(raw);
+      if (raw.length) sawRow = true;
+      if (records.length) sawMove = true;
       if (records.length !== raw.length) trimmed = true;
 
       if (cutoffAt) {
@@ -1148,6 +1125,7 @@
       ok: true,
       via: "api",
       found,
+      status: !found && sawRow && !sawMove ? "no_history" : "",
       expected: trimmed || total == null ? loaded : total,
       loaded,
       complete: trimmed || total == null || loaded >= total || found,
@@ -1424,14 +1402,22 @@
     return { columns: [], lastRows: [], warehouseAt, warehouseCell: "", lastPlace: "" };
   }
 
+  const MOVE_SLOTS = ["location", "container", "cell"];
+
+  function isMove(record) {
+    const changes = record?.stateChanges;
+    if (changes && typeof changes === "object") {
+      return MOVE_SLOTS.some((slot) => changes[slot] != null);
+    }
+    return auditTypes.includes(String(record?.changeType || ""));
+  }
+
   function keepTransitions(rows) {
     if (!Array.isArray(rows) || !rows.length) return rows || [];
     if (!looksLikeAudit(rows)) return rows.filter(recordUnderCutoff);
     // считаем только перемещения: пусто здесь — это ответ «перемещений нет»,
-    // а не повод взять всю историю
-    return rows
-      .filter((record) => auditTypes.includes(String(record?.changeType || "")))
-      .filter(recordUnderCutoff);
+    // а не повод взять записи об изменении свойств
+    return rows.filter(isMove).filter(recordUnderCutoff);
   }
 
   function reportFromRows(rows, needle) {
@@ -1495,6 +1481,8 @@
       let loaded = 0;
       let total = null;
       let found = false;
+      let sawRow = false;
+      let sawMove = false;
       let sample = "";
       let pageable = true;
       let failed = false;
@@ -1548,6 +1536,8 @@
         rejectStreak = 0;
 
         const rows = keepTransitions(raw);
+        if (raw.length) sawRow = true;
+        if (rows.length) sawMove = true;
         if (rows.length !== raw.length) filtered = true;
 
         if (page === 0) {
@@ -1589,6 +1579,7 @@
         ok: true,
         via: "api",
         found,
+        status: !found && sawRow && !sawMove ? "no_history" : "",
         expected,
         loaded,
         complete: filtered || total == null ? true : loaded >= total || found,

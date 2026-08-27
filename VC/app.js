@@ -347,6 +347,8 @@ function setStep(name) {
 function classify(item) {
   if (item?.found) return "hit";
   if (item?.status === "partial") return "issue";
+  // записи есть, но ни одного перемещения — ответить «склада нет» тут нельзя
+  if (item?.status === "no_history") return "issue";
   if (["complete", "missing"].includes(item?.status)) return "miss";
   if (item?.ok) return "miss";
   return "issue";
@@ -2013,6 +2015,11 @@ async function ingestFile(file) {
   if (result.ids.length) {
     appendToField(result.ids.join("\n"));
     toast("ok", `${file.name}: ${result.ids.length} ${plural(result.ids.length, ["ID", "ID", "ID"])}`);
+    return;
+  }
+
+  if (result.kind === "har") {
+    showError(`В ${file.name} не нашлось открытых отправлений.`);
     return;
   }
 
