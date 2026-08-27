@@ -305,7 +305,7 @@
                   </svg>
                   <div class="radar__beam"><span class="radar__beam-arm"></span></div>
                   <div class="radar__contacts"><div class="radar__blips" id="radar-blips"></div></div>
-                  <div class="radar__hud" id="radar-hud">
+                  <div class="radar__hud">
                     <b id="progress-pct">0%</b>
                     <em id="progress-label">0 из 0</em>
                   </div>
@@ -516,7 +516,7 @@
                   placeholder="ID, номер, склад, ячейка, пользователь, тип операции — можно несколько значений"
                 />
               </label>
-              <div class="filterbox" data-filterbox="detail">
+              <div class="filterbox">
                 <button class="btn btn--ghost btn--sm filterbox__btn" id="detail-filters-btn" type="button"
                         aria-expanded="false">
                   <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -570,7 +570,7 @@
                   placeholder="ID, ячейка, склад, номер отправления — можно списком"
                 />
               </label>
-              <div class="filterbox" data-filterbox="stats">
+              <div class="filterbox">
                 <button class="btn btn--ghost btn--sm filterbox__btn" id="stats-filters-btn" type="button"
                         aria-expanded="false">
                   <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -616,11 +616,11 @@
               <div class="detail__chips" id="stats-chips"></div>
             </div>
 
-            <div class="stats__scroll" id="stats-scroll">
+            <div class="stats__scroll">
               <div class="kpis" id="stats-kpis"></div>
 
               <div class="stats__viewbar">
-                <span class="stats__viewlabel" id="stats-panels-note">Панели можно настраивать: что показывать и в каком виде</span>
+                <span class="stats__viewlabel">Панели можно настраивать: что показывать и в каком виде</span>
                 <button id="stats-add" class="btn btn--ghost btn--sm" type="button">+ Панель</button>
                 <button id="stats-default" class="btn btn--ghost btn--sm" type="button">Стандартные</button>
               </div>
@@ -654,7 +654,7 @@
         </section>
       </main>
 
-      <nav class="steps glass" id="steps" aria-label="Этапы">
+      <nav class="steps glass" aria-label="Этапы">
         <span class="steps__pill" aria-hidden="true"></span>
         <button class="step is-active" data-step="input" type="button">Номера</button>
         <button class="step" data-step="scan" type="button">Проверка</button>
