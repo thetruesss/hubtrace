@@ -4480,22 +4480,6 @@ a.t-id__code:hover {
   flex: 0 1 auto;
 }
 
-.panel--debug {
-  flex: 0 0 auto;
-}
-
-.panel--debug .debug-row {
-  display: flex;
-  gap: 8px;
-  margin-bottom: 8px;
-}
-
-#btn-debug.is-on {
-  border-color: rgba(122, 162, 255, 0.65);
-  color: #d7e4ff;
-  box-shadow: inset 0 0 0 1px rgba(122, 162, 255, 0.35);
-}
-
 .runs {
   min-height: 0;
   display: flex;

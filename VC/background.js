@@ -51,163 +51,6 @@ const DEFAULT_SETTINGS = {
 
 const MAX_THREADS = 12;
 
-const STORAGE_DEBUG = "hubTraceDebug";
-const DEBUG_EVENT_LIMIT = 2600;
-const DEBUG_BYTES_LIMIT = 6 * 1024 * 1024;
-
-// копилка отладочного прогона: живёт в памяти, периодически сбрасывается
-// в storage, чтобы пережить перезапуск фона
-const debugRun = { on: false, events: [], bytes: 0, dropped: 0, startedAt: 0 };
-let debugFlushTimer = null;
-
-const SECRET_HEADER_RE = /cookie|auth|token|secret|csrf|session|signature/i;
-
-function redactHeaders(headers) {
-  const out = {};
-  for (const key of Object.keys(headers || {})) {
-    const value = String(headers[key] == null ? "" : headers[key]);
-    out[key] = SECRET_HEADER_RE.test(key) ? `«скрыто, ${value.length} зн.»` : value;
-  }
-  return out;
-}
-
-function debugClip(value, cap) {
-  const text = String(value == null ? "" : value);
-  return text.length > cap ? `${text.slice(0, cap)}…(+${text.length - cap})` : text;
-}
-
-function debugRecipe(recipe) {
-  if (!recipe) return null;
-  return {
-    url: String(recipe.url || ""),
-    method: String(recipe.method || ""),
-    headers: redactHeaders(recipe.headers),
-    body: debugClip(recipe.body, 4000),
-    score: recipe.score,
-    capturedAt: recipe.capturedAt
-  };
-}
-
-function shortVerdict(item) {
-  if (!item) return null;
-  return {
-    via: item.via || "",
-    status: item.status || "",
-    found: Boolean(item.found),
-    ok: Boolean(item.ok),
-    expected: Number(item.expected) || 0,
-    loaded: Number(item.loaded) || 0
-  };
-}
-
-function debugLog(kind, data) {
-  if (!debugRun.on) return;
-  let entry;
-  let size;
-  try {
-    entry = { t: Date.now(), kind, ...(data || {}) };
-    size = JSON.stringify(entry).length;
-  } catch {
-    return;
-  }
-  if (size > 250000) return;
-  while (
-    debugRun.events.length &&
-    (debugRun.bytes + size > DEBUG_BYTES_LIMIT || debugRun.events.length >= DEBUG_EVENT_LIMIT)
-  ) {
-    debugRun.bytes -= debugRun.events.shift().size;
-    debugRun.dropped += 1;
-  }
-  debugRun.events.push({ size, entry });
-  debugRun.bytes += size;
-  if (!debugFlushTimer) {
-    debugFlushTimer = setTimeout(() => {
-      debugFlushTimer = null;
-      void storageSet({ [STORAGE_DEBUG]: debugDump() });
-    }, 4000);
-  }
-}
-
-// трасса сканера приезжает внутри результата: перекладываем её в копилку,
-// чтобы в итоги и на экран она не попала
-function takeDebug(item) {
-  if (!item || typeof item !== "object" || !item.debug) return item;
-  const { debug, ...rest } = item;
-  if (Array.isArray(debug)) {
-    const posting = rest.posting || "";
-    for (const step of debug) debugLog("scan", { posting, ...step });
-  }
-  return rest;
-}
-
-function debugDump() {
-  return {
-    format: "hub-trace-debug",
-    version: chrome.runtime.getManifest().version,
-    savedAt: new Date().toISOString(),
-    startedAt: debugRun.startedAt,
-    dropped: debugRun.dropped,
-    job: {
-      warehouse: state.warehouse,
-      cutoff: state.cutoff,
-      cutoffText: state.cutoffText,
-      postings: state.postings.length,
-      mode: state.mode,
-      threads: state.threads,
-      useApi: state.useApi,
-      focusMode: state.focusMode,
-      uncheckCurrentOnly: state.uncheckCurrentOnly
-    },
-    api: {
-      state: state.apiState,
-      note: state.apiNote,
-      blockKind: state.apiBlockKind,
-      lastReason: state.apiLastReason,
-      failStreak: state.apiFailStreak,
-      authStreak: state.apiAuthStreak,
-      mismatch: state.apiMismatch,
-      inconclusive: state.apiInconclusive,
-      checks: state.apiChecks,
-      retries: state.apiRetries,
-      nativeApi: state.nativeApi,
-      recipeStale: state.recipeStale,
-      probe: state.apiProbe,
-      tune: state.apiTune,
-      historyTab: state.historyTab,
-      auditTypes: state.auditTypes,
-      changeLabels: state.changeLabels,
-      appVersion: state.appVersion,
-      placeId: state.placeId,
-      recipe: debugRecipe(state.recipe),
-      cardRecipe: debugRecipe(state.cardRecipe)
-    },
-    results: state.results.map((item, index) => {
-      if (!item) return null;
-      const report = item.report || null;
-      return {
-        index,
-        posting: item.posting,
-        ...shortVerdict(item),
-        error: item.error || "",
-        report: report
-          ? {
-              number: report.number || "",
-              cmn: report.cmn || "",
-              lastPlace: report.lastPlace || "",
-              warehouseAt: report.warehouseAt || "",
-              warehouseCell: report.warehouseCell || "",
-              codes: report.codes || [],
-              columns: report.columns || [],
-              rows: report.lastRows?.length || 0,
-              hits: report.hits?.length || 0
-            }
-          : null
-      };
-    }),
-    events: debugRun.events.map((held) => held.entry)
-  };
-}
-
 const state = {
   running: false,
   paused: false,
@@ -847,8 +690,7 @@ async function domScan(worker, posting) {
       warehouse: state.warehouse,
       cutoff: state.cutoff,
       timeoutMs: conf.scanTimeoutMs,
-      uncheckCurrentOnly: state.uncheckCurrentOnly,
-      debug: debugRun.on
+      uncheckCurrentOnly: state.uncheckCurrentOnly
     }
   });
 
@@ -900,7 +742,7 @@ async function domScan(worker, posting) {
     if (verdict?.stopped) return failItem(posting, "stopped");
     if (verdict?.timeout) return failItem(posting, "timeout");
     rememberHistoryTab(verdict?.tab);
-    return takeDebug({ posting, ...verdict });
+    return { posting, ...verdict };
   } catch (error) {
     return failItem(posting, "exception", { error: String(error?.message || error) });
   } finally {
@@ -935,22 +777,13 @@ async function apiScan(worker, posting) {
       posting,
       warehouse: state.warehouse,
       cutoff: state.cutoff,
-      timeoutMs: conf.apiTimeoutMs,
-      debug: debugRun.on
+      timeoutMs: conf.apiTimeoutMs
     }),
     sleep(conf.apiTimeoutMs + 4000).then(() => null)
   ]);
   setPhase(worker, "idle", "", "");
   if (!reply?.ok || !reply.result) {
     state.apiLastReason = reply?.reason || "нет ответа от вкладки";
-    takeDebug({ posting, debug: reply?.debug });
-    debugLog("api-fail", {
-      posting,
-      reason: debugClip(state.apiLastReason, 300),
-      notReady: Boolean(reply?.notReady),
-      auth: Boolean(reply?.auth),
-      nativeMissing: Boolean(reply?.nativeMissing)
-    });
     if (Array.isArray(reply?.probe) && reply.probe.length) {
       state.apiProbe = reply.probe;
       emitState(true);
@@ -971,7 +804,7 @@ async function apiScan(worker, posting) {
     return null;
   }
   state.apiAuthStreak = 0;
-  return takeDebug({ posting, ...reply.result });
+  return { posting, ...reply.result };
 }
 
 function isHardStop(item) {
@@ -1025,9 +858,8 @@ function needsRetry(item, attempt) {
   if (!item) return true;
   if (item.found) return false;
   if (isHardStop(item)) return false;
-  // «позже потолка» и «нет истории» — это ответы, а не сбои:
-  // пересканирование их не изменит
-  if (item.ok && ["complete", "later", "no_history"].includes(item.status)) return false;
+  // «позже потолка» — это ответ, а не сбой: пересканирование его не изменит
+  if (item.ok && ["complete", "later"].includes(item.status)) return false;
   const conf = cfg();
   if (item.status === "partial") return attempt <= conf.retryPartial;
   return attempt <= conf.retryFail;
@@ -1210,7 +1042,6 @@ function acceptRecipe(next) {
 
 function markRecipeStale(status) {
   if (state.recipeStale) return;
-  debugLog("recipe-stale", { status: Number(status) || 0 });
   state.recipeStale = true;
   state.recipeStaleAt = Date.now();
   notice("api", `Токен устарел (ответ ${status || 401}). Обновляю его загрузкой страницы.`);
@@ -1229,7 +1060,6 @@ function noteApiMiss(blocked) {
 }
 
 function trustApi(note) {
-  debugLog("api-trust", { note: debugClip(note, 300) });
   state.apiState = "trusted";
   state.apiRetries = 0;
   state.apiBlockKind = "";
@@ -1240,13 +1070,6 @@ function trustApi(note) {
 
 function blockApi(reason, kind) {
   if (state.apiState === "blocked") return;
-  debugLog("api-block", {
-    kind: kind || "mismatch",
-    reason: debugClip(reason, 400),
-    failStreak: state.apiFailStreak,
-    mismatch: state.apiMismatch,
-    authStreak: state.apiAuthStreak
-  });
   state.apiState = "blocked";
   state.apiBlockKind = kind || "mismatch";
   state.apiDigests = [];
@@ -1282,7 +1105,6 @@ function apiRetryDue() {
 
 function requeueApiResults() {
   if (!state.apiIndexes.size) return 0;
-  debugLog("requeue", { count: state.apiIndexes.size });
   const indexes = [...state.apiIndexes];
   state.apiIndexes.clear();
   for (const index of indexes) {
@@ -1300,12 +1122,6 @@ const API_INCONCLUSIVE_LIMIT = 3;
 
 function calibrate(api, dom, index) {
   state.apiRecheck = false;
-  debugLog("calibrate", {
-    posting: dom?.posting || api?.posting || "",
-    index,
-    api: shortVerdict(api),
-    dom: shortVerdict(dom)
-  });
   if (!api) {
     noteApiMiss(`Быстрый путь недоступен: ${state.apiLastReason || "нет ответа"}. Работаю через DOM.`);
     return;
@@ -1404,7 +1220,6 @@ async function processOne(worker, posting, index) {
 
   if (apiAllowed(worker)) {
     if (state.apiState === "trusted" && !spotCheckDue() && !lessonDue()) {
-      debugLog("plan", { posting, branch: "api" });
       const api = await apiScan(worker, posting);
       if (!api && worker.apiNotReady) return domScanWithRetry(worker, posting);
       if (api) {
@@ -1417,7 +1232,6 @@ async function processOne(worker, posting, index) {
       noteApiMiss(`Быстрый путь перестал отвечать: ${state.apiLastReason || "нет ответа"}.`);
     } else {
       const lesson = lessonDue();
-      debugLog("plan", { posting, branch: lesson ? "lesson" : "check", apiState: state.apiState });
       if (lesson) {
         state.lessonBusy = true;
         state.lessonTries += 1;
@@ -1436,12 +1250,10 @@ async function processOne(worker, posting, index) {
     }
   }
 
-  debugLog("plan", { posting, branch: "dom", apiState: state.apiState, useApi: state.useApi });
   return domScanWithRetry(worker, posting);
 }
 
 function commit(index, item) {
-  debugLog("result", { index, posting: item?.posting || "", ...shortVerdict(item) });
   const prev = state.results[index];
   if (prev == null) state.processed += 1;
   state.retryPending.delete(index);
@@ -1492,7 +1304,6 @@ async function workerLoop(worker) {
         continue;
       }
       if (item?.via === "api" && state.apiState === "blocked") {
-        debugLog("requeue-one", { posting, why: "api-blocked" });
         state.apiIndexes.delete(index);
         putBack(index);
         continue;
@@ -1646,12 +1457,6 @@ async function archiveRun(finished) {
 async function finalize() {
   if (state.finalized) return;
   state.finalized = true;
-  if (debugRun.on) {
-    debugLog("finish", { processed: state.processed, of: state.postings.length });
-    clearTimeout(debugFlushTimer);
-    debugFlushTimer = null;
-    void storageSet({ [STORAGE_DEBUG]: debugDump() });
-  }
 
   const stopped = state.stopping || state.processed < state.postings.length;
   const results = [];
@@ -1730,8 +1535,7 @@ function normalizeSettings(raw) {
     auto: raw?.auto === true,
     focusMode: raw?.focusMode !== false,
     useApi: raw?.useApi !== false,
-    uncheckCurrentOnly: raw?.uncheckCurrentOnly === true,
-    debug: raw?.debugMode === true
+    uncheckCurrentOnly: raw?.uncheckCurrentOnly === true
   };
 }
 
@@ -1789,15 +1593,6 @@ async function runScan(payload, postings, warehouse, cutoff, cutoffText) {
   state.focusMode = settings.focusMode;
   state.useApi = settings.useApi;
   state.uncheckCurrentOnly = settings.uncheckCurrentOnly;
-  debugRun.on = settings.debug;
-  if (debugRun.on) {
-    debugRun.events = [];
-    debugRun.bytes = 0;
-    debugRun.dropped = 0;
-    debugRun.startedAt = Date.now();
-    void storageRemove([STORAGE_DEBUG]);
-    debugLog("run", { postings: postings.length, warehouse, cutoffText, settings });
-  }
   state.apiState = "trusted";
   if (state.autoThreads) state.threads = autoThreadCount();
   state.apiNote = "";
@@ -2013,7 +1808,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (action === "ht:cardRecipe") {
     const next = message.recipe;
     if (next?.itemId && fresherRecipe(next, state.cardRecipe)) {
-      debugLog("card-recipe", debugRecipe(next));
       state.cardRecipe = next;
       for (const worker of state.workers.values()) {
         if (worker.tabId != null) void sendTab(worker.tabId, { action: "ht:setCardRecipe", recipe: next });
@@ -2060,7 +1854,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (action === "ht:recipe") {
     const next = message.recipe;
     if (next?.itemId && acceptRecipe(next)) {
-      debugLog("recipe", debugRecipe(next));
       state.recipe = next;
       if (state.recipeStale) {
         state.recipeStale = false;
@@ -2104,18 +1897,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     stopScan();
     sendResponse({ ok: true });
     return false;
-  }
-
-  if (action === "ht:debugDump") {
-    if (debugRun.events.length) {
-      sendResponse({ ok: true, dump: debugDump() });
-      return false;
-    }
-    chrome.storage.local.get([STORAGE_DEBUG], (data) => {
-      ignoreLastError();
-      sendResponse({ ok: true, dump: data?.[STORAGE_DEBUG] || null });
-    });
-    return true;
   }
 
   if (action === "updateSettings") {

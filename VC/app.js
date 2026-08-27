@@ -25,8 +25,7 @@ const settings = {
   threads: 4,
   auto: true,
   focusMode: true,
-  useApi: true,
-  debugMode: false
+  useApi: true
 };
 
 const ui = {
@@ -1797,35 +1796,6 @@ function saveBlob(blob, name) {
   window.setTimeout(() => URL.revokeObjectURL(url), 4000);
 }
 
-function renderDebugPanel() {
-  const on = settings.debugMode === true;
-  const btn = $("btn-debug");
-  if (!btn) return;
-  btn.textContent = on ? "Выключить" : "Включить";
-  btn.classList.toggle("is-on", on);
-  $("debug-hint").textContent = on
-    ? "Включена: следующая проверка запишет запросы хаба, ответы и решения. Потом жмите «Скачать JSON» и шлите файл на разбор."
-    : "Выключена. Если расширение считает не так: включите, прогоните номера и скачайте отчёт.";
-}
-
-async function saveDebugDump() {
-  const reply = await send({ action: "ht:debugDump" });
-  const dump = reply?.dump;
-  if (!dump || !Array.isArray(dump.events) || !dump.events.length) {
-    $("debug-hint").textContent = "Отчёт пока пуст: включите отладку и прогоните хотя бы один номер.";
-    return;
-  }
-  const at = new Date();
-  const stamp = `${at.getFullYear()}-${pad(at.getMonth() + 1)}-${pad(at.getDate())}-${pad(at.getHours())}-${pad(at.getMinutes())}`;
-  saveBlob(
-    new Blob([JSON.stringify(dump, null, 1)], { type: "application/json" }),
-    `hub-trace-debug-${stamp}.json`
-  );
-  $("debug-hint").textContent = `Сохранил: событий ${dump.events.length}, номеров ${
-    (dump.results || []).filter(Boolean).length
-  }. Файл можно отправлять.`;
-}
-
 function exportName(extension) {
   const at = new Date();
   const stamp = `${at.getFullYear()}-${pad(at.getMonth() + 1)}-${pad(at.getDate())}-${pad(at.getHours())}-${pad(at.getMinutes())}`;
@@ -2276,7 +2246,6 @@ function applySavedSettings(saved) {
   if (Array.isArray(saved.recentWarehouses)) ui.recentWarehouses = saved.recentWarehouses;
   if (saved.rates && typeof saved.rates === "object") ui.rates = saved.rates;
   if (saved.lastPostings) postingsEl.value = saved.lastPostings;
-  settings.debugMode = saved.debugMode === true;
 }
 
 async function boot() {
@@ -2286,7 +2255,6 @@ async function boot() {
 
   const saved = await storageGet([STORAGE_SETTINGS, STORAGE_FINISHED]);
   applySavedSettings(saved[STORAGE_SETTINGS]);
-  renderDebugPanel();
   renderBrief();
   renderRecentWarehouses();
   void loadRuns();
@@ -5045,13 +5013,5 @@ function playSplash() {
 }
 
 playSplash();
-
-$("btn-debug").addEventListener("click", () => {
-  settings.debugMode = settings.debugMode !== true;
-  patchSettings({ debugMode: settings.debugMode });
-  renderDebugPanel();
-});
-
-$("btn-debug-save").addEventListener("click", () => void saveDebugDump());
 
 void boot();
