@@ -237,6 +237,99 @@
     return { ids: extractIds([...parts.values()].join(" ").replace(/></g, "> <")), columns: 0 };
   }
 
+  // HAR — это запись сетевого обмена. Номера в нём лежат в телах ответов,
+  // и разные поля путаются между собой, поэтому собираем их по пути в JSON
+  // и дальше выбираем путь так же, как столбец таблицы
+  const HAR_HEAD_RE = /^\s*\{[\s\S]{0,400}?"log"\s*:/;
+  const MAX_BODY = 4000000;
+
+  function harvestIds(node, path, cells, depth) {
+    if (node == null || depth > 8) return;
+    if (Array.isArray(node)) {
+      for (const item of node) harvestIds(item, path, cells, depth + 1);
+      return;
+    }
+    if (typeof node === "object") {
+      for (const key of Object.keys(node)) {
+        harvestIds(node[key], path ? `${path}.${key}` : key, cells, depth + 1);
+      }
+      return;
+    }
+    if (typeof node === "boolean") return;
+    const text = String(node);
+    if (text.length < 10 || text.length > 40) return;
+    for (const id of idsIn(text, true)) cells.push({ key: path || "?", value: id });
+  }
+
+  const ARTICLE_URL_RE = /\/articles\/(\d{10,})(?:[/?]|$)/g;
+  const OWNER_WORDS = ["posting", "box", "отправление"];
+
+  function pathWords(path) {
+    return String(path)
+      .replace(/([a-zа-яё])([A-ZА-ЯЁ])/g, "$1 $2")
+      .split(/[^A-Za-zА-Яа-яЁё]+/)
+      .filter(Boolean)
+      .map((word) => word.toLowerCase());
+  }
+
+  function ownedWords(words) {
+    return words.some((word) => OWNER_WORDS.some((owner) => word.startsWith(owner)));
+  }
+
+  // берём только поля вида «идентификатор отправления». Смотрим на само поле,
+  // а не на всю ветку: destinationPlaceId лежит внутри postingInfo, но
+  // отправлением не является — как и warehouseId с placeId
+  function looksLikePostingPath(path) {
+    const parts = String(path).split(".").filter(Boolean);
+    if (!parts.length) return false;
+    const last = pathWords(parts[parts.length - 1]);
+    if (last[last.length - 1] !== "id") return false;
+    if (last.length > 1) return ownedWords(last.slice(0, -1));
+    return parts.length > 1 && ownedWords(pathWords(parts[parts.length - 2]));
+  }
+
+  function harvestBody(text, cells) {
+    if (typeof text !== "string" || text.length < 2 || text.length > MAX_BODY) return;
+    const head = text.trimStart()[0];
+    if (head !== "{" && head !== "[") return;
+    try {
+      harvestIds(JSON.parse(text), "", cells, 0);
+    } catch (_err) {
+    }
+  }
+
+  async function readHar(text, step) {
+    let har;
+    try {
+      har = JSON.parse(text);
+    } catch (_err) {
+      return null;
+    }
+    const entries = har?.log?.entries;
+    if (!Array.isArray(entries)) return null;
+
+    const cells = [];
+    for (let at = 0; at < entries.length; at += 1) {
+      const entry = entries[at];
+      const url = String(entry?.request?.url || "");
+      for (const match of url.matchAll(ARTICLE_URL_RE)) cells.push({ key: "postingId", value: match[1] });
+      harvestBody(entry?.request?.postData?.text, cells);
+      harvestBody(entry?.response?.content?.text, cells);
+      if ((at + 1) % 25) continue;
+      step(0.1 + ((at + 1) / entries.length) * 0.6, "разбираю запросы");
+      await breathe();
+    }
+    if (!cells.length) return { ids: [], columns: 0 };
+
+    const mine = cells.filter((cell) => looksLikePostingPath(cell.key));
+    if (mine.length) {
+      const paths = [...new Set(mine.map((cell) => cell.key))];
+      step(0.95, "ищу номера", new Set(mine.map((cell) => cell.value)).size);
+      return { ids: uniq(mine.map((cell) => cell.value)), columns: paths.length, column: paths.join(", ") };
+    }
+    return idsFromCells(cells, (share, found) => step(0.7 + share * 0.3, "ищу номера", found));
+  }
+
   const BOM_RE = /^﻿/;
   const SPLIT_RE = /[\t;,]/;
 
@@ -285,6 +378,16 @@
     }
 
     const text = new TextDecoder("utf-8").decode(buffer).replace(BOM_RE, "");
+
+    if (HAR_HEAD_RE.test(text)) {
+      step(0.1, "читаю запись обмена");
+      const har = await readHar(text, step);
+      if (har) {
+        step(1, "готово");
+        return { ids: har.ids, columns: har.columns, column: har.column, text: "", kind: "har" };
+      }
+    }
+
     step(0.1, "разбираю строки");
     const found = await readDelimited(text, step);
     step(1, "готово");
