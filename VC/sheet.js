@@ -31,8 +31,6 @@
     return out;
   }
 
-  // строгое правило годится, только когда под него попадает почти всё:
-  // иначе один номер, случайно оканчивающийся на 000, выбрасывал остальные
   const STRICT_SHARE = 0.8;
 
   function pickRule(strict, loose) {
@@ -227,7 +225,6 @@
       const from = 0.3 + (at / sheets.length) * 0.45;
       const span = 0.45 / sheets.length;
       step(from, "разбираю лист");
-      // даём окну перерисоваться: сам разбор XML цельный и его не поделить
       await breathe();
       const part = await sheetCells(sheets[at][1], shared, (share) => step(from + share * span, "разбираю лист"));
       for (const cell of part) cells.push(cell);
@@ -237,9 +234,6 @@
     return { ids: extractIds([...parts.values()].join(" ").replace(/></g, "> <")), columns: 0 };
   }
 
-  // HAR — это запись сетевого обмена. Номера в нём лежат в телах ответов,
-  // и разные поля путаются между собой, поэтому собираем их по пути в JSON
-  // и дальше выбираем путь так же, как столбец таблицы
   const HAR_HEAD_RE = /^\s*\{[\s\S]{0,400}?"log"\s*:/;
   const MAX_BODY = 4000000;
 
@@ -276,9 +270,6 @@
     return words.some((word) => OWNER_WORDS.some((owner) => word.startsWith(owner)));
   }
 
-  // берём только поля вида «идентификатор отправления». Смотрим на само поле,
-  // а не на всю ветку: destinationPlaceId лежит внутри postingInfo, но
-  // отправлением не является — как и warehouseId с placeId
   function looksLikePostingPath(path) {
     const parts = String(path).split(".").filter(Boolean);
     if (!parts.length) return false;

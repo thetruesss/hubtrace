@@ -347,7 +347,6 @@ function setStep(name) {
 function classify(item) {
   if (item?.found) return "hit";
   if (item?.status === "partial") return "issue";
-  // записи есть, но ни одного перемещения — ответить «склада нет» тут нельзя
   if (item?.status === "no_history") return "issue";
   if (["complete", "missing"].includes(item?.status)) return "miss";
   if (item?.ok) return "miss";
@@ -1626,12 +1625,9 @@ function cutItem(item, at) {
     kept.push(codes[index] ?? "");
   });
 
-  // где предмет был на момент среза: последняя веха под срезом,
-  // а если вся лента выше — ближайшая к срезу сверху
   const stamps = marksOf(report);
   const past = stamps.find((mark) => mark.ms <= at) || stamps[stamps.length - 1] || null;
 
-  // старые прогоны без ленты: склад из ближайшей строки сверху
   above.sort((one, two) => one.ms - two.ms);
   const edgeRow = above[0]?.row;
   const fallback = rows.length ? "" : topPlaceOf(edgeRow ? [edgeRow] : []) || report.lastPlace || "";
@@ -2037,7 +2033,6 @@ async function ingestFile(file) {
   }
 
   stepIngest(1, "готово", result.ids?.length);
-  // окно не должно мигать на мелких файлах
   const left = INGEST_MIN_MS - (Date.now() - started);
   if (left > 0) await new Promise((resolve) => window.setTimeout(resolve, left));
   closeIngest();
@@ -2646,7 +2641,6 @@ function trackSingles() {
 window.addEventListener("resize", trackSingles);
 document.addEventListener("scroll", trackSingles, true);
 
-// список живёт на body: панели режут своим overflow всё, что вылезает за край
 function bindSingle(host, btn, entries, value, onChange) {
   const pop = el("div", "mselect__pop mselect__pop--one");
   pop.hidden = true;
@@ -3364,7 +3358,6 @@ function renderStatsKpis(shown) {
 
 const DELTA_ARC = "M7 31A27 27 0 0 1 61 31";
 const DELTA_LEN = Math.PI * 27;
-// ниша дуги узкая, поэтому длинные значения садятся на меньший кегль
 const DELTA_SIZES = [15, 15, 13.5, 11.5, 9.5, 8.5];
 
 function deltaRow(mod, label, count) {
@@ -3373,7 +3366,6 @@ function deltaRow(mod, label, count) {
   return row;
 }
 
-// дуга наливается от вершины в сторону перевеса, число живёт в её нише
 function deltaTile(hits, misses) {
   const total = hits + misses;
   const gap = hits - misses;
