@@ -915,19 +915,7 @@ function runLine(run) {
   head.appendChild(name);
   head.appendChild(el("em", "run__ago", fmtAgo(run.at)));
 
-  const caret = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-  caret.setAttribute("viewBox", "0 0 12 12");
-  caret.setAttribute("class", "run__caret");
-  caret.setAttribute("aria-hidden", "true");
-  const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
-  path.setAttribute("d", "M2.5 4.5 6 8l3.5-3.5");
-  path.setAttribute("fill", "none");
-  path.setAttribute("stroke", "currentColor");
-  path.setAttribute("stroke-width", "1.6");
-  path.setAttribute("stroke-linecap", "round");
-  path.setAttribute("stroke-linejoin", "round");
-  caret.appendChild(path);
-  head.appendChild(caret);
+  head.appendChild(caretIcon("run__caret"));
 
   head.addEventListener("click", () => {
     ui.openRun = ui.openRun === run.jobId ? "" : run.jobId;
@@ -2438,6 +2426,29 @@ function el(tag, className, text) {
   return node;
 }
 
+const SVG_NS = "http://www.w3.org/2000/svg";
+
+function svgEl(tag, attrs) {
+  const node = document.createElementNS(SVG_NS, tag);
+  for (const [key, value] of Object.entries(attrs || {})) node.setAttribute(key, String(value));
+  return node;
+}
+
+function caretIcon(className) {
+  const caret = svgEl("svg", { viewBox: "0 0 12 12", class: className, "aria-hidden": "true" });
+  caret.appendChild(
+    svgEl("path", {
+      d: "M2.5 4.5 6 8l3.5-3.5",
+      fill: "none",
+      stroke: "currentColor",
+      "stroke-width": "1.6",
+      "stroke-linecap": "round",
+      "stroke-linejoin": "round"
+    })
+  );
+  return caret;
+}
+
 function paintChange(td, text) {
   const parts = String(text).split("; ");
   parts.forEach((part, index) => {
@@ -3551,16 +3562,15 @@ function renderLineChart(host, data, options) {
   const plot = el("div", "line__plot");
   plot.appendChild(el("span", "line__max", String(max)));
 
-  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-  svg.setAttribute("viewBox", "0 0 100 100");
-  svg.setAttribute("preserveAspectRatio", "none");
+  const svg = svgEl("svg", { viewBox: "0 0 100 100", preserveAspectRatio: "none" });
   const xOf = (index) => (days.length === 1 ? 50 : (index / (days.length - 1)) * 100);
   const yOf = (value) => 95 - (value / max) * 86;
 
   for (const line of series) {
-    const poly = document.createElementNS("http://www.w3.org/2000/svg", "polyline");
-    poly.setAttribute("points", line.points.map((value, index) => `${xOf(index)},${yOf(value)}`).join(" "));
-    poly.setAttribute("class", `line__path${chipState(options.active, line.name)}`);
+    const poly = svgEl("polyline", {
+      points: line.points.map((value, index) => `${xOf(index)},${yOf(value)}`).join(" "),
+      class: `line__path${chipState(options.active, line.name)}`
+    });
     poly.style.stroke = line.color;
     svg.appendChild(poly);
   }
@@ -3627,9 +3637,7 @@ function renderDonutChart(host, rows, options) {
 
   const total = segments.reduce((sum, seg) => sum + seg.count, 0) || 1;
   const box = el("div", "donut");
-  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-  svg.setAttribute("viewBox", "0 0 120 120");
-  svg.setAttribute("class", "donut__ring");
+  const svg = svgEl("svg", { viewBox: "0 0 120 120", class: "donut__ring" });
   markPickGroup(svg, options.filterKey);
 
   const R = 44;
@@ -3638,15 +3646,17 @@ function renderDonutChart(host, rows, options) {
   let offset = 0;
   for (const seg of segments) {
     const share = (seg.count / total) * LEN;
-    const circle = document.createElementNS("http://www.w3.org/2000/svg", "circle");
-    circle.setAttribute("cx", "60");
-    circle.setAttribute("cy", "60");
-    circle.setAttribute("r", String(R));
-    circle.setAttribute("class", `donut__seg${seg.pickable ? chipState(options.active, seg.name) : ""}`);
+    const dash = Math.max(0.5, share - GAP);
+    const circle = svgEl("circle", {
+      cx: "60",
+      cy: "60",
+      r: R,
+      class: `donut__seg${seg.pickable ? chipState(options.active, seg.name) : ""}`,
+      "stroke-dasharray": `${dash} ${LEN - dash}`,
+      "stroke-dashoffset": -offset,
+      transform: "rotate(-90 60 60)"
+    });
     circle.style.stroke = seg.color;
-    circle.setAttribute("stroke-dasharray", `${Math.max(0.5, share - GAP)} ${LEN - Math.max(0.5, share - GAP)}`);
-    circle.setAttribute("stroke-dashoffset", String(-offset));
-    circle.setAttribute("transform", "rotate(-90 60 60)");
     bindVizTip(circle, {
       title: seg.label,
       color: seg.color,
@@ -3664,16 +3674,10 @@ function renderDonutChart(host, rows, options) {
     offset += share;
   }
 
-  const centerValue = document.createElementNS("http://www.w3.org/2000/svg", "text");
-  centerValue.setAttribute("x", "60");
-  centerValue.setAttribute("y", "58");
-  centerValue.setAttribute("class", "donut__total");
+  const centerValue = svgEl("text", { x: "60", y: "58", class: "donut__total" });
   centerValue.textContent = String(total);
   svg.appendChild(centerValue);
-  const centerLabel = document.createElementNS("http://www.w3.org/2000/svg", "text");
-  centerLabel.setAttribute("x", "60");
-  centerLabel.setAttribute("y", "74");
-  centerLabel.setAttribute("class", "donut__label");
+  const centerLabel = svgEl("text", { x: "60", y: "74", class: "donut__label" });
   centerLabel.textContent = "ID";
   svg.appendChild(centerLabel);
   box.appendChild(svg);
@@ -3719,19 +3723,7 @@ function panelTitle(value, entries, onChange) {
   button.title = "Выбрать, что показывать";
   const label = entries.find(([key]) => key === value)?.[1] || value;
   button.appendChild(el("h3", null, label));
-  const caret = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-  caret.setAttribute("viewBox", "0 0 12 12");
-  caret.setAttribute("class", "ptitle__caret");
-  caret.setAttribute("aria-hidden", "true");
-  const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
-  path.setAttribute("d", "M2.5 4.5 6 8l3.5-3.5");
-  path.setAttribute("fill", "none");
-  path.setAttribute("stroke", "currentColor");
-  path.setAttribute("stroke-width", "1.6");
-  path.setAttribute("stroke-linecap", "round");
-  path.setAttribute("stroke-linejoin", "round");
-  caret.appendChild(path);
-  button.appendChild(caret);
+  button.appendChild(caretIcon("ptitle__caret"));
 
   const select = optionSelect(value, entries, onChange);
   select.className = "ptitle__select";
