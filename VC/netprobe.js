@@ -169,21 +169,26 @@
     return score;
   }
 
-  function considerCard(request, responseText) {
-    const score = scoreCard(request, responseText);
-    if (score <= 0 || score <= probe.cardScore) return;
-    if (!carriesId(request.url, request.body, itemIdFromHref(location.href))) return;
-
-    const recipe = {
-      id: `c${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`,
+  function recipeFrom(prefix, request, itemId, score) {
+    return {
+      id: `${prefix}${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`,
       url: absolute(request.url),
       method: String(request.method || "GET").toUpperCase(),
       headers: cleanHeaders(request.headers),
       body: typeof request.body === "string" ? request.body : null,
-      itemId: itemIdFromHref(location.href),
+      itemId,
       score,
       capturedAt: Date.now()
     };
+  }
+
+  function considerCard(request, responseText) {
+    const score = scoreCard(request, responseText);
+    if (score <= 0 || score <= probe.cardScore) return;
+    const itemId = itemIdFromHref(location.href);
+    if (!carriesId(request.url, request.body, itemId)) return;
+
+    const recipe = recipeFrom("c", request, itemId, score);
 
     probe.card = recipe;
     probe.cardScore = score;
@@ -248,17 +253,8 @@
 
     const itemId = itemIdFromHref(location.href);
     if (!carriesId(request.url, request.body, itemId)) return;
-    const recipe = {
-      id: `r${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`,
-      url: absolute(request.url),
-      method: String(request.method || "GET").toUpperCase(),
-      headers: cleanHeaders(request.headers),
-      body: typeof request.body === "string" ? request.body : null,
-      itemId,
-      score,
-      sampleLength: responseText.length,
-      capturedAt: Date.now()
-    };
+    const recipe = recipeFrom("r", request, itemId, score);
+    recipe.sampleLength = responseText.length;
 
     probe.recipe = recipe;
     probe.score = score;

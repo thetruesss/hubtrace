@@ -860,22 +860,34 @@
 
   const CARD_KEYS = ["postingName", "stateName", "postingNumber"];
 
-  function findPostingInfo(json) {
+  function walkJson(json, visit) {
     const queue = [{ node: json, depth: 0 }];
-    let loose = null;
     while (queue.length) {
       const { node, depth } = queue.shift();
       if (!node || typeof node !== "object" || depth > 6) continue;
+      if (visit(node)) return;
       if (Array.isArray(node)) {
         for (const entry of node.slice(0, 40)) queue.push({ node: entry, depth: depth + 1 });
         continue;
       }
-      const own = CARD_KEYS.filter((key) => node[key] != null && node[key] !== "");
-      if (own.length >= 2) return node;
-      if (own.length === 1 && !loose) loose = node;
       for (const key of Object.keys(node)) queue.push({ node: node[key], depth: depth + 1 });
     }
-    return loose;
+  }
+
+  function findPostingInfo(json) {
+    let found = null;
+    let loose = null;
+    walkJson(json, (node) => {
+      if (Array.isArray(node)) return false;
+      const own = CARD_KEYS.filter((key) => node[key] != null && node[key] !== "");
+      if (own.length >= 2) {
+        found = node;
+        return true;
+      }
+      if (own.length === 1 && !loose) loose = node;
+      return false;
+    });
+    return found || loose;
   }
 
   function cardFrom(info) {
@@ -1258,21 +1270,15 @@
   function findRows(json) {
     let best = null;
     let bestLen = -1;
-    const queue = [{ node: json, depth: 0 }];
-    while (queue.length) {
-      const { node, depth } = queue.shift();
-      if (!node || typeof node !== "object" || depth > 6) continue;
-      if (Array.isArray(node)) {
-        const objects = node.filter((entry) => entry && typeof entry === "object").length;
-        if (node.length && objects >= node.length / 2 && node.length > bestLen) {
-          best = node;
-          bestLen = node.length;
-        }
-        for (const entry of node.slice(0, 40)) queue.push({ node: entry, depth: depth + 1 });
-        continue;
+    walkJson(json, (node) => {
+      if (!Array.isArray(node)) return false;
+      const objects = node.filter((entry) => entry && typeof entry === "object").length;
+      if (node.length && objects >= node.length / 2 && node.length > bestLen) {
+        best = node;
+        bestLen = node.length;
       }
-      for (const key of Object.keys(node)) queue.push({ node: node[key], depth: depth + 1 });
-    }
+      return false;
+    });
     return best;
   }
 

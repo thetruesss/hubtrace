@@ -1046,6 +1046,15 @@ function noteApiMiss(blocked) {
   if (state.apiFailStreak >= API_FAIL_LIMIT) blockApi(blocked, "unavailable");
 }
 
+function trustApi(note) {
+  state.apiState = "trusted";
+  state.apiRetries = 0;
+  state.apiBlockKind = "";
+  retuneThreads();
+  notice("api", note);
+  emitState(true);
+}
+
 function blockApi(reason, kind) {
   if (state.apiState === "blocked") return;
   state.apiState = "blocked";
@@ -1115,15 +1124,7 @@ function calibrate(api, dom, index) {
       state.apiState !== "trusted" &&
       api.status === "complete"
     ) {
-      state.apiState = "trusted";
-      state.apiRetries = 0;
-      state.apiBlockKind = "";
-      retuneThreads();
-      notice(
-        "api",
-        "Обход DOM не дочитывает список, сверять не с чем. Доверяю быстрому пути: он берёт итог из ответа сервера."
-      );
-      emitState(true);
+      trustApi("Обход DOM не дочитывает список, сверять не с чем. Доверяю быстрому пути: он берёт итог из ответа сервера.");
     }
     return;
   }
@@ -1136,12 +1137,7 @@ function calibrate(api, dom, index) {
     state.apiChecks += 1;
     if (state.apiState === "blocked") return;
     if (state.apiState !== "trusted") {
-      state.apiState = "trusted";
-      state.apiRetries = 0;
-      state.apiBlockKind = "";
-      retuneThreads();
-      notice("api", "Быстрый путь включён: история читается напрямую.");
-      emitState(true);
+      trustApi("Быстрый путь включён: история читается напрямую.");
     }
     return;
   }
