@@ -3013,26 +3013,102 @@ input[type="number"] {
 
 .delta {
   display: flex;
+  align-items: center;
+  gap: 9px;
+  margin-top: 3px;
+  min-width: 0;
+}
+
+.delta__art {
+  flex: 0 0 auto;
+  width: 58px;
+  height: 29px;
+}
+
+.delta__rail,
+.delta__live,
+.delta__pin {
+  fill: none;
+}
+
+.delta__rail {
+  stroke: rgba(255, 255, 255, 0.085);
+}
+
+.delta__live {
+  stroke: var(--muted);
+  transition: stroke-dasharray 0.5s var(--ease), stroke-dashoffset 0.5s var(--ease);
+}
+
+.delta__pin {
+  stroke: rgba(6, 10, 19, 0.8);
+}
+
+.delta__num {
+  font-family: var(--sans);
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  fill: var(--text);
+}
+
+.kpi--delta.is-hit .delta__live {
+  stroke: var(--hit);
+}
+
+.kpi--delta.is-hit .delta__num {
+  fill: var(--hit);
+}
+
+.kpi--delta.is-miss .delta__live {
+  stroke: var(--miss);
+}
+
+.kpi--delta.is-miss .delta__num {
+  fill: var(--miss);
+}
+
+.delta__legend {
+  display: grid;
+  gap: 1px;
+  min-width: 0;
+}
+
+.delta__row {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+}
+
+.delta__dot {
+  flex: 0 0 auto;
+  width: 6px;
   height: 6px;
-  margin-top: 9px;
-  border-radius: 999px;
-  overflow: hidden;
-  background: rgba(255, 255, 255, 0.07);
+  border-radius: 2px;
 }
 
-.delta i {
-  display: block;
-  height: 100%;
-  flex-basis: 0;
-  transition: flex-grow 0.45s var(--ease);
-}
-
-.delta__hit {
+.delta__row--hit .delta__dot {
   background: var(--hit);
 }
 
-.delta__miss {
+.delta__row--miss .delta__dot {
   background: var(--miss);
+}
+
+.delta__name {
+  text-decoration: none;
+  font-size: 9.5px;
+  color: var(--faint);
+  letter-spacing: 0.02em;
+}
+
+.delta__val {
+  margin-left: auto;
+  font-size: 11px;
+  font-weight: 650;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
 }
 
 .kpi--hit::after { background: var(--hit); }

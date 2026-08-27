@@ -3261,26 +3261,59 @@ function renderStatsKpis(shown) {
   host.appendChild(deltaTile(hits, misses));
 }
 
+const DELTA_ARC = "M7 31A27 27 0 0 1 61 31";
+const DELTA_LEN = Math.PI * 27;
+// ниша дуги узкая, поэтому длинные значения садятся на меньший кегль
+const DELTA_SIZES = [15, 15, 13.5, 11.5, 9.5, 8.5];
+
+function deltaRow(mod, label, count) {
+  const row = el("div", `delta__row delta__row--${mod}`);
+  row.append(el("i", "delta__dot"), el("u", "delta__name", label), el("strong", "delta__val", String(count)));
+  return row;
+}
+
+// дуга наливается от вершины в сторону перевеса, число живёт в её нише
 function deltaTile(hits, misses) {
   const total = hits + misses;
   const gap = hits - misses;
-  const lead = gap > 0 ? "+" : gap < 0 ? "−" : "";
+  const half = DELTA_LEN / 2;
+  const reach = total ? (Math.abs(gap) / total) * half : 0;
+  const side = gap > 0 ? "hit" : gap < 0 ? "miss" : "even";
 
-  const box = el("div", "kpi kpi--delta");
+  const box = el("div", `kpi kpi--delta is-${side}`);
+  box.title = total ? `Склад есть ${hits}, склада нет ${misses}` : "Сравнивать нечего";
   box.appendChild(el("span", null, "Разница"));
-  box.appendChild(el("b", null, `${lead}${Math.abs(gap)}`));
 
-  const bar = el("div", "delta");
-  const hit = el("i", "delta__hit");
-  const miss = el("i", "delta__miss");
-  hit.style.flexGrow = String(total ? hits : 0);
-  miss.style.flexGrow = String(total ? misses : 0);
-  bar.append(hit, miss);
-  box.appendChild(bar);
-
-  box.appendChild(
-    el("em", null, total ? `${hits} к ${misses} · ${Math.round((hits / total) * 100)}% со складом` : "сравнивать нечего")
+  const art = svgEl("svg", { viewBox: "0 0 68 34", class: "delta__art", "aria-hidden": "true" });
+  art.appendChild(
+    svgEl("path", { class: "delta__rail", d: DELTA_ARC, fill: "none", "stroke-width": "6", "stroke-linecap": "round" })
   );
+
+  const live = svgEl("path", {
+    class: "delta__live",
+    d: DELTA_ARC,
+    fill: "none",
+    "stroke-width": "6",
+    "stroke-linecap": "round"
+  });
+  live.style.strokeDasharray = `${reach} ${DELTA_LEN}`;
+  live.style.strokeDashoffset = String(-(gap > 0 ? half : half - reach));
+  art.appendChild(live);
+
+  art.appendChild(svgEl("path", { class: "delta__pin", d: "M34 0.6V7.4", "stroke-width": "1.4", "stroke-linecap": "round" }));
+
+  const shown = `${gap > 0 ? "+" : gap < 0 ? "−" : ""}${Math.abs(gap)}`;
+  const num = svgEl("text", { class: "delta__num", x: "34", y: "27.5", "text-anchor": "middle" });
+  num.style.fontSize = `${DELTA_SIZES[Math.min(shown.length, DELTA_SIZES.length) - 1]}px`;
+  num.textContent = shown;
+  art.appendChild(num);
+
+  const wrap = el("div", "delta");
+  const legend = el("div", "delta__legend");
+  legend.append(deltaRow("hit", "есть", hits), deltaRow("miss", "нет", misses));
+  wrap.append(art, legend);
+  box.appendChild(wrap);
+
   markValue(box, gap, "Разница", total ? `${hits} к ${misses}` : "");
   return box;
 }
