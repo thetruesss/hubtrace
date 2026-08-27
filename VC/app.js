@@ -1939,14 +1939,71 @@ function appendToField(text) {
   patchSettings({ lastPostings: postingsEl.value });
 }
 
+const INGEST_MIN_MS = 420;
+
+function fmtSize(bytes) {
+  const size = Number(bytes) || 0;
+  if (size < 1024) return `${size} Б`;
+  if (size < 1024 * 1024) return `${Math.round(size / 1024)} КБ`;
+  return `${(size / (1024 * 1024)).toFixed(1)} МБ`;
+}
+
+function openIngest(file) {
+  const box = $("ingest");
+  setText($("ingest-name"), file.name);
+  setText($("ingest-stage"), "читаю файл");
+  setText($("ingest-pct"), "0%");
+  setText($("ingest-size"), fmtSize(file.size));
+  setText($("ingest-found"), "");
+  $("ingest-fill").style.transform = "scaleX(0)";
+  box.hidden = false;
+  requestAnimationFrame(() => box.classList.add("is-on"));
+}
+
+function stepIngest(share, label, found) {
+  $("ingest-fill").style.transform = `scaleX(${share})`;
+  setText($("ingest-pct"), `${Math.round(share * 100)}%`);
+  if (label) setText($("ingest-stage"), label);
+  if (found != null) setText($("ingest-found"), `нашёл ${found}`);
+}
+
+function closeIngest() {
+  const box = $("ingest");
+  box.classList.remove("is-on");
+  window.setTimeout(() => {
+    if (!box.classList.contains("is-on")) box.hidden = true;
+  }, 220);
+}
+
+let ingesting = false;
+
 async function readFile(file) {
+  if (ingesting) return;
+  ingesting = true;
+  try {
+    await ingestFile(file);
+  } finally {
+    ingesting = false;
+  }
+}
+
+async function ingestFile(file) {
+  openIngest(file);
+  const started = Date.now();
   let result;
   try {
-    result = await sheetReader.readIdsFromFile(file);
+    result = await sheetReader.readIdsFromFile(file, stepIngest);
   } catch (_err) {
+    closeIngest();
     showError("Не получилось прочитать файл.");
     return;
   }
+
+  stepIngest(1, "готово", result.ids?.length);
+  // окно не должно мигать на мелких файлах
+  const left = INGEST_MIN_MS - (Date.now() - started);
+  if (left > 0) await new Promise((resolve) => window.setTimeout(resolve, left));
+  closeIngest();
 
   if (result.error) {
     showError(result.error);

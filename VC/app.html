@@ -676,6 +676,33 @@
       </span>
     </button>
 
+    <div class="ingest" id="ingest" hidden>
+      <div class="ingest__card" role="status" aria-live="polite">
+        <div class="ingest__head">
+          <span class="ingest__badge" aria-hidden="true">
+            <svg viewBox="0 0 24 24">
+              <path d="M6 3.5h7.5L19 9v11.5a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1v-16a1 1 0 0 1 1-1Z"
+                    fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" />
+              <path d="M13.2 3.6V9H18.6" fill="none" stroke="currentColor" stroke-width="1.6"
+                    stroke-linejoin="round" />
+              <path d="M8.6 13.4h6.8M8.6 16.6h4.4" fill="none" stroke="currentColor"
+                    stroke-width="1.6" stroke-linecap="round" />
+            </svg>
+          </span>
+          <span class="ingest__who">
+            <b id="ingest-name">файл</b>
+            <em id="ingest-stage">читаю файл</em>
+          </span>
+          <b class="ingest__pct" id="ingest-pct">0%</b>
+        </div>
+        <div class="ingest__bar"><i id="ingest-fill"></i></div>
+        <div class="ingest__foot">
+          <span id="ingest-size"></span>
+          <span id="ingest-found"></span>
+        </div>
+      </div>
+    </div>
+
     <div class="toasts" id="toasts" aria-live="polite"></div>
 
     <script src="xlsx.js"></script>

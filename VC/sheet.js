@@ -31,32 +31,64 @@
     return out;
   }
 
-  function extractIds(text) {
-    const strict = uniq(idsIn(text));
-    return strict.length ? strict : uniq(idsIn(text, true));
+  // строгое правило годится, только когда под него попадает почти всё:
+  // иначе один номер, случайно оканчивающийся на 000, выбрасывал остальные
+  const STRICT_SHARE = 0.8;
+
+  function pickRule(strict, loose) {
+    return strict.length >= loose.length * STRICT_SHARE ? strict : loose;
   }
 
-  function columnsOf(cells, loose) {
+  function extractIds(text) {
+    const loose = uniq(idsIn(text, true));
+    if (!loose.length) return [];
+    return pickRule(uniq(idsIn(text)), loose);
+  }
+
+  const CHUNK = 4000;
+
+  function breathe() {
+    return new Promise((resolve) => setTimeout(resolve, 0));
+  }
+
+  async function columnsOf(cells, loose, onScan) {
     const byColumn = new Map();
-    for (const cell of cells) {
+    for (let at = 0; at < cells.length; at += 1) {
+      const cell = cells[at];
       const ids = idsIn(cell.value, loose);
-      if (!ids.length) continue;
-      if (!byColumn.has(cell.key)) byColumn.set(cell.key, []);
-      byColumn.get(cell.key).push(...ids);
+      if (ids.length) {
+        let bucket = byColumn.get(cell.key);
+        if (!bucket) {
+          bucket = [];
+          byColumn.set(cell.key, bucket);
+        }
+        for (const id of ids) bucket.push(id);
+      }
+      if ((at + 1) % CHUNK) continue;
+      if (onScan) onScan((at + 1) / cells.length);
+      await breathe();
     }
     return byColumn;
   }
 
-  function idsFromCells(cells) {
-    let byColumn = columnsOf(cells, false);
-    if (!byColumn.size) byColumn = columnsOf(cells, true);
-    if (!byColumn.size) return { ids: [], columns: 0 };
-
+  function widestColumn(byColumn) {
     let best = null;
     for (const [key, ids] of byColumn) {
       if (!best || ids.length > best.ids.length) best = { key, ids };
     }
-    return { ids: uniq(best.ids), columns: byColumn.size, column: best.key };
+    return best;
+  }
+
+  async function idsFromCells(cells, onScan) {
+    const say = onScan || (() => {});
+    const loose = await columnsOf(cells, true, (share) => say(share / 2));
+    if (!loose.size) return { ids: [], columns: 0 };
+
+    const wide = widestColumn(loose);
+    say(0.5, wide.ids.length);
+    const tight = await columnsOf(cells, false, (share) => say(0.5 + share / 2, wide.ids.length));
+    const strict = tight.get(wide.key) || [];
+    return { ids: uniq(pickRule(strict, wide.ids)), columns: loose.size, column: wide.key };
   }
 
   const SIG_ZIP = 0x04034b50;
@@ -71,7 +103,7 @@
     return new Uint8Array(await new Response(stream).arrayBuffer());
   }
 
-  async function unzip(buffer, wanted) {
+  async function unzip(buffer, wanted, onScan) {
     const view = new DataView(buffer);
     const bytes = new Uint8Array(buffer);
     const names = new TextDecoder("utf-8");
@@ -100,6 +132,7 @@
       }
 
       at = dataAt + compressed;
+      if (onScan) onScan(Math.min(1, at / bytes.length));
       if (compressed === 0 && uncompressed === 0 && !name.endsWith("/")) break;
     }
     return out;
@@ -124,11 +157,14 @@
 
   const COLUMN_RE = /^([A-Z]+)/;
 
-  function sheetCells(text, shared) {
+  async function sheetCells(text, shared, onScan) {
     const doc = parseXml(text);
     if (!doc) return [];
     const out = [];
-    for (const cell of doc.getElementsByTagName("c")) {
+    const all = doc.getElementsByTagName("c");
+    const total = all.length;
+    for (let at = 0; at < total; at += 1) {
+      const cell = all[at];
       const ref = cell.getAttribute("r") || "";
       const key = (ref.match(COLUMN_RE) || ["?"])[0];
       const type = cell.getAttribute("t");
@@ -142,46 +178,68 @@
         value = cell.getElementsByTagName("v")[0]?.textContent || "";
       }
       if (value) out.push({ key, value });
+      if ((at + 1) % CHUNK) continue;
+      if (onScan) onScan((at + 1) / total);
+      await breathe();
     }
     return out;
   }
 
-  async function readXlsx(buffer) {
-    const parts = await unzip(buffer, wantedEntry);
+  async function readXlsx(buffer, step) {
+    const parts = await unzip(buffer, wantedEntry, (share) => step(0.08 + share * 0.22, "распаковываю"));
     if (!parts.size) return { ids: [], columns: 0 };
 
     const shared = sharedStrings(parts.get("xl/sharedStrings.xml"));
+    const sheets = [...parts].filter(([name]) => name !== "xl/sharedStrings.xml");
     const cells = [];
-    for (const [name, text] of parts) {
-      if (name === "xl/sharedStrings.xml") continue;
-      cells.push(...sheetCells(text, shared));
+    for (let at = 0; at < sheets.length; at += 1) {
+      const from = 0.3 + (at / sheets.length) * 0.45;
+      const span = 0.45 / sheets.length;
+      step(from, "разбираю лист");
+      // даём окну перерисоваться: сам разбор XML цельный и его не поделить
+      await breathe();
+      const part = await sheetCells(sheets[at][1], shared, (share) => step(from + share * span, "разбираю лист"));
+      for (const cell of part) cells.push(cell);
     }
-    if (cells.length) return idsFromCells(cells);
+    if (cells.length) return idsFromCells(cells, (share, found) => step(0.75 + share * 0.25, "ищу номера", found));
 
     return { ids: extractIds([...parts.values()].join(" ").replace(/></g, "> <")), columns: 0 };
   }
 
+  const BOM_RE = /^﻿/;
   const SPLIT_RE = /[\t;,]/;
 
-  function readDelimited(text) {
+  async function readDelimited(text, step) {
+    const say = step || (() => {});
     const lines = String(text || "").split(/\r?\n/);
     const cells = [];
     let split = false;
-    for (const line of lines) {
-      if (!line.trim()) continue;
-      if (SPLIT_RE.test(line)) {
-        split = true;
-        line.split(SPLIT_RE).forEach((part, index) => cells.push({ key: `c${index}`, value: part }));
-      } else {
-        cells.push({ key: "c0", value: line });
+    for (let at = 0; at < lines.length; at += 1) {
+      const line = lines[at];
+      if (line.trim()) {
+        if (SPLIT_RE.test(line)) {
+          split = true;
+          line.split(SPLIT_RE).forEach((part, index) => cells.push({ key: `c${index}`, value: part }));
+        } else {
+          cells.push({ key: "c0", value: line });
+        }
       }
+      if ((at + 1) % CHUNK) continue;
+      say(0.1 + ((at + 1) / lines.length) * 0.5, "разбираю строки");
+      await breathe();
     }
     if (!split) return { ids: extractIds(text), columns: 0 };
-    return idsFromCells(cells);
+    return idsFromCells(cells, (share, found) => say(0.6 + share * 0.4, "ищу номера", found));
   }
 
-  async function readIdsFromFile(file) {
+  async function readIdsFromFile(file, onStep) {
+    const step = (share, label, found) => {
+      if (typeof onStep === "function") onStep(Math.max(0, Math.min(1, share)), label, found);
+    };
+
+    step(0, "читаю файл");
     const buffer = await file.arrayBuffer();
+    step(0.08, "читаю файл");
     const head = new Uint8Array(buffer, 0, Math.min(8, buffer.byteLength));
 
     if (isOle(head)) {
@@ -190,12 +248,15 @@
 
     const view = new DataView(buffer);
     if (buffer.byteLength >= 4 && view.getUint32(0, true) === SIG_ZIP) {
-      const found = await readXlsx(buffer);
+      const found = await readXlsx(buffer, step);
+      step(1, "готово");
       return { ids: found.ids, columns: found.columns, column: found.column, text: "", kind: "xlsx" };
     }
 
-    const text = new TextDecoder("utf-8").decode(buffer).replace(/^﻿/, "");
-    const found = readDelimited(text);
+    const text = new TextDecoder("utf-8").decode(buffer).replace(BOM_RE, "");
+    step(0.1, "разбираю строки");
+    const found = await readDelimited(text, step);
+    step(1, "готово");
     return { ids: found.ids, columns: found.columns, column: found.column, text, kind: "text" };
   }
 
