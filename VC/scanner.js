@@ -275,7 +275,7 @@
     if (!Array.isArray(next) || !next.length) return false;
     const clean = next.map((value) => String(value || "")).filter(Boolean);
     if (!clean.length) return false;
-    if (!clean.some((code) => TRANSITION_TYPES.includes(code))) return false;
+    if (!clean.every((code) => TRANSITION_TYPES.includes(code))) return false;
     if (clean.join("|") === auditTypes.join("|")) return false;
     auditTypes = clean;
     return true;
@@ -889,26 +889,58 @@
     return found || loose;
   }
 
-  function cardFrom(info) {
+  function cardFrom(info, json) {
     if (!info) return null;
     const out = {
       number: String(info.postingName || info.postingNumber || info.name || ""),
-      status: String(info.stateName || info.statusName || info.state || "")
+      status: String(info.stateName || info.statusName || info.state || ""),
+      cmn: cmnFrom(json === undefined ? info : json)
     };
-    return out.number || out.status ? out : null;
+    return out.number || out.status || out.cmn ? out : null;
   }
 
   function readCard(response) {
     if (!response?.ok || !response.text) return null;
     try {
-      return cardFrom(findPostingInfo(JSON.parse(response.text)));
+      const json = JSON.parse(response.text);
+      return cardFrom(findPostingInfo(json), json);
     } catch (_err) {
       return null;
     }
   }
 
   function emptyCard() {
-    return { number: "", status: "" };
+    return { number: "", status: "", cmn: "" };
+  }
+
+  // ЦМН из блока «Где находится». Ищем по имени поля, а не по виду значения:
+  // не найдём — столбец останется пустым, но не соврёт чужим складом
+  function isCmnKey(key) {
+    return String(key)
+      .replace(/([a-zа-яё])([A-ZА-ЯЁ])/g, "$1 $2")
+      .split(/[^A-Za-zА-Яа-яЁё]+/)
+      .some((part) => {
+        const word = part.toLowerCase();
+        return word === "cmn" || word === "цмн";
+      });
+  }
+
+  function cmnFrom(json) {
+    let found = "";
+    walkJson(json, (node) => {
+      if (Array.isArray(node)) return false;
+      for (const key of Object.keys(node)) {
+        if (!isCmnKey(key)) continue;
+        const value = node[key];
+        const name = value && typeof value === "object" ? value.name : value;
+        const text = String(name == null ? "" : name).trim();
+        if (!text || text.length > 80) continue;
+        found = text;
+        return true;
+      }
+      return false;
+    });
+    return found;
   }
 
   function cardFilled(card) {
@@ -1109,6 +1141,7 @@
     report.lastPlace = lastPlace || loosePlace;
     const card = await collectCard(posting, deadline, null);
     report.number = card.number;
+    report.cmn = card.cmn;
     report.status = cutoffAt ? stateUnder || stateOver : card.status;
 
     return {
@@ -1394,10 +1427,11 @@
   function keepTransitions(rows) {
     if (!Array.isArray(rows) || !rows.length) return rows || [];
     if (!looksLikeAudit(rows)) return rows.filter(recordUnderCutoff);
-    const kept = rows.filter((record) => auditTypes.includes(String(record?.changeType || "")));
-    // отбор по типам не должен обнулять историю: пустой список читается как
-    // «записей нет», и искомый склад теряется, хотя он в истории есть
-    return (kept.length ? kept : rows).filter(recordUnderCutoff);
+    // считаем только перемещения: пусто здесь — это ответ «перемещений нет»,
+    // а не повод взять всю историю
+    return rows
+      .filter((record) => auditTypes.includes(String(record?.changeType || "")))
+      .filter(recordUnderCutoff);
   }
 
   function reportFromRows(rows, needle) {
@@ -1548,6 +1582,7 @@
 
       const card = await collectCard(posting, deadline, firstJson);
       report.number = card.number;
+      report.cmn = card.cmn;
       report.status = cutoffAt ? "" : card.status;
 
       return {
@@ -1828,11 +1863,30 @@
     return out;
   }
 
+  // на странице ЦМН подписан прямо словом, поэтому ищем по подписи,
+  // а не по классам вёрстки
+  function readCmnFromPage() {
+    const nodes = document.querySelectorAll("span,div,b,strong,p,a");
+    for (let i = 0; i < nodes.length && i < 1200; i += 1) {
+      const label = nodes[i];
+      if (label.children.length || norm(label.textContent) !== "ЦМН") continue;
+      const box = label.parentElement;
+      if (!box) continue;
+      const text = norm(box.textContent).replace(/^ЦМН\s*/, "");
+      const name = text.split(/\s*ID\s+\d/)[0].trim();
+      if (name && name.length <= 80) return name;
+    }
+    return "";
+  }
+
   function readItemCard() {
     const exact = readItemCardExact();
-    if (exact.number && exact.status) return exact;
-    const guess = readItemCardByGuess();
-    return { number: exact.number || guess.number, status: exact.status || guess.status };
+    const guess = exact.number && exact.status ? exact : readItemCardByGuess();
+    return {
+      number: exact.number || guess.number,
+      status: exact.status || guess.status,
+      cmn: readCmnFromPage()
+    };
   }
 
   function tableColumns() {
@@ -2331,6 +2385,7 @@
     const tableRows = keepTransitionRows(rowNodes(), foreignWords(), typeColumn());
     const report = {
       number: card.number || api.number || "",
+      cmn: card.cmn || api.cmn || "",
       status: cutoffAt ? "" : card.status || api.status || "",
       columns: tableColumns(),
       lastRows: [...tableRows].slice(0, 3).map(rowCells),

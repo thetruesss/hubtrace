@@ -2800,6 +2800,7 @@ function detailCard(item) {
   addFact("Корзинка", bucketOf(bucketDateOf(report), cutoffNow()));
   addFact("Когда", report.warehouseAt || topDateOf(report));
   addFact("Последняя ячейка", report.warehouseCell);
+  addFact("ЦМН", report.cmn);
   if (classify(item) !== "hit") addFact("Предыдущий склад", report.lastPlace || topPlaceOf(withLabels(report)));
   if (facts.childElementCount) card.appendChild(facts);
 
@@ -4352,6 +4353,15 @@ const STATS_COLUMNS = {
       td.textContent = entry.bucket || "—";
     }
   },
+  cmn: {
+    title: "ЦМН",
+    width: 26,
+    sort: (entry) => entry.item.report?.cmn || "",
+    text: (entry) => entry.item.report?.cmn || "",
+    cell: (entry, td) => {
+      td.textContent = entry.item.report?.cmn || "—";
+    }
+  },
   status: {
     title: "Статус",
     width: 26,
@@ -4391,7 +4401,7 @@ const STATS_COLUMNS = {
   }
 };
 
-const DEFAULT_STATS_COLS = ["id", "number", "verdict", "blame", "at", "bucket", "status", "op"];
+const DEFAULT_STATS_COLS = ["id", "number", "verdict", "blame", "cmn", "at", "bucket", "status", "op"];
 let statsCols = DEFAULT_STATS_COLS.slice();
 
 function persistStatsCols() {
