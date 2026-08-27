@@ -71,12 +71,41 @@
     return byColumn;
   }
 
-  function widestColumn(byColumn) {
-    let best = null;
-    for (const [key, ids] of byColumn) {
-      if (!best || ids.length > best.ids.length) best = { key, ids };
+  const HEAD_RE = /отправлен|posting|^\s*id\s*$|\bid\b|номер\s+заказа/i;
+  const POSTING_LENGTH = 14;
+
+  function longShare(ids) {
+    if (!ids.length) return 0;
+    let long = 0;
+    for (const id of ids) if (id.length >= POSTING_LENGTH) long += 1;
+    return long / ids.length;
+  }
+
+  function bestColumn(byColumn, heads) {
+    const named = [...byColumn.keys()].filter((key) => HEAD_RE.test(heads?.get(key) || ""));
+    const pool = named.length ? named : [...byColumn.keys()];
+    const rank = (key) => [Math.round(longShare(byColumn.get(key)) * 10), byColumn.get(key).length];
+    pool.sort((a, b) => {
+      const left = rank(a);
+      const right = rank(b);
+      return right[0] - left[0] || right[1] - left[1];
+    });
+    const key = pool[0];
+    return key == null ? null : { key, ids: byColumn.get(key) };
+  }
+
+  function headsOf(cells) {
+    const heads = new Map();
+    let top = Infinity;
+    for (const cell of cells) {
+      if (cell.row == null) continue;
+      if (cell.row < top) {
+        top = cell.row;
+        heads.clear();
+      }
+      if (cell.row === top && !heads.has(cell.key)) heads.set(cell.key, cell.value);
     }
-    return best;
+    return heads;
   }
 
   async function idsFromCells(cells, onScan) {
@@ -84,11 +113,11 @@
     const loose = await columnsOf(cells, true, (share) => say(share / 2));
     if (!loose.size) return { ids: [], columns: 0 };
 
-    const wide = widestColumn(loose);
-    say(0.5, wide.ids.length);
-    const tight = await columnsOf(cells, false, (share) => say(0.5 + share / 2, wide.ids.length));
-    const strict = tight.get(wide.key) || [];
-    return { ids: uniq(pickRule(strict, wide.ids)), columns: loose.size, column: wide.key };
+    const pick = bestColumn(loose, headsOf(cells));
+    say(0.5, pick.ids.length);
+    const tight = await columnsOf(cells, false, (share) => say(0.5 + share / 2, pick.ids.length));
+    const strict = tight.get(pick.key) || [];
+    return { ids: uniq(pickRule(strict, pick.ids)), columns: loose.size, column: pick.key };
   }
 
   const SIG_ZIP = 0x04034b50;
@@ -155,7 +184,7 @@
     );
   }
 
-  const COLUMN_RE = /^([A-Z]+)/;
+  const CELL_RE = /^([A-Z]+)(\d+)$/;
 
   async function sheetCells(text, shared, onScan) {
     const doc = parseXml(text);
@@ -166,7 +195,9 @@
     for (let at = 0; at < total; at += 1) {
       const cell = all[at];
       const ref = cell.getAttribute("r") || "";
-      const key = (ref.match(COLUMN_RE) || ["?"])[0];
+      const spot = ref.match(CELL_RE);
+      const key = spot ? spot[1] : "?";
+      const row = spot ? Number(spot[2]) : null;
       const type = cell.getAttribute("t");
       let value = "";
       if (type === "s") {
@@ -177,7 +208,7 @@
       } else {
         value = cell.getElementsByTagName("v")[0]?.textContent || "";
       }
-      if (value) out.push({ key, value });
+      if (value) out.push({ key, value, row });
       if ((at + 1) % CHUNK) continue;
       if (onScan) onScan((at + 1) / total);
       await breathe();
@@ -219,9 +250,9 @@
       if (line.trim()) {
         if (SPLIT_RE.test(line)) {
           split = true;
-          line.split(SPLIT_RE).forEach((part, index) => cells.push({ key: `c${index}`, value: part }));
+          line.split(SPLIT_RE).forEach((part, index) => cells.push({ key: `c${index}`, value: part, row: at }));
         } else {
-          cells.push({ key: "c0", value: line });
+          cells.push({ key: "c0", value: line, row: at });
         }
       }
       if ((at + 1) % CHUNK) continue;

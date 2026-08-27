@@ -270,7 +270,6 @@
 
   const TRANSITION_TYPES = ["InnerWarehouse", "OnWarehouse", "InTripContainer", "InContainer", "OnCell"];
   let auditTypes = TRANSITION_TYPES.slice();
-  let typesConfirmed = false;
 
   function adoptAuditTypes(next) {
     if (!Array.isArray(next) || !next.length) return false;
@@ -1396,9 +1395,9 @@
     if (!Array.isArray(rows) || !rows.length) return rows || [];
     if (!looksLikeAudit(rows)) return rows.filter(recordUnderCutoff);
     const kept = rows.filter((record) => auditTypes.includes(String(record?.changeType || "")));
-    if (kept.length) typesConfirmed = true;
-    const list = typesConfirmed ? kept : rows;
-    return list.filter(recordUnderCutoff);
+    // отбор по типам не должен обнулять историю: пустой список читается как
+    // «записей нет», и искомый склад теряется, хотя он в истории есть
+    return (kept.length ? kept : rows).filter(recordUnderCutoff);
   }
 
   function reportFromRows(rows, needle) {

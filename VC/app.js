@@ -3339,7 +3339,6 @@ function deltaTile(hits, misses) {
 
   const box = el("div", `kpi kpi--delta is-${side}`);
   box.title = total ? `Склад есть ${hits}, склада нет ${misses}` : "Сравнивать нечего";
-  box.appendChild(el("span", null, "Разница"));
 
   const art = svgEl("svg", { viewBox: "0 0 68 34", class: "delta__art", "aria-hidden": "true" });
   art.appendChild(
@@ -3365,11 +3364,12 @@ function deltaTile(hits, misses) {
   num.textContent = shown;
   art.appendChild(num);
 
-  const wrap = el("div", "delta");
   const legend = el("div", "delta__legend");
   legend.append(deltaRow("hit", "есть", hits), deltaRow("miss", "нет", misses));
-  wrap.append(art, legend);
-  box.appendChild(wrap);
+
+  const side_ = el("div", "delta__side");
+  side_.append(el("span", null, "Разница"), legend);
+  box.append(side_, art);
 
   markValue(box, gap, "Разница", total ? `${hits} к ${misses}` : "");
   return box;
