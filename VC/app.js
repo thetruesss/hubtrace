@@ -2016,6 +2016,11 @@ async function ingestFile(file) {
     return;
   }
 
+  if (result.kind === "har") {
+    showError(`В ${file.name} не нашлось открытых отправлений.`);
+    return;
+  }
+
   if (result.kind === "xlsx") {
     showError(`В ${file.name} не нашлось ни одного ID (от 10 цифр подряд).`);
     return;
