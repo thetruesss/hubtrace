@@ -50,8 +50,6 @@ const ui = {
   lists: { hits: [], misses: [], issues: [] },
   finished: null,
   viewCutoff: 0,
-  viewCutoffText: "",
-  laterCount: 0,
   reportSaved: false,
   recentWarehouses: [],
   rates: {},
@@ -741,8 +739,6 @@ function renderBrief(parsed) {
 
   const rows = [["", `<b>${count}</b> ${plural(count, ["номер", "номера", "номеров"])} в очереди`]];
   if (count && rate) rows.push(["", `Примерно <b>${fmtDuration((count / rate) * 60000)}</b> по прошлым запускам`]);
-  const cutoff = readCutoff(cutoffEl.value);
-  if (cutoff.ok && cutoff.text) rows.push(["", `Потолок <b>${cutoff.text}</b>, всё что позже — мимо`]);
   rows.push(["", "Итог придёт списком, детализацией и аналитикой"]);
   rows.push([
     "is-hint",
@@ -804,7 +800,7 @@ function renderFab() {
   fab.classList.toggle("is-done", ready && ui.reportSaved);
 
   const note = $("fab-note");
-  if (!note) return;
+  if (!note || !ready) return;
   if (ui.reportSaved) {
     note.textContent = "Скачано · нажмите ещё раз";
     return;
@@ -849,37 +845,46 @@ function renderList(name) {
 let changeLabels = {};
 
 const LOGIN_RE = /^[A-Za-z][A-Za-z0-9._-]*$/;
+const NAME_RE = /^[A-Z][a-z]*$/;
 
-function loginOnly(raw) {
+function findLogin(raw) {
   const text = String(raw || "").trim();
   if (!text) return "";
-  for (const chunk of text.split(/[\s()·,;|]+/)) {
+
+  const chunks = text.split(/[\s()·,;|]+/).filter(Boolean);
+  const mail = chunks.find((chunk) => chunk.indexOf("@") > 0);
+  for (const chunk of mail ? [mail, ...chunks] : chunks) {
     const at = chunk.indexOf("@");
     const head = at > 0 ? chunk.slice(0, at) : chunk;
-    if (LOGIN_RE.test(head)) return head;
+    if (!LOGIN_RE.test(head)) continue;
+    if (at < 0 && (NAME_RE.test(head) || !/[a-z]/.test(head))) continue;
+    return head;
   }
-  if (/^\d+$/.test(text)) return text;
-  return "—";
+  return /^\d+$/.test(text) ? text : "";
 }
 
-function userColumnOf(report) {
+function columnAt(report, mask, fallback) {
   const columns = report?.columns;
-  if (!Array.isArray(columns) || !columns.length) return 2;
-  const at = columns.findIndex((title) => /^польз/i.test(String(title || "")));
-  return at < 0 ? 2 : at;
+  if (!Array.isArray(columns)) return fallback;
+  const at = columns.findIndex((title) => mask.test(String(title || "")));
+  return at < 0 ? fallback : at;
+}
+
+function userColumnAt(report) {
+  return columnAt(report, /^польз/i, 2);
 }
 
 function withLabels(report) {
   const rows = report?.lastRows;
   if (!Array.isArray(rows)) return [];
   const codes = report?.codes;
-  const userAt = userColumnOf(report);
+  const userAt = userColumnAt(report);
   return rows.map((row, index) => {
     if (!Array.isArray(row)) return row;
     const out = [...row];
     const label = Array.isArray(codes) ? changeLabels[codes[index]] : "";
     if (label && out.length && out[0] !== label) out[0] = label;
-    if (userAt < out.length) out[userAt] = loginOnly(out[userAt]);
+    if (userAt < out.length) out[userAt] = findLogin(out[userAt]) || "—";
     return out;
   });
 }
@@ -910,19 +915,7 @@ function runLine(run) {
   head.appendChild(name);
   head.appendChild(el("em", "run__ago", fmtAgo(run.at)));
 
-  const caret = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-  caret.setAttribute("viewBox", "0 0 12 12");
-  caret.setAttribute("class", "run__caret");
-  caret.setAttribute("aria-hidden", "true");
-  const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
-  path.setAttribute("d", "M2.5 4.5 6 8l3.5-3.5");
-  path.setAttribute("fill", "none");
-  path.setAttribute("stroke", "currentColor");
-  path.setAttribute("stroke-width", "1.6");
-  path.setAttribute("stroke-linecap", "round");
-  path.setAttribute("stroke-linejoin", "round");
-  caret.appendChild(path);
-  head.appendChild(caret);
+  head.appendChild(caretIcon("run__caret"));
 
   head.addEventListener("click", () => {
     ui.openRun = ui.openRun === run.jobId ? "" : run.jobId;
@@ -1018,12 +1011,10 @@ function renderResultHead() {
   const inputCount = payload?.inputCount || total;
   $("result-title").textContent = `Было ${inputCount}, нашлось ${ui.lists.hits.length}`;
 
-  const parts = [];
-  if (payload?.warehouse) parts.push(`Склад ${payload.warehouse} есть в истории этих номеров.`);
-  else parts.push("Номера, у которых этот склад есть в истории.");
-  if (payload?.cutoffText) parts.push(`История взята до ${payload.cutoffText} по Москве.`);
-  if (ui.viewCutoffText) parts.push(`Показано по состоянию на ${ui.viewCutoffText}.`);
-  $("result-sub").textContent = payload?.error ? payload.error : parts.join(" ");
+  const about = payload?.warehouse
+    ? `Склад ${payload.warehouse} есть в истории этих номеров.`
+    : "Номера, у которых этот склад есть в истории.";
+  $("result-sub").textContent = payload?.error || about;
 
   const meta = $("result-meta");
   meta.innerHTML = "";
@@ -1048,7 +1039,6 @@ function renderResultHead() {
 function indexResults(keepFilters) {
   const results = shownResults();
   ui.lists = splitResults(results);
-  ui.laterCount = results.filter((item) => item?.status === "later").length;
 
   for (const name of ["hits", "misses", "issues"]) {
     const filterEl = document.querySelector(`[data-filter="${name}"]`);
@@ -1059,21 +1049,21 @@ function indexResults(keepFilters) {
   buildDetailIndex(results);
   if (!keepFilters) resetDetailFilters();
   fillFilterOptions();
+  syncDetailControls();
   buildStatsIndex(results);
   if (!keepFilters) resetStatsFilters();
   fillStatsOptions();
   renderDetail();
   if (resultView === "stats") renderStats();
+  else renderFab();
 }
 
 function setViewCutoff(raw, quiet) {
   const cut = readCutoff(raw);
-  const at = cut.ok && cut.text ? parseHubDate(cut.text) : null;
-  const next = at ? at.getTime() : 0;
+  const next = cut.ok ? cut.at : 0;
   const changed = next !== ui.viewCutoff;
 
   ui.viewCutoff = next;
-  ui.viewCutoffText = at ? cut.text : "";
   if (quiet) return;
 
   if (changed) indexResults(true);
@@ -1081,20 +1071,313 @@ function setViewCutoff(raw, quiet) {
   renderViewCutoff();
 }
 
+const MONTH_NAMES = [
+  "Январь", "Февраль", "Март", "Апрель", "Май", "Июнь",
+  "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь"
+];
+const WEEK_DAYS = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"];
+const WHEEL_ITEM = 30;
+
+const datePickers = new Map();
+let openedDatePicker = null;
+
+function stampText(date) {
+  return `${pad(date.getDate())}.${pad(date.getMonth() + 1)}.${date.getFullYear()} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+function sameDay(a, b) {
+  return (
+    a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate()
+  );
+}
+
+function wheelColumn(count) {
+  const col = el("div", "wheel__col");
+  for (let i = 0; i < count; i += 1) {
+    const item = el("span", "wheel__item", pad(i));
+    item.dataset.at = String(i);
+    col.appendChild(item);
+  }
+  return col;
+}
+
+function wheelAt(col) {
+  return Math.round(col.scrollTop / WHEEL_ITEM);
+}
+
+function paintWheel(col) {
+  const at = wheelAt(col);
+  const items = col.children;
+  for (let i = 0; i < items.length; i += 1) items[i].classList.toggle("is-on", i === at);
+}
+
+function spinWheel(col, value) {
+  const top = value * WHEEL_ITEM;
+  if (Math.abs(col.scrollTop - top) > 1) col.scrollTop = top;
+  paintWheel(col);
+}
+
+function buildDatePicker() {
+  const pop = el("div", "dtp");
+  pop.hidden = true;
+
+  const head = el("div", "dtp__head");
+  const prev = el("button", "dtp__nav", "‹");
+  prev.type = "button";
+  prev.title = "Предыдущий месяц";
+  const next = el("button", "dtp__nav", "›");
+  next.type = "button";
+  next.title = "Следующий месяц";
+  const title = el("b", "dtp__title");
+  head.append(prev, title, next);
+
+  const week = el("div", "dtp__week");
+  for (const day of WEEK_DAYS) week.appendChild(el("span", null, day));
+
+  const grid = el("div", "dtp__grid");
+
+  const wheel = el("div", "wheel");
+  const hour = wheelColumn(24);
+  const minute = wheelColumn(60);
+  wheel.append(el("i", "wheel__band"), hour, el("b", "wheel__sep", ":"), minute);
+
+  const foot = el("div", "dtp__foot");
+  const now = el("button", "dtp__link", "Сейчас");
+  now.type = "button";
+  const wipe = el("button", "dtp__link", "Очистить");
+  wipe.type = "button";
+  const done = el("button", "dtp__done", "Готово");
+  done.type = "button";
+  foot.append(now, wipe, done);
+
+  pop.append(head, week, grid, wheel, foot);
+  document.body.appendChild(pop);
+
+  return { pop, prev, next, title, grid, hour, minute, now, wipe, done };
+}
+
+function datePickerValue(picker) {
+  const cut = readCutoff(picker.input.value);
+  return cut.ok && cut.at ? new Date(cut.at) : null;
+}
+
+function syncWheels(picker) {
+  spinWheel(picker.parts.hour, picker.hour);
+  spinWheel(picker.parts.minute, picker.minute);
+}
+
+function renderDatePicker(picker) {
+  const parts = picker.parts;
+  const chosen = picker.chosen;
+  parts.title.textContent = `${MONTH_NAMES[picker.month]} ${picker.year}`;
+
+  const first = new Date(picker.year, picker.month, 1);
+  const shift = (first.getDay() + 6) % 7;
+  const start = new Date(picker.year, picker.month, 1 - shift);
+  const today = new Date();
+
+  parts.grid.innerHTML = "";
+  for (let i = 0; i < 42; i += 1) {
+    const day = new Date(start.getFullYear(), start.getMonth(), start.getDate() + i);
+    const cell = el("button", "dtp__day", String(day.getDate()));
+    cell.type = "button";
+    cell.dataset.day = `${day.getFullYear()}-${day.getMonth()}-${day.getDate()}`;
+    cell.classList.toggle("is-out", day.getMonth() !== picker.month);
+    cell.classList.toggle("is-today", sameDay(day, today));
+    cell.classList.toggle("is-on", Boolean(chosen) && sameDay(day, chosen));
+    parts.grid.appendChild(cell);
+  }
+}
+
+function emitDatePicker(picker, date) {
+  picker.chosen = date;
+  picker.echo = true;
+  picker.input.value = stampText(date);
+  picker.input.dispatchEvent(new Event("input", { bubbles: true }));
+  picker.echo = false;
+  renderDatePicker(picker);
+}
+
+function pickDay(picker, key) {
+  const [year, month, day] = String(key).split("-").map(Number);
+  emitDatePicker(picker, new Date(year, month, day, picker.hour, picker.minute));
+}
+
+function slideDatePicker(picker) {
+  const base = picker.chosen || new Date();
+  emitDatePicker(picker, new Date(base.getFullYear(), base.getMonth(), base.getDate(), picker.hour, picker.minute));
+}
+
+function placeDatePicker(picker) {
+  const pop = picker.parts.pop;
+  const box = picker.input.getBoundingClientRect();
+  const size = pop.getBoundingClientRect();
+  const room = 10;
+
+  let left = box.left;
+  if (left + size.width > window.innerWidth - room) left = window.innerWidth - size.width - room;
+  if (left < room) left = room;
+
+  const under = box.bottom + 8;
+  const above = box.top - size.height - 8;
+  const wanted = under + size.height > window.innerHeight - room && above > room ? above : under;
+  const roof = Math.max(room, window.innerHeight - size.height - room);
+
+  pop.style.left = `${Math.round(left)}px`;
+  pop.style.top = `${Math.round(Math.min(Math.max(wanted, room), roof))}px`;
+}
+
+function openDatePicker(picker) {
+  if (openedDatePicker && openedDatePicker !== picker) closeDatePicker(openedDatePicker);
+
+  const value = datePickerValue(picker) || new Date();
+  picker.chosen = datePickerValue(picker);
+  picker.year = value.getFullYear();
+  picker.month = value.getMonth();
+  picker.hour = value.getHours();
+  picker.minute = value.getMinutes();
+
+  renderDatePicker(picker);
+  picker.parts.pop.hidden = false;
+  syncWheels(picker);
+  placeDatePicker(picker);
+  requestAnimationFrame(() => picker.parts.pop.classList.add("is-open"));
+  openedDatePicker = picker;
+}
+
+function closeDatePicker(picker) {
+  if (!picker) return;
+  picker.parts.pop.classList.remove("is-open");
+  if (openedDatePicker === picker) openedDatePicker = null;
+  window.clearTimeout(picker.timer);
+  picker.timer = window.setTimeout(() => {
+    if (openedDatePicker !== picker) picker.parts.pop.hidden = true;
+  }, 200);
+  picker.input.dispatchEvent(new Event("change", { bubbles: true }));
+}
+
+function mountDatePicker(id) {
+  const input = $(id);
+  const button = document.querySelector(`[data-picker="${id}"]`);
+  if (!input || !button || datePickers.has(id)) return;
+
+  const picker = {
+    input,
+    parts: buildDatePicker(),
+    chosen: null,
+    timer: null,
+    year: new Date().getFullYear(),
+    month: new Date().getMonth(),
+    hour: 12,
+    minute: 0
+  };
+  datePickers.set(id, picker);
+  const parts = picker.parts;
+
+  button.addEventListener("mousedown", (event) => event.preventDefault());
+  button.addEventListener("click", (event) => {
+    event.stopPropagation();
+    if (openedDatePicker === picker) closeDatePicker(picker);
+    else openDatePicker(picker);
+  });
+  input.addEventListener("focus", () => {
+    if (openedDatePicker !== picker) openDatePicker(picker);
+  });
+  input.addEventListener("click", () => {
+    if (openedDatePicker !== picker) openDatePicker(picker);
+  });
+
+  parts.pop.addEventListener("mousedown", (event) => event.preventDefault());
+  parts.pop.addEventListener("click", (event) => event.stopPropagation());
+
+  parts.prev.addEventListener("click", () => {
+    const step = new Date(picker.year, picker.month - 1, 1);
+    picker.year = step.getFullYear();
+    picker.month = step.getMonth();
+    renderDatePicker(picker);
+  });
+  parts.next.addEventListener("click", () => {
+    const step = new Date(picker.year, picker.month + 1, 1);
+    picker.year = step.getFullYear();
+    picker.month = step.getMonth();
+    renderDatePicker(picker);
+  });
+  parts.grid.addEventListener("click", (event) => {
+    const cell = event.target.closest("[data-day]");
+    if (cell) pickDay(picker, cell.dataset.day);
+  });
+  for (const unit of ["hour", "minute"]) {
+    const col = parts[unit];
+    let timer = null;
+    col.addEventListener("scroll", () => {
+      paintWheel(col);
+      window.clearTimeout(timer);
+      timer = window.setTimeout(() => {
+        const limit = unit === "hour" ? 23 : 59;
+        const value = Math.max(0, Math.min(limit, wheelAt(col)));
+        if (picker[unit] === value) return;
+        picker[unit] = value;
+        slideDatePicker(picker);
+      }, 110);
+    });
+  }
+  parts.now.addEventListener("click", () => {
+    const at = new Date();
+    picker.year = at.getFullYear();
+    picker.month = at.getMonth();
+    picker.hour = at.getHours();
+    picker.minute = at.getMinutes();
+    emitDatePicker(picker, at);
+    syncWheels(picker);
+  });
+  parts.wipe.addEventListener("click", () => {
+    picker.chosen = null;
+    picker.input.value = "";
+    picker.input.dispatchEvent(new Event("input", { bubbles: true }));
+    closeDatePicker(picker);
+  });
+  parts.done.addEventListener("click", () => closeDatePicker(picker));
+
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && openedDatePicker === picker) closeDatePicker(picker);
+  });
+  input.addEventListener("input", () => {
+    if (openedDatePicker !== picker || picker.echo) return;
+    const value = datePickerValue(picker);
+    if (!value) return;
+    picker.chosen = value;
+    picker.year = value.getFullYear();
+    picker.month = value.getMonth();
+    picker.hour = value.getHours();
+    picker.minute = value.getMinutes();
+    renderDatePicker(picker);
+    syncWheels(picker);
+  });
+}
+
+document.addEventListener("pointerdown", (event) => {
+  if (!openedDatePicker) return;
+  if (event.target.closest(".dtp") || event.target.closest(".dtp-field")) return;
+  closeDatePicker(openedDatePicker);
+});
+
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && openedDatePicker) closeDatePicker(openedDatePicker);
+});
+
+function trackDatePicker() {
+  if (!openedDatePicker) return;
+  const box = openedDatePicker.input.getBoundingClientRect();
+  if (box.bottom < 0 || box.top > window.innerHeight) closeDatePicker(openedDatePicker);
+  else placeDatePicker(openedDatePicker);
+}
+
+window.addEventListener("resize", trackDatePicker);
+document.addEventListener("scroll", trackDatePicker, true);
+
 function renderViewCutoff() {
-  const note = $("view-cutoff-note");
-  const clear = $("view-cutoff-clear");
-  const bad = !readCutoff(viewCutoffEl.value).ok;
-
-  viewCutoffEl.classList.toggle("is-bad", bad);
-  reveal(clear, Boolean(ui.viewCutoffText));
-  if (!note) return;
-
-  if (bad) note.textContent = "Пишем как 26.08.2026 12:00";
-  else if (!ui.viewCutoffText) note.textContent = "Срез по уже собранным данным, без нового прогона";
-  else if (ui.laterCount) {
-    note.textContent = `${ui.laterCount} ID со следом позже среза — точно скажет только прогон с потолком`;
-  } else note.textContent = "Срез по уже собранным данным, без нового прогона";
+  viewCutoffEl.classList.toggle("is-bad", !readCutoff(viewCutoffEl.value).ok);
+  reveal($("view-cutoff-clear"), Boolean(ui.viewCutoff));
 }
 
 function renderResults(payload, fresh) {
@@ -1131,13 +1414,12 @@ const REPORT_SHEET = "Все ID";
 const DETAIL_SHEET = "Последние действия";
 
 const CUTOFF_RE = /^(\d{1,2})[.\-/](\d{1,2})[.\-/](\d{4})[\s,]+(\d{1,2}):(\d{2})(?::(\d{2}))?$/;
-const MSK_SHIFT_MS = 3 * 3600000;
 
 function readCutoff(raw) {
   const text = String(raw || "").trim();
   if (!text) return { ok: true, text: "", at: 0 };
 
-  const parts = CUTOFF_RE.exec(text);
+  const parts = text.match(CUTOFF_RE);
   if (!parts) return { ok: false, text, at: 0 };
 
   const day = Number(parts[1]);
@@ -1148,32 +1430,28 @@ function readCutoff(raw) {
   const second = Number(parts[6] || 0);
   if (hour > 23 || minute > 59 || second > 59) return { ok: false, text, at: 0 };
 
-  const at = Date.UTC(year, month - 1, day, hour, minute, second) - MSK_SHIFT_MS;
-  const back = new Date(at + MSK_SHIFT_MS);
-  if (back.getUTCFullYear() !== year || back.getUTCMonth() !== month - 1 || back.getUTCDate() !== day) {
+  const back = new Date(year, month - 1, day, hour, minute, second);
+  if (back.getFullYear() !== year || back.getMonth() !== month - 1 || back.getDate() !== day) {
     return { ok: false, text, at: 0 };
   }
+  const at = back.getTime();
 
   const tail = second ? `:${pad(second)}` : "";
   return { ok: true, text: `${pad(day)}.${pad(month)}.${year} ${pad(hour)}:${pad(minute)}${tail}`, at };
 }
 
 function cutoffNow() {
-  if (ui.viewCutoff) return ui.viewCutoff;
-  const at = parseHubDate(ui.finished?.cutoffText);
-  return at ? at.getTime() : Date.now();
+  return ui.viewCutoff || readCutoff(ui.finished?.cutoffText).at || Date.now();
 }
 
-function dateColumnOf(report) {
-  const columns = report?.columns;
-  if (!Array.isArray(columns) || !columns.length) return 1;
-  const at = columns.findIndex((title) => /^дата/i.test(String(title || "")));
-  return at < 0 ? 1 : at;
+function dateColumnAt(report) {
+  return columnAt(report, /^дата/i, 1);
 }
 
 function hitsOf(report) {
+  const list = Array.isArray(report?.hits) ? report.hits : [];
   const found = [];
-  for (const hit of Array.isArray(report?.hits) ? report.hits : []) {
+  for (const hit of list) {
     const at = parseHubDate(hit?.at);
     if (at) found.push({ ms: at.getTime(), at: String(hit.at), cell: String(hit?.cell || "") });
   }
@@ -1195,7 +1473,7 @@ function cutItem(item, at) {
   const kind = classify(item);
   if (!report || kind === "issue") return item;
 
-  const dateAt = dateColumnOf(report);
+  const dateAt = dateColumnAt(report);
   const source = Array.isArray(report.lastRows) ? report.lastRows : [];
   const codes = Array.isArray(report.codes) ? report.codes : [];
   const rows = [];
@@ -1207,21 +1485,24 @@ function cutItem(item, at) {
     kept.push(codes[index] ?? "");
   });
 
-  const top = hitsOf(report).find((hit) => hit.ms <= at) || null;
+  const list = hitsOf(report);
+  const top = list.find((hit) => hit.ms <= at) || null;
+  const dated = list.length > 0;
+
   const next = {
     ...item,
-    found: Boolean(top),
+    found: top ? true : !dated && Boolean(item.found),
     report: {
       ...report,
       lastRows: rows,
       codes: kept,
-      warehouseAt: top ? top.at : "",
-      warehouseCell: top ? top.cell : "",
+      warehouseAt: top ? top.at : dated ? "" : report.warehouseAt,
+      warehouseCell: top ? top.cell : dated ? "" : report.warehouseCell,
       lastPlace: ""
     }
   };
 
-  if (!top && kind === "hit") {
+  if (!top && dated && kind === "hit") {
     next.ok = false;
     next.status = "later";
   }
@@ -1383,10 +1664,11 @@ function saveBlob(blob, name) {
 }
 
 function exportName(extension) {
-  const stamp = new Date().toISOString().slice(0, 16).replace(/[:T]/g, "-");
+  const at = new Date();
+  const stamp = `${at.getFullYear()}-${pad(at.getMonth() + 1)}-${pad(at.getDate())}-${pad(at.getHours())}-${pad(at.getMinutes())}`;
   const marks = [];
   if (ui.finished?.cutoffText) marks.push("timed");
-  if (ui.viewCutoffText) marks.push("cut");
+  if (ui.viewCutoff) marks.push("cut");
   const tag = marks.length ? `${marks.join("-")}-` : "";
   return `hub-trace-${tag}${stamp}.${extension}`;
 }
@@ -1498,7 +1780,6 @@ warehouseEl.addEventListener("change", () => rememberWarehouse(warehouseEl.value
 
 cutoffEl.addEventListener("input", () => {
   updateFormState();
-  renderBrief();
   patchSettings({ cutoffText: cutoffEl.value.trim() });
 });
 viewCutoffEl.addEventListener("input", () => setViewCutoff(viewCutoffEl.value));
@@ -1510,7 +1791,6 @@ viewCutoffEl.addEventListener("change", () => {
 $("view-cutoff-clear").addEventListener("click", () => {
   viewCutoffEl.value = "";
   setViewCutoff("");
-  viewCutoffEl.focus();
 });
 
 cutoffEl.addEventListener("change", () => {
@@ -1775,6 +2055,8 @@ function applySavedSettings(saved) {
 
 async function boot() {
   ensureKeepAlive();
+  mountDatePicker("cutoff");
+  mountDatePicker("view-cutoff");
 
   const saved = await storageGet([STORAGE_SETTINGS, STORAGE_FINISHED]);
   applySavedSettings(saved[STORAGE_SETTINGS]);
@@ -2144,6 +2426,29 @@ function el(tag, className, text) {
   return node;
 }
 
+const SVG_NS = "http://www.w3.org/2000/svg";
+
+function svgEl(tag, attrs) {
+  const node = document.createElementNS(SVG_NS, tag);
+  for (const [key, value] of Object.entries(attrs || {})) node.setAttribute(key, String(value));
+  return node;
+}
+
+function caretIcon(className) {
+  const caret = svgEl("svg", { viewBox: "0 0 12 12", class: className, "aria-hidden": "true" });
+  caret.appendChild(
+    svgEl("path", {
+      d: "M2.5 4.5 6 8l3.5-3.5",
+      fill: "none",
+      stroke: "currentColor",
+      "stroke-width": "1.6",
+      "stroke-linecap": "round",
+      "stroke-linejoin": "round"
+    })
+  );
+  return caret;
+}
+
 function paintChange(td, text) {
   const parts = String(text).split("; ");
   parts.forEach((part, index) => {
@@ -2421,12 +2726,18 @@ function mountDetail() {
   });
 }
 
+const DETAIL_SELECTS = { verdict: "filter-verdict", bucket: "filter-bucket", status: "filter-status" };
+
 function resetDetailFilters() {
   detailQuery = [];
   for (const key of Object.keys(detailFilters)) detailFilters[key] = [];
   const search = $("detail-search");
   if (search) search.value = "";
-  for (const id of ["filter-verdict", "filter-bucket", "filter-status"]) setPickerValues(id, []);
+  for (const id of Object.values(DETAIL_SELECTS)) setPickerValues(id, []);
+}
+
+function syncDetailControls() {
+  for (const [key, id] of Object.entries(DETAIL_SELECTS)) setPickerValues(id, detailFilters[key]);
 }
 
 mountDetail();
@@ -2544,10 +2855,7 @@ function topPlaceOf(rows) {
 function topDateOf(report) {
   const rows = report?.lastRows;
   if (!Array.isArray(rows) || !rows.length) return "";
-  const columns = report.columns || [];
-  let at = columns.findIndex((title) => /^дата/i.test(String(title || "")));
-  if (at < 0) at = 1;
-  return String(rows[0]?.[at] || "").trim();
+  return String(rows[0]?.[dateColumnAt(report)] || "").trim();
 }
 
 function blameOf(item) {
@@ -2568,7 +2876,7 @@ const BLAME_TAGS = { cell: "ячейка", place: "склад" };
 function topUserOf(report) {
   const rows = withLabels(report);
   if (!rows.length) return "";
-  const value = String(rows[0]?.[userColumnOf(report)] || "").trim();
+  const value = String(rows[0]?.[userColumnAt(report)] || "").trim();
   return value === "—" ? "" : value;
 }
 
@@ -2634,16 +2942,11 @@ function tallyBy(entries, keyOf) {
 }
 
 function fillStatsOptions() {
-  const fill = (id, values) => setPickerItems(id, values);
-
-  const cells = tallyBy(
-    statsIndex.filter((entry) => entry.blame.kind === "cell"),
-    (entry) => entry.blame.value
-  ).map(([value]) => value);
-  const places = tallyBy(
-    statsIndex.filter((entry) => entry.blame.kind === "place"),
-    (entry) => entry.blame.value
-  ).map(([value]) => value);
+  const blameValues = (kind) =>
+    tallyBy(
+      statsIndex.filter((entry) => entry.blame.kind === kind),
+      (entry) => entry.blame.value
+    ).map(([value]) => value);
 
   const buckets = [];
   const statuses = [];
@@ -2658,11 +2961,11 @@ function fillStatsOptions() {
   statuses.sort((a, b) => a.localeCompare(b, "ru"));
   ops.sort((a, b) => a.localeCompare(b, "ru"));
 
-  fill("stats-cell", cells);
-  fill("stats-place", places);
-  fill("stats-bucket", buckets);
-  fill("stats-status", statuses);
-  fill("stats-op", ops);
+  setPickerItems("stats-cell", blameValues("cell"));
+  setPickerItems("stats-place", blameValues("place"));
+  setPickerItems("stats-bucket", buckets);
+  setPickerItems("stats-status", statuses);
+  setPickerItems("stats-op", ops);
 }
 
 function syncStatsControls() {
@@ -2697,11 +3000,10 @@ function renderStatsKpis(shown) {
 
   host.innerHTML = "";
   for (const tile of tiles) {
-    const box = el("div", `kpi${tile.mod ? ` kpi--${tile.mod}` : ""}`);
+    const box = el("div", `kpi kpi--${tile.mod}`);
     box.appendChild(el("span", null, tile.label));
-    box.appendChild(el("b", null, tile.text != null ? tile.text : String(tile.value)));
-    if (tile.sub) box.appendChild(el("em", null, tile.sub));
-    markValue(box, tile.text != null ? tile.text : tile.value, tile.label);
+    box.appendChild(el("b", null, String(tile.value)));
+    markValue(box, tile.value, tile.label);
     host.appendChild(box);
   }
 }
@@ -3104,7 +3406,7 @@ function renderBarChart(host, rows, options) {
   const rowsBox = el("div", "bars__rows");
   rowsBox.style.setProperty("--bar-rows", String(top.length));
   markPickGroup(rowsBox, options.filterKey);
-  for (const [value, count] of top) {
+  top.forEach(([value, count], at) => {
     const active = options.active;
     const row = document.createElement("button");
     row.type = "button";
@@ -3119,7 +3421,7 @@ function renderBarChart(host, rows, options) {
       rows: [
         ["ID", count],
         ["доля среза", shareText(count, total)],
-        ["место", `${rows.findIndex(([name]) => name === value) + 1} из ${rows.length}`]
+        ["место", `${at + 1} из ${rows.length}`]
       ],
       foot: pickFoot(active, value)
     });
@@ -3135,7 +3437,7 @@ function renderBarChart(host, rows, options) {
     markValue(row, options.labelOf(value), null, count);
     row.append(label, track, num);
     rowsBox.appendChild(row);
-  }
+  });
   host.appendChild(rowsBox);
 
   const feet = [];
@@ -3168,7 +3470,7 @@ function renderColsChart(host, slice, dimKey, options) {
     if (bucket) bucket[classify(entry.item)] += 1;
   }
 
-  let totals = { hit: 0, miss: 0, issue: 0 };
+  const totals = { hit: 0, miss: 0, issue: 0 };
   for (const counts of split.values()) {
     totals.hit += counts.hit;
     totals.miss += counts.miss;
@@ -3195,17 +3497,18 @@ function renderColsChart(host, slice, dimKey, options) {
     return counts.hit + counts.miss + counts.issue;
   })) || 1;
 
+  const grand = totals.hit + totals.miss + totals.issue;
+  const active = options.active;
+
   for (const [value] of top) {
     const counts = split.get(value);
     const total = counts.hit + counts.miss + counts.issue;
-    const active = options.active;
     const col = document.createElement("button");
     col.type = "button";
     col.className = `col${chipState(active, value)}`;
     markPick(col, value);
     col.addEventListener("click", (event) => options.pick(value, addKey(event)));
 
-    const grand = totals.hit + totals.miss + totals.issue;
     const tipRows = [["всего ID", total]];
     if (counts.hit) tipRows.push(["склад есть", counts.hit]);
     if (counts.miss) tipRows.push(["склада нет", counts.miss]);
@@ -3259,16 +3562,15 @@ function renderLineChart(host, data, options) {
   const plot = el("div", "line__plot");
   plot.appendChild(el("span", "line__max", String(max)));
 
-  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-  svg.setAttribute("viewBox", "0 0 100 100");
-  svg.setAttribute("preserveAspectRatio", "none");
+  const svg = svgEl("svg", { viewBox: "0 0 100 100", preserveAspectRatio: "none" });
   const xOf = (index) => (days.length === 1 ? 50 : (index / (days.length - 1)) * 100);
   const yOf = (value) => 95 - (value / max) * 86;
 
   for (const line of series) {
-    const poly = document.createElementNS("http://www.w3.org/2000/svg", "polyline");
-    poly.setAttribute("points", line.points.map((value, index) => `${xOf(index)},${yOf(value)}`).join(" "));
-    poly.setAttribute("class", `line__path${chipState(options.active, line.name)}`);
+    const poly = svgEl("polyline", {
+      points: line.points.map((value, index) => `${xOf(index)},${yOf(value)}`).join(" "),
+      class: `line__path${chipState(options.active, line.name)}`
+    });
     poly.style.stroke = line.color;
     svg.appendChild(poly);
   }
@@ -3335,9 +3637,7 @@ function renderDonutChart(host, rows, options) {
 
   const total = segments.reduce((sum, seg) => sum + seg.count, 0) || 1;
   const box = el("div", "donut");
-  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-  svg.setAttribute("viewBox", "0 0 120 120");
-  svg.setAttribute("class", "donut__ring");
+  const svg = svgEl("svg", { viewBox: "0 0 120 120", class: "donut__ring" });
   markPickGroup(svg, options.filterKey);
 
   const R = 44;
@@ -3346,15 +3646,17 @@ function renderDonutChart(host, rows, options) {
   let offset = 0;
   for (const seg of segments) {
     const share = (seg.count / total) * LEN;
-    const circle = document.createElementNS("http://www.w3.org/2000/svg", "circle");
-    circle.setAttribute("cx", "60");
-    circle.setAttribute("cy", "60");
-    circle.setAttribute("r", String(R));
-    circle.setAttribute("class", `donut__seg${seg.pickable ? chipState(options.active, seg.name) : ""}`);
+    const dash = Math.max(0.5, share - GAP);
+    const circle = svgEl("circle", {
+      cx: "60",
+      cy: "60",
+      r: R,
+      class: `donut__seg${seg.pickable ? chipState(options.active, seg.name) : ""}`,
+      "stroke-dasharray": `${dash} ${LEN - dash}`,
+      "stroke-dashoffset": -offset,
+      transform: "rotate(-90 60 60)"
+    });
     circle.style.stroke = seg.color;
-    circle.setAttribute("stroke-dasharray", `${Math.max(0.5, share - GAP)} ${LEN - Math.max(0.5, share - GAP)}`);
-    circle.setAttribute("stroke-dashoffset", String(-offset));
-    circle.setAttribute("transform", "rotate(-90 60 60)");
     bindVizTip(circle, {
       title: seg.label,
       color: seg.color,
@@ -3372,16 +3674,10 @@ function renderDonutChart(host, rows, options) {
     offset += share;
   }
 
-  const centerValue = document.createElementNS("http://www.w3.org/2000/svg", "text");
-  centerValue.setAttribute("x", "60");
-  centerValue.setAttribute("y", "58");
-  centerValue.setAttribute("class", "donut__total");
+  const centerValue = svgEl("text", { x: "60", y: "58", class: "donut__total" });
   centerValue.textContent = String(total);
   svg.appendChild(centerValue);
-  const centerLabel = document.createElementNS("http://www.w3.org/2000/svg", "text");
-  centerLabel.setAttribute("x", "60");
-  centerLabel.setAttribute("y", "74");
-  centerLabel.setAttribute("class", "donut__label");
+  const centerLabel = svgEl("text", { x: "60", y: "74", class: "donut__label" });
   centerLabel.textContent = "ID";
   svg.appendChild(centerLabel);
   box.appendChild(svg);
@@ -3407,6 +3703,19 @@ function renderDonutChart(host, rows, options) {
   host.appendChild(box);
 }
 
+function optionSelect(value, entries, onChange) {
+  const select = document.createElement("select");
+  for (const [key, title] of entries) {
+    const option = document.createElement("option");
+    option.value = key;
+    option.textContent = title;
+    select.appendChild(option);
+  }
+  select.value = value;
+  select.addEventListener("change", () => onChange(select.value));
+  return select;
+}
+
 function panelTitle(value, entries, onChange) {
   const box = el("div", "ptitle");
   const button = el("button", "ptitle__btn");
@@ -3414,31 +3723,11 @@ function panelTitle(value, entries, onChange) {
   button.title = "Выбрать, что показывать";
   const label = entries.find(([key]) => key === value)?.[1] || value;
   button.appendChild(el("h3", null, label));
-  const caret = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-  caret.setAttribute("viewBox", "0 0 12 12");
-  caret.setAttribute("class", "ptitle__caret");
-  caret.setAttribute("aria-hidden", "true");
-  const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
-  path.setAttribute("d", "M2.5 4.5 6 8l3.5-3.5");
-  path.setAttribute("fill", "none");
-  path.setAttribute("stroke", "currentColor");
-  path.setAttribute("stroke-width", "1.6");
-  path.setAttribute("stroke-linecap", "round");
-  path.setAttribute("stroke-linejoin", "round");
-  caret.appendChild(path);
-  button.appendChild(caret);
+  button.appendChild(caretIcon("ptitle__caret"));
 
-  const select = document.createElement("select");
+  const select = optionSelect(value, entries, onChange);
   select.className = "ptitle__select";
   select.setAttribute("aria-label", "Что показывать");
-  for (const [key, title] of entries) {
-    const option = document.createElement("option");
-    option.value = key;
-    option.textContent = title;
-    select.appendChild(option);
-  }
-  select.value = value;
-  select.addEventListener("change", () => onChange(select.value));
 
   box.append(button, select);
   return box;
@@ -3446,16 +3735,7 @@ function panelTitle(value, entries, onChange) {
 
 function panelSelect(value, entries, onChange) {
   const pick = el("label", "pick pick--panel");
-  const select = document.createElement("select");
-  for (const [key, title] of entries) {
-    const option = document.createElement("option");
-    option.value = key;
-    option.textContent = title;
-    select.appendChild(option);
-  }
-  select.value = value;
-  select.addEventListener("change", () => onChange(select.value));
-  pick.appendChild(select);
+  pick.appendChild(optionSelect(value, entries, onChange));
   return pick;
 }
 
@@ -3481,8 +3761,6 @@ function renderStatsPanel(panel, index) {
   const dim = STATS_DIMS[panel.dim];
   const section = el("section", "panel glass spanel");
   section.dataset.at = String(index);
-  section.dataset.dim = panel.dim;
-  section.dataset.viz = panel.viz;
 
   const head = el("div", "spanel__head");
   head.appendChild(
@@ -3518,9 +3796,8 @@ function renderStatsPanel(panel, index) {
   const chart = el("div", panel.viz === "bars" ? "bars" : "pchart");
   section.appendChild(chart);
 
-  const slice = statsIndex.filter(
-    (entry) => passesStats(entry, new Set([dim.filter])) && dim.of(entry)
-  );
+  const skip = new Set([dim.filter]);
+  const slice = statsIndex.filter((entry) => passesStats(entry, skip) && dim.of(entry));
   const active = filterList(dim.filter);
   const pick = (value, add) => toggleStatsFilter(dim.filter, value, add);
   const labelOf = dimLabelOf(panel.dim);
@@ -3575,8 +3852,7 @@ function renderStatsPanel(panel, index) {
   const missing =
     panel.dim === "cell" || panel.dim === "place"
       ? statsIndex.filter(
-          (entry) =>
-            passesStats(entry, new Set([dim.filter])) && entry.blame.kind === panel.dim && !entry.blame.value
+          (entry) => passesStats(entry, skip) && entry.blame.kind === panel.dim && !entry.blame.value
         ).length
       : 0;
   renderBarChart(chart, dimRows(panel.dim, slice), {
@@ -4022,15 +4298,18 @@ function statsCopyItems(target) {
   const cell = target.closest("#stats-rows td");
   const cols = visibleStatsCols();
 
-  if (head?.dataset.sort) {
-    const key = head.dataset.sort;
+  const columnItem = (key) => {
     const rows = statsRowsForExport();
-    items.push({
+    return {
       label: "Копировать столбец",
       hint: `${rows.length} ${plural(rows.length, ["значение", "значения", "значений"])}`,
       text: rows.map((entry) => columnText(key, entry)).join("\n"),
       said: `Столбец «${STATS_COLUMNS[key].title}» скопирован`
-    });
+    };
+  };
+
+  if (head?.dataset.sort) {
+    items.push(columnItem(head.dataset.sort));
     return items;
   }
 
@@ -4053,15 +4332,7 @@ function statsCopyItems(target) {
         said: "Строка скопирована"
       });
     }
-    if (key) {
-      const rows = statsRowsForExport();
-      items.push({
-        label: "Копировать столбец",
-        hint: `${rows.length} ${plural(rows.length, ["значение", "значения", "значений"])}`,
-        text: rows.map((one) => columnText(key, one)).join("\n"),
-        said: `Столбец «${title}» скопирован`
-      });
-    }
+    if (key) items.push(columnItem(key));
     return items;
   }
 

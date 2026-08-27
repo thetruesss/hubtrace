@@ -12,7 +12,6 @@ const MODES = {
   turbo: {
     label: "Турбо",
     threads: 8,
-    api: true,
     retryPartial: 0,
     retryFail: 1,
     navTimeoutMs: 20000,
@@ -23,7 +22,6 @@ const MODES = {
   balance: {
     label: "Баланс",
     threads: 5,
-    api: true,
     retryPartial: 1,
     retryFail: 1,
     navTimeoutMs: 28000,
@@ -34,7 +32,6 @@ const MODES = {
   deep: {
     label: "Глубокий",
     threads: 3,
-    api: true,
     retryPartial: 3,
     retryFail: 2,
     navTimeoutMs: 40000,
@@ -110,9 +107,10 @@ const state = {
   retryRound: 0,
   retryIndexes: new Set(),
   retryPending: new Set(),
-  apiNotReady: false,
 
   workers: new Map(),
+  spawning: new Set(),
+  spawnFails: 0,
   liveWorkers: 0,
   domInFlight: 0,
 
@@ -397,6 +395,10 @@ function stopScan() {
     return;
   }
   state.stopping = true;
+  if (state.paused) {
+    state.pausedMs += Date.now() - (state.pausedAt || Date.now());
+    state.pausedAt = 0;
+  }
   state.paused = false;
   releaseGate();
   releaseStop();
@@ -513,15 +515,26 @@ function activateTab(tabId) {
   });
 }
 
+const SPAWN_FAIL_LIMIT = 10;
+
 async function spawnWorker(id) {
-  if (state.workers.has(id)) return;
+  if (state.workers.has(id) || state.spawning.has(id)) return;
+  state.spawning.add(id);
   state.liveWorkers += 1;
   try {
     await spawnWorkerInner(id);
+    state.spawnFails = 0;
   } catch (error) {
     state.liveWorkers -= 1;
+    state.spawnFails += 1;
     notice("error", `Не удалось поднять вкладку: ${String(error?.message || error)}`);
+    if (state.spawnFails >= SPAWN_FAIL_LIMIT) {
+      notice("error", "Рабочее окно не открывается, останавливаю прогон.");
+      stopScan();
+    }
     maybeFinalize();
+  } finally {
+    state.spawning.delete(id);
   }
 }
 
@@ -563,7 +576,8 @@ async function spawnWorkerInner(id) {
     phase: "idle",
     via: "",
     hubReady: false,
-    retire: false
+    retire: false,
+    apiNotReady: false
   };
   state.workers.set(id, worker);
   await updateTab(tab.id, { autoDiscardable: false });
@@ -572,7 +586,7 @@ async function spawnWorkerInner(id) {
 }
 
 function retireWorker(worker) {
-  if (!state.workers.has(worker.id)) return;
+  if (state.workers.get(worker.id) !== worker) return;
   state.workers.delete(worker.id);
   if (worker.tabId != null) {
     pendingByTab.delete(worker.tabId);
@@ -745,7 +759,7 @@ async function apiScan(worker, posting) {
     return null;
   }
   setPhase(worker, "api", posting, "api");
-  state.apiNotReady = false;
+  worker.apiNotReady = false;
   const reply = await Promise.race([
     sendTab(worker.tabId, {
       action: "ht:apiScan",
@@ -769,7 +783,7 @@ async function apiScan(worker, posting) {
       broadcastHints();
     }
     if (reply?.notReady) {
-      state.apiNotReady = true;
+      worker.apiNotReady = true;
       return null;
     }
     if (reply?.auth) {
@@ -929,7 +943,7 @@ function reviveNativeApi() {
 }
 
 function apiAllowed(worker) {
-  if (!state.useApi || !cfg().api || !worker.hubReady) return false;
+  if (!state.useApi || !worker.hubReady) return false;
   reviveNativeApi();
   if (!state.nativeApi && !state.recipe) return false;
 
@@ -1000,13 +1014,17 @@ const API_AUTH_STREAK_LIMIT = 6;
 
 const NATIVE_RECOVER_MS = 180000;
 
+function fresherRecipe(next, current) {
+  if (!current) return true;
+  const score = Number(next?.score) || 0;
+  const rival = Number(current.score) || 0;
+  if (score > rival) return true;
+  return score >= rival && (Number(next?.capturedAt) || 0) > (Number(current.capturedAt) || 0);
+}
+
 function acceptRecipe(next) {
-  if (!state.recipe) return true;
   if (state.recipeStale) return true;
-  const score = Number(next.score) || 0;
-  const current = Number(state.recipe.score) || 0;
-  if (score > current) return true;
-  return score >= current && (Number(next.capturedAt) || 0) > (Number(state.recipe.capturedAt) || 0);
+  return fresherRecipe(next, state.recipe);
 }
 
 function markRecipeStale(status) {
@@ -1014,6 +1032,26 @@ function markRecipeStale(status) {
   state.recipeStale = true;
   state.recipeStaleAt = Date.now();
   notice("api", `Токен устарел (ответ ${status || 401}). Обновляю его загрузкой страницы.`);
+  emitState(true);
+}
+
+function noteApiMiss(blocked) {
+  if (state.recipeStale) {
+    if (state.apiAuthStreak >= API_AUTH_STREAK_LIMIT) {
+      blockApi(`Токен не обновляется: ${state.apiLastReason || "ответ 401"}.`, "unavailable");
+    }
+    return;
+  }
+  state.apiFailStreak += 1;
+  if (state.apiFailStreak >= API_FAIL_LIMIT) blockApi(blocked, "unavailable");
+}
+
+function trustApi(note) {
+  state.apiState = "trusted";
+  state.apiRetries = 0;
+  state.apiBlockKind = "";
+  retuneThreads();
+  notice("api", note);
   emitState(true);
 }
 
@@ -1072,16 +1110,7 @@ const API_INCONCLUSIVE_LIMIT = 3;
 function calibrate(api, dom, index) {
   state.apiRecheck = false;
   if (!api) {
-    if (state.recipeStale) {
-      if (state.apiAuthStreak >= API_AUTH_STREAK_LIMIT) {
-        blockApi(`Токен не обновляется: ${state.apiLastReason || "ответ 401"}.`, "unavailable");
-      }
-      return;
-    }
-    state.apiFailStreak += 1;
-    if (state.apiFailStreak >= API_FAIL_LIMIT) {
-      blockApi(`Быстрый путь недоступен: ${state.apiLastReason || "нет ответа"}. Работаю через DOM.`, "unavailable");
-    }
+    noteApiMiss(`Быстрый путь недоступен: ${state.apiLastReason || "нет ответа"}. Работаю через DOM.`);
     return;
   }
 
@@ -1095,15 +1124,7 @@ function calibrate(api, dom, index) {
       state.apiState !== "trusted" &&
       api.status === "complete"
     ) {
-      state.apiState = "trusted";
-      state.apiRetries = 0;
-      state.apiBlockKind = "";
-      retuneThreads();
-      notice(
-        "api",
-        "Обход DOM не дочитывает список, сверять не с чем. Доверяю быстрому пути: он берёт итог из ответа сервера."
-      );
-      emitState(true);
+      trustApi("Обход DOM не дочитывает список, сверять не с чем. Доверяю быстрому пути: он берёт итог из ответа сервера.");
     }
     return;
   }
@@ -1116,12 +1137,7 @@ function calibrate(api, dom, index) {
     state.apiChecks += 1;
     if (state.apiState === "blocked") return;
     if (state.apiState !== "trusted") {
-      state.apiState = "trusted";
-      state.apiRetries = 0;
-      state.apiBlockKind = "";
-      retuneThreads();
-      notice("api", "Быстрый путь включён: история читается напрямую.");
-      emitState(true);
+      trustApi("Быстрый путь включён: история читается напрямую.");
     }
     return;
   }
@@ -1168,7 +1184,7 @@ async function primeTab(worker, posting) {
 }
 
 async function retryBoth(worker, posting, index) {
-  if (!worker.hubReady && state.useApi && cfg().api) await primeTab(worker, posting);
+  if (!worker.hubReady && state.useApi) await primeTab(worker, posting);
 
   const api = apiAllowed(worker) ? await apiScan(worker, posting) : null;
   if (api) {
@@ -1185,14 +1201,14 @@ async function retryBoth(worker, posting, index) {
 }
 
 async function processOne(worker, posting, index) {
-  if (!worker.hubReady && state.useApi && cfg().api) await primeTab(worker, posting);
+  if (!worker.hubReady && state.useApi) await primeTab(worker, posting);
 
   if (state.retryIndexes.has(index)) return retryBoth(worker, posting, index);
 
   if (apiAllowed(worker)) {
     if (state.apiState === "trusted" && !spotCheckDue() && !lessonDue()) {
       const api = await apiScan(worker, posting);
-      if (!api && state.apiNotReady) return domScanWithRetry(worker, posting);
+      if (!api && worker.apiNotReady) return domScanWithRetry(worker, posting);
       if (api) {
         state.apiFailStreak = 0;
         state.apiSinceCheck += 1;
@@ -1200,16 +1216,7 @@ async function processOne(worker, posting, index) {
         watchDigest(api);
         return api;
       }
-      if (state.recipeStale) {
-        if (state.apiAuthStreak >= API_AUTH_STREAK_LIMIT) {
-          blockApi(`Токен не обновляется: ${state.apiLastReason || "ответ 401"}.`, "unavailable");
-        }
-      } else {
-        state.apiFailStreak += 1;
-        if (state.apiFailStreak >= API_FAIL_LIMIT) {
-          blockApi(`Быстрый путь перестал отвечать: ${state.apiLastReason || "нет ответа"}.`, "unavailable");
-        }
-      }
+      noteApiMiss(`Быстрый путь перестал отвечать: ${state.apiLastReason || "нет ответа"}.`);
     } else {
       const lesson = lessonDue();
       if (lesson) {
@@ -1560,8 +1567,8 @@ async function runScan(payload, postings, warehouse, cutoff, cutoffText) {
   state.stopping = false;
   state.jobId = payload?.jobId || `job-${Date.now()}`;
   state.warehouse = warehouse;
-  state.cutoff = Number(cutoff) || 0;
-  state.cutoffText = String(cutoffText || "");
+  state.cutoff = cutoff;
+  state.cutoffText = cutoffText;
   state.postings = postings;
   state.results = new Array(postings.length).fill(null);
   state.cursor = 0;
@@ -1585,7 +1592,6 @@ async function runScan(payload, postings, warehouse, cutoff, cutoffText) {
   state.lessonTries = 0;
   state.lessonBusy = false;
   state.auditTypes = null;
-  state.apiNotReady = false;
   state.retryRound = 0;
   state.retryIndexes = new Set();
   state.retryPending = new Set();
@@ -1605,6 +1611,8 @@ async function runScan(payload, postings, warehouse, cutoff, cutoffText) {
   state.recipeStale = false;
   state.recipeStaleAt = 0;
   state.domInFlight = 0;
+  state.spawning = new Set();
+  state.spawnFails = 0;
   state.anchorTabId = null;
   state.workerTabIds = new Set();
   state.startedAt = Date.now();
@@ -1655,9 +1663,6 @@ async function applyLiveSettings(raw) {
   if (raw?.mode && MODES[raw.mode] && raw.mode !== state.mode) {
     state.mode = raw.mode;
     if (raw.threads == null) state.threads = MODES[raw.mode].threads;
-    if (!MODES[raw.mode].api) {
-      state.apiSinceCheck = 0;
-    }
   }
   if (raw?.threads != null) {
     state.threads = Math.max(1, Math.min(MAX_THREADS, Number(raw.threads) || state.threads));
@@ -1789,13 +1794,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   if (action === "ht:cardRecipe") {
     const next = message.recipe;
-    const current = state.cardRecipe;
-    const score = Number(next?.score) || 0;
-    const fresher =
-      !current ||
-      score > (Number(current.score) || 0) ||
-      (score >= (Number(current.score) || 0) && (Number(next.capturedAt) || 0) > (Number(current.capturedAt) || 0));
-    if (next?.itemId && fresher) {
+    if (next?.itemId && fresherRecipe(next, state.cardRecipe)) {
       state.cardRecipe = next;
       for (const worker of state.workers.values()) {
         if (worker.tabId != null) void sendTab(worker.tabId, { action: "ht:setCardRecipe", recipe: next });

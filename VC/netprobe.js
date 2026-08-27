@@ -169,22 +169,26 @@
     return score;
   }
 
-  function considerCard(request, responseText) {
-    const score = scoreCard(request, responseText);
-    if (score <= 0 || score <= probe.cardScore) return;
-    if (!carriesId(request.url, request.body, itemIdFromHref(location.href))) return;
-
-    const recipe = {
-      id: `c${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`,
+  function recipeFrom(prefix, request, itemId, score) {
+    return {
+      id: `${prefix}${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`,
       url: absolute(request.url),
       method: String(request.method || "GET").toUpperCase(),
       headers: cleanHeaders(request.headers),
       body: typeof request.body === "string" ? request.body : null,
-      itemId: itemIdFromHref(location.href),
+      itemId,
       score,
       capturedAt: Date.now()
     };
-    if (!recipe.itemId) return;
+  }
+
+  function considerCard(request, responseText) {
+    const score = scoreCard(request, responseText);
+    if (score <= 0 || score <= probe.cardScore) return;
+    const itemId = itemIdFromHref(location.href);
+    if (!carriesId(request.url, request.body, itemId)) return;
+
+    const recipe = recipeFrom("c", request, itemId, score);
 
     probe.card = recipe;
     probe.cardScore = score;
@@ -249,17 +253,8 @@
 
     const itemId = itemIdFromHref(location.href);
     if (!carriesId(request.url, request.body, itemId)) return;
-    const recipe = {
-      id: `r${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`,
-      url: absolute(request.url),
-      method: String(request.method || "GET").toUpperCase(),
-      headers: cleanHeaders(request.headers),
-      body: typeof request.body === "string" ? request.body : null,
-      itemId,
-      score,
-      sampleLength: responseText.length,
-      capturedAt: Date.now()
-    };
+    const recipe = recipeFrom("r", request, itemId, score);
+    recipe.sampleLength = responseText.length;
 
     probe.recipe = recipe;
     probe.score = score;
@@ -291,7 +286,11 @@
       }
 
       const promise = originalFetch(input, init);
-      if (!request || !probe.capturing) return promise;
+      if (!request) return promise;
+      if (!probe.capturing) {
+        noteHints(request);
+        return promise;
+      }
 
       promise
         .then((response) => {
@@ -342,7 +341,7 @@
         const info = this[INFO];
         if (info) {
           if (typeof body === "string") info.body = body;
-          this.addEventListener("load", () => {
+          const onLoad = () => {
             try {
               if (this.status < 200 || this.status >= 300) return;
               if (this.responseType && this.responseType !== "text" && this.responseType !== "json") return;
@@ -350,7 +349,8 @@
                 this.responseType === "json" ? JSON.stringify(this.response) : String(this.responseText || "");
               consider(info, text);
             } catch {}
-          });
+          };
+          this.addEventListener("load", onLoad, { once: true });
         }
       } catch {}
       return protoSend.apply(this, arguments);
@@ -361,7 +361,19 @@
     if (event.source !== window) return;
     if (event.origin && event.origin !== ORIGIN) return;
     const data = event.data;
-    if (!data || data.channel !== CHANNEL || data.type !== "replay") return;
+    if (!data || data.channel !== CHANNEL) return;
+
+    if (data.type === "askRecipe") {
+      if (probe.recipe) post({ type: "recipe", recipe: probe.recipe });
+      if (probe.card) post({ type: "cardRecipe", recipe: probe.card });
+      readBuildVars();
+      if (probe.appVersion || probe.placeId) {
+        post({ type: "hint", appVersion: probe.appVersion, placeId: probe.placeId });
+      }
+      return;
+    }
+
+    if (data.type !== "replay") return;
 
     const { ticket, url, method, headers, body, timeoutMs } = data;
     const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
@@ -398,18 +410,6 @@
         clearTimeout(timer);
         post({ type: "replayResult", ticket, ok: false, status: 0, error: String(error?.message || error) });
       });
-  });
-
-  window.addEventListener("message", (event) => {
-    if (event.source !== window) return;
-    if (event.origin && event.origin !== ORIGIN) return;
-    if (event.data?.channel !== CHANNEL || event.data?.type !== "askRecipe") return;
-    if (probe.recipe) post({ type: "recipe", recipe: probe.recipe });
-    if (probe.card) post({ type: "cardRecipe", recipe: probe.card });
-    readBuildVars();
-    if (probe.appVersion || probe.placeId) {
-      post({ type: "hint", appVersion: probe.appVersion, placeId: probe.placeId });
-    }
   });
 
   post({ type: "probeReady" });

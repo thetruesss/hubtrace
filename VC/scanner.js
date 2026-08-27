@@ -103,19 +103,19 @@
     }
   }
 
+  function beatsRecipe(next, current, currentScore) {
+    const score = Number(next.score) || 0;
+    if (score > currentScore) return true;
+    return score >= currentScore && (Number(next.capturedAt) || 0) > (Number(current?.capturedAt) || 0);
+  }
+
   function adoptRecipe(next, share) {
     if (!next || !next.url || !next.itemId) return;
     if (!carriesId(next)) return;
-    const score = Number(next.score) || 0;
-    const captured = Number(next.capturedAt) || 0;
-    const currentCaptured = Number(recipe?.capturedAt) || 0;
-
-    const better = score > recipeScore;
-    const fresher = score >= recipeScore && captured > currentCaptured;
-    if (!better && !fresher) return;
+    if (!beatsRecipe(next, recipe, recipeScore)) return;
 
     recipe = next;
-    recipeScore = score;
+    recipeScore = Number(next.score) || 0;
     rememberHints(next);
     if (share) void toBackground({ action: "ht:recipe", recipe: next });
   }
@@ -123,12 +123,10 @@
   function adoptCardRecipe(next, share) {
     if (!next || !next.url || !next.itemId) return;
     if (!carriesId(next)) return;
-    const score = Number(next.score) || 0;
-    const captured = Number(next.capturedAt) || 0;
-    const currentCaptured = Number(cardRecipe?.capturedAt) || 0;
-    if (!(score > cardScore || (score >= cardScore && captured > currentCaptured))) return;
+    if (!beatsRecipe(next, cardRecipe, cardScore)) return;
+
     cardRecipe = next;
-    cardScore = score;
+    cardScore = Number(next.score) || 0;
     rememberHints(next);
     if (share) void toBackground({ action: "ht:cardRecipe", recipe: next });
   }
@@ -168,7 +166,6 @@
     return out;
   }
 
-  const MSK_SHIFT_MS = 3 * 3600000;
   const STAMP_RE = /(\d{2})\.(\d{2})\.(\d{4})[,\s]+(\d{2}):(\d{2})(?::(\d{2}))?/;
 
   let cutoffAt = 0;
@@ -178,18 +175,18 @@
     cutoffAt = Number.isFinite(at) && at > 0 ? at : 0;
   }
 
-  function mskStamp(text) {
+  function shownStamp(text) {
     const parts = String(text || "").match(STAMP_RE);
     if (!parts) return null;
-    const at = Date.UTC(
+    const at = new Date(
       Number(parts[3]),
       Number(parts[2]) - 1,
       Number(parts[1]),
       Number(parts[4]),
       Number(parts[5]),
       Number(parts[6] || 0)
-    );
-    return Number.isFinite(at) ? at - MSK_SHIFT_MS : null;
+    ).getTime();
+    return Number.isFinite(at) ? at : null;
   }
 
   function underCutoff(stamp) {
@@ -200,7 +197,7 @@
   function stampOf(value) {
     const text = String(value || "").trim();
     if (!text) return null;
-    const shown = mskStamp(text);
+    const shown = shownStamp(text);
     if (shown != null) return shown;
     const at = Date.parse(text);
     return Number.isFinite(at) ? at : null;
@@ -554,7 +551,6 @@
     try {
       if (!hubClock) {
         hubClock = new Intl.DateTimeFormat("ru-RU", {
-          timeZone: "Europe/Moscow",
           year: "numeric",
           month: "2-digit",
           day: "2-digit",
@@ -864,22 +860,34 @@
 
   const CARD_KEYS = ["postingName", "stateName", "postingNumber"];
 
-  function findPostingInfo(json) {
+  function walkJson(json, visit) {
     const queue = [{ node: json, depth: 0 }];
-    let loose = null;
     while (queue.length) {
       const { node, depth } = queue.shift();
       if (!node || typeof node !== "object" || depth > 6) continue;
+      if (visit(node)) return;
       if (Array.isArray(node)) {
         for (const entry of node.slice(0, 40)) queue.push({ node: entry, depth: depth + 1 });
         continue;
       }
-      const own = CARD_KEYS.filter((key) => node[key] != null && node[key] !== "");
-      if (own.length >= 2) return node;
-      if (own.length === 1 && !loose) loose = node;
       for (const key of Object.keys(node)) queue.push({ node: node[key], depth: depth + 1 });
     }
-    return loose;
+  }
+
+  function findPostingInfo(json) {
+    let found = null;
+    let loose = null;
+    walkJson(json, (node) => {
+      if (Array.isArray(node)) return false;
+      const own = CARD_KEYS.filter((key) => node[key] != null && node[key] !== "");
+      if (own.length >= 2) {
+        found = node;
+        return true;
+      }
+      if (own.length === 1 && !loose) loose = node;
+      return false;
+    });
+    return found || loose;
   }
 
   function cardFrom(info) {
@@ -1262,21 +1270,15 @@
   function findRows(json) {
     let best = null;
     let bestLen = -1;
-    const queue = [{ node: json, depth: 0 }];
-    while (queue.length) {
-      const { node, depth } = queue.shift();
-      if (!node || typeof node !== "object" || depth > 6) continue;
-      if (Array.isArray(node)) {
-        const objects = node.filter((entry) => entry && typeof entry === "object").length;
-        if (node.length && objects >= node.length / 2 && node.length > bestLen) {
-          best = node;
-          bestLen = node.length;
-        }
-        for (const entry of node.slice(0, 40)) queue.push({ node: entry, depth: depth + 1 });
-        continue;
+    walkJson(json, (node) => {
+      if (!Array.isArray(node)) return false;
+      const objects = node.filter((entry) => entry && typeof entry === "object").length;
+      if (node.length && objects >= node.length / 2 && node.length > bestLen) {
+        best = node;
+        bestLen = node.length;
       }
-      for (const key of Object.keys(node)) queue.push({ node: node[key], depth: depth + 1 });
-    }
+      return false;
+    });
     return best;
   }
 
@@ -1395,7 +1397,7 @@
     if (!looksLikeAudit(rows)) return rows.filter(recordUnderCutoff);
     const kept = rows.filter((record) => auditTypes.includes(String(record?.changeType || "")));
     if (kept.length) typesConfirmed = true;
-    const list = kept.length || typesConfirmed ? kept : rows;
+    const list = typesConfirmed ? kept : rows;
     return list.filter(recordUnderCutoff);
   }
 
@@ -1526,6 +1528,7 @@
           found = true;
           const match = rows.find((row) => JSON.stringify(row).toLowerCase().includes(needle));
           sample = match ? JSON.stringify(match).slice(0, 280) : "";
+          if (match && !allRows.includes(match)) allRows.push(match);
         }
 
         loaded += rows.length;
@@ -1905,7 +1908,7 @@
     if (!list.length) return list;
     if (cutoffAt) {
       const titles = tableColumns();
-      list = list.filter((row) => underCutoff(mskStamp(rowDate(row, titles))));
+      list = list.filter((row) => underCutoff(shownStamp(rowDate(row, titles))));
     }
     const foreign = words || foreignWords();
     if (!foreign.size) return list;
@@ -2263,14 +2266,16 @@
       }, Math.min(6000, left()));
     }
 
-    reportPhase("rows", job.posting);
-    ensureScrollCss();
-    harvest();
-
-    if (!found && !cutoffAt && fallbackHistoryText().includes(needle)) {
+    const sweep = () => {
+      harvest();
+      if (found || cutoffAt || !fallbackHistoryText().includes(needle)) return;
       found = true;
       sample = needle;
-    }
+    };
+
+    reportPhase("rows", job.posting);
+    ensureScrollCss();
+    sweep();
 
     const needMore = () => total == null || seenAll.size < total;
     let drained = !needMore();
@@ -2313,12 +2318,7 @@
       if (!drained && !needMore()) drained = true;
     }
 
-    harvest();
-
-    if (!found && !cutoffAt && fallbackHistoryText().includes(needle)) {
-      found = true;
-      sample = needle;
-    }
+    sweep();
 
     const card = readItemCard();
     let api = emptyCard();
@@ -2343,15 +2343,10 @@
 
     const loaded = seen.size;
     const complete = found || (total != null ? seenAll.size >= total : drained);
-    const expected = domTrimmed
-      ? complete || found
-        ? loaded
-        : 0
-      : total != null
-        ? total
-        : drained || found
-          ? loaded
-          : 0;
+    let expected = 0;
+    if (domTrimmed) expected = complete ? loaded : 0;
+    else if (total != null) expected = total;
+    else if (complete) expected = loaded;
 
     if (abortFlag && !found && !complete) {
       return { ok: false, status: "paused", found, expected, loaded, via: "dom", report };
