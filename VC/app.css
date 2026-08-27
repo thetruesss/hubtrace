@@ -3011,18 +3011,27 @@ input[type="number"] {
 
 .kpi--delta::after { background: linear-gradient(90deg, var(--hit), var(--miss)); }
 
-.delta {
+.kpi--delta {
   display: flex;
   align-items: center;
-  gap: 9px;
-  margin-top: 3px;
+  gap: 10px;
+}
+
+.kpi--delta > span {
+  white-space: nowrap;
+}
+
+.delta__side {
+  display: grid;
+  gap: 3px;
   min-width: 0;
 }
 
 .delta__art {
   flex: 0 0 auto;
-  width: 58px;
-  height: 29px;
+  margin-left: auto;
+  width: 78px;
+  height: 39px;
 }
 
 .delta__rail,
