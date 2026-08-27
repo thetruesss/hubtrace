@@ -347,6 +347,8 @@ function setStep(name) {
 function classify(item) {
   if (item?.found) return "hit";
   if (item?.status === "partial") return "issue";
+  // записи есть, но ни одного перемещения — ответить «склада нет» тут нельзя
+  if (item?.status === "no_history") return "issue";
   if (["complete", "missing"].includes(item?.status)) return "miss";
   if (item?.ok) return "miss";
   return "issue";
@@ -2800,6 +2802,7 @@ function detailCard(item) {
   addFact("Корзинка", bucketOf(bucketDateOf(report), cutoffNow()));
   addFact("Когда", report.warehouseAt || topDateOf(report));
   addFact("Последняя ячейка", report.warehouseCell);
+  addFact("ЦМН", report.cmn);
   if (classify(item) !== "hit") addFact("Предыдущий склад", report.lastPlace || topPlaceOf(withLabels(report)));
   if (facts.childElementCount) card.appendChild(facts);
 
@@ -4352,6 +4355,15 @@ const STATS_COLUMNS = {
       td.textContent = entry.bucket || "—";
     }
   },
+  cmn: {
+    title: "ЦМН",
+    width: 26,
+    sort: (entry) => entry.item.report?.cmn || "",
+    text: (entry) => entry.item.report?.cmn || "",
+    cell: (entry, td) => {
+      td.textContent = entry.item.report?.cmn || "—";
+    }
+  },
   status: {
     title: "Статус",
     width: 26,
@@ -4391,7 +4403,7 @@ const STATS_COLUMNS = {
   }
 };
 
-const DEFAULT_STATS_COLS = ["id", "number", "verdict", "blame", "at", "bucket", "status", "op"];
+const DEFAULT_STATS_COLS = ["id", "number", "verdict", "blame", "cmn", "at", "bucket", "status", "op"];
 let statsCols = DEFAULT_STATS_COLS.slice();
 
 function persistStatsCols() {

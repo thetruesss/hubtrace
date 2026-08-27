@@ -275,7 +275,7 @@
     if (!Array.isArray(next) || !next.length) return false;
     const clean = next.map((value) => String(value || "")).filter(Boolean);
     if (!clean.length) return false;
-    if (!clean.some((code) => TRANSITION_TYPES.includes(code))) return false;
+    if (!clean.every((code) => TRANSITION_TYPES.includes(code))) return false;
     if (clean.join("|") === auditTypes.join("|")) return false;
     auditTypes = clean;
     return true;
@@ -893,9 +893,10 @@
     if (!info) return null;
     const out = {
       number: String(info.postingName || info.postingNumber || info.name || ""),
-      status: String(info.stateName || info.statusName || info.state || "")
+      status: String(info.stateName || info.statusName || info.state || ""),
+      cmn: String(info.destinationPlaceName || info.destinationPlace?.name || "")
     };
-    return out.number || out.status ? out : null;
+    return out.number || out.status || out.cmn ? out : null;
   }
 
   function readCard(response) {
@@ -908,8 +909,12 @@
   }
 
   function emptyCard() {
-    return { number: "", status: "" };
+    return { number: "", status: "", cmn: "" };
   }
+
+  // ЦМН из блока «Где находится». Ищем по имени поля, а не по виду значения:
+  // не найдём — столбец останется пустым, но не соврёт чужим складом
+
 
   function cardFilled(card) {
     return Boolean(card && (card.number || card.status));
@@ -990,6 +995,8 @@
     let loaded = 0;
     let total = null;
     let found = false;
+    let sawRow = false;
+    let sawMove = false;
     let sample = "";
     let digest = "";
     const head = [];
@@ -1058,6 +1065,8 @@
 
       const raw = Array.isArray(json.records) ? json.records : [];
       const records = keepTransitions(raw);
+      if (raw.length) sawRow = true;
+      if (records.length) sawMove = true;
       if (records.length !== raw.length) trimmed = true;
 
       if (cutoffAt) {
@@ -1109,12 +1118,14 @@
     report.lastPlace = lastPlace || loosePlace;
     const card = await collectCard(posting, deadline, null);
     report.number = card.number;
+    report.cmn = card.cmn;
     report.status = cutoffAt ? stateUnder || stateOver : card.status;
 
     return {
       ok: true,
       via: "api",
       found,
+      status: !found && sawRow && !sawMove ? "no_history" : "",
       expected: trimmed || total == null ? loaded : total,
       loaded,
       complete: trimmed || total == null || loaded >= total || found,
@@ -1391,13 +1402,22 @@
     return { columns: [], lastRows: [], warehouseAt, warehouseCell: "", lastPlace: "" };
   }
 
+  const MOVE_SLOTS = ["location", "container", "cell"];
+
+  function isMove(record) {
+    const changes = record?.stateChanges;
+    if (changes && typeof changes === "object") {
+      return MOVE_SLOTS.some((slot) => changes[slot] != null);
+    }
+    return auditTypes.includes(String(record?.changeType || ""));
+  }
+
   function keepTransitions(rows) {
     if (!Array.isArray(rows) || !rows.length) return rows || [];
     if (!looksLikeAudit(rows)) return rows.filter(recordUnderCutoff);
-    const kept = rows.filter((record) => auditTypes.includes(String(record?.changeType || "")));
-    // отбор по типам не должен обнулять историю: пустой список читается как
-    // «записей нет», и искомый склад теряется, хотя он в истории есть
-    return (kept.length ? kept : rows).filter(recordUnderCutoff);
+    // считаем только перемещения: пусто здесь — это ответ «перемещений нет»,
+    // а не повод взять записи об изменении свойств
+    return rows.filter(isMove).filter(recordUnderCutoff);
   }
 
   function reportFromRows(rows, needle) {
@@ -1461,6 +1481,8 @@
       let loaded = 0;
       let total = null;
       let found = false;
+      let sawRow = false;
+      let sawMove = false;
       let sample = "";
       let pageable = true;
       let failed = false;
@@ -1514,6 +1536,8 @@
         rejectStreak = 0;
 
         const rows = keepTransitions(raw);
+        if (raw.length) sawRow = true;
+        if (rows.length) sawMove = true;
         if (rows.length !== raw.length) filtered = true;
 
         if (page === 0) {
@@ -1548,12 +1572,14 @@
 
       const card = await collectCard(posting, deadline, firstJson);
       report.number = card.number;
+      report.cmn = card.cmn;
       report.status = cutoffAt ? "" : card.status;
 
       return {
         ok: true,
         via: "api",
         found,
+        status: !found && sawRow && !sawMove ? "no_history" : "",
         expected,
         loaded,
         complete: filtered || total == null ? true : loaded >= total || found,
@@ -1828,11 +1854,30 @@
     return out;
   }
 
+  // на странице ЦМН подписан прямо словом, поэтому ищем по подписи,
+  // а не по классам вёрстки
+  function readCmnFromPage() {
+    const nodes = document.querySelectorAll("span,div,b,strong,p,a");
+    for (let i = 0; i < nodes.length && i < 1200; i += 1) {
+      const label = nodes[i];
+      if (label.children.length || norm(label.textContent) !== "ЦМН") continue;
+      const box = label.parentElement;
+      if (!box) continue;
+      const text = norm(box.textContent).replace(/^ЦМН\s*/, "");
+      const name = text.split(/\s*ID\s+\d/)[0].trim();
+      if (name && name.length <= 80) return name;
+    }
+    return "";
+  }
+
   function readItemCard() {
     const exact = readItemCardExact();
-    if (exact.number && exact.status) return exact;
-    const guess = readItemCardByGuess();
-    return { number: exact.number || guess.number, status: exact.status || guess.status };
+    const guess = exact.number && exact.status ? exact : readItemCardByGuess();
+    return {
+      number: exact.number || guess.number,
+      status: exact.status || guess.status,
+      cmn: readCmnFromPage()
+    };
   }
 
   function tableColumns() {
@@ -2331,6 +2376,7 @@
     const tableRows = keepTransitionRows(rowNodes(), foreignWords(), typeColumn());
     const report = {
       number: card.number || api.number || "",
+      cmn: card.cmn || api.cmn || "",
       status: cutoffAt ? "" : card.status || api.status || "",
       columns: tableColumns(),
       lastRows: [...tableRows].slice(0, 3).map(rowCells),
