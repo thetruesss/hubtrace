@@ -1328,6 +1328,7 @@ const MAX_RETRY_ROUNDS = 3;
 function coverageOf(item) {
   if (!item) return 0;
   if (item.found) return 1;
+  if (item.ok && ["later", "no_history"].includes(item.status)) return 1;
   const expected = Number(item.expected) || 0;
   const loaded = Number(item.loaded) || 0;
   if (!expected) return loaded > 0 || (item.ok && item.status === "complete") ? 1 : 0;
