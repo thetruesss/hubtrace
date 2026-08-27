@@ -56,56 +56,6 @@
   const replayWaiters = new Map();
   let ticketSeq = 0;
 
-  // отладочная трасса: пишем только когда прогон запущен с отладкой,
-  // иначе всё это — пустые вызовы
-  let dbgOn = false;
-  let dbgTrace = [];
-  let journalCursor = 0;
-
-  function dbg(kind, data) {
-    if (!dbgOn) return;
-    try {
-      dbgTrace.push({ t: Date.now(), kind, ...data });
-      if (dbgTrace.length > 220) dbgTrace.shift();
-    } catch {}
-  }
-
-  function dbgStart(job) {
-    dbgOn = Boolean(job?.debug);
-    dbgTrace = [];
-    if (dbgOn) {
-      try {
-        window.postMessage({ channel: CHANNEL, type: "debugOn" }, ORIGIN);
-      } catch {}
-    }
-  }
-
-  function askJournal() {
-    if (!dbgOn) return Promise.resolve([]);
-    return new Promise((resolve) => {
-      const ticket = `j${++ticketSeq}`;
-      const timer = setTimeout(() => {
-        replayWaiters.delete(ticket);
-        resolve([]);
-      }, 700);
-      replayWaiters.set(ticket, (data) => {
-        clearTimeout(timer);
-        resolve(Array.isArray(data.entries) ? data.entries : []);
-      });
-      window.postMessage({ channel: CHANNEL, type: "askJournal", ticket, after: journalCursor }, ORIGIN);
-    });
-  }
-
-  async function dbgFinish() {
-    if (!dbgOn) return null;
-    const hub = await askJournal();
-    for (const entry of hub) {
-      if (entry.id > journalCursor) journalCursor = entry.id;
-      dbgTrace.push({ kind: "hub", ...entry });
-    }
-    return dbgTrace.slice(0, 260);
-  }
-
   window.addEventListener("message", (event) => {
     if (event.source !== window) return;
     if (event.origin && event.origin !== ORIGIN) return;
@@ -133,23 +83,13 @@
       if (changed) void toBackground(hintPayload());
       return;
     }
-    if (data.type === "replayResult" || data.type === "journal") {
+    if (data.type === "replayResult") {
       const waiter = replayWaiters.get(data.ticket);
       if (!waiter) return;
       replayWaiters.delete(data.ticket);
       waiter(data);
     }
   });
-
-  // отладка включается ещё до первого задания, чтобы журнал застал
-  // собственные запросы страницы при загрузке
-  try {
-    chrome.storage.local.get("hubTraceSettings", (data) => {
-      if (data?.hubTraceSettings?.debugMode === true) {
-        window.postMessage({ channel: CHANNEL, type: "debugOn" }, ORIGIN);
-      }
-    });
-  } catch {}
 
   function carriesId(recipe) {
     const id = String(recipe?.itemId || "");
@@ -922,6 +862,7 @@
   }
 
   function moveScanFlags(raw, kept, flags) {
+    flags.sawAnswer = true;
     if (!Array.isArray(raw) || !raw.length) return flags;
     flags.sawRow = true;
     if (!looksLikeAudit(raw)) return flags;
@@ -934,29 +875,12 @@
   // вердикты «нет истории» и «позже потолка» позволены только на знакомой
   // форме ответа — по чужой судить, были ли перемещения, нельзя
   function scanStatus(found, flags) {
-    if (found || !flags.sawAudit) return "";
-    return emptyReason(flags.sawRow, flags.sawMove, flags.sawUnder);
-  }
-
-  function typeHisto(rows) {
-    const out = {};
-    for (const row of rows || []) {
-      const key = String(row?.changeType || "?");
-      out[key] = (out[key] || 0) + 1;
-    }
-    return out;
-  }
-
-  function slotHisto(rows) {
-    const out = {};
-    for (const row of rows || []) {
-      const changes = row?.stateChanges;
-      if (!changes || typeof changes !== "object") continue;
-      for (const key of Object.keys(changes)) {
-        if (changes[key] != null) out[key] = (out[key] || 0) + 1;
-      }
-    }
-    return out;
+    if (found) return "";
+    if (flags.sawAudit) return emptyReason(flags.sawRow, flags.sawMove, flags.sawUnder);
+    // запрос просит только перемещения, распознанный ответ пуст —
+    // значит перемещений нет, а не «склада нет»
+    if (flags.sawAnswer && !flags.sawRow) return "no_history";
+    return "";
   }
 
   function topPlaceFrom(records) {
@@ -1153,7 +1077,7 @@
     let loaded = 0;
     let total = null;
     let found = false;
-    const flags = { sawRow: false, sawMove: false, sawAudit: false, sawUnder: false };
+    const flags = { sawRow: false, sawMove: false, sawAudit: false, sawUnder: false, sawAnswer: false };
     let sample = "";
     let digest = "";
     const head = [];
@@ -1230,21 +1154,6 @@
       if (records.length !== raw.length) trimmed = true;
       edge = edgeAboveCutoff(raw, edge);
       pushMarks(marks, records);
-      if (dbgOn) {
-        dbg("api-page", {
-          path: "native",
-          page,
-          size,
-          status: response.status,
-          chars: (response.text || "").length,
-          records: raw.length,
-          kept: records.length,
-          total,
-          types: typeHisto(raw),
-          slots: slotHisto(raw)
-        });
-      }
-
       if (cutoffAt) {
         for (const record of raw) {
           const change = record?.stateChanges?.status;
@@ -1297,19 +1206,6 @@
     const edgeWarehouse = edge?.warehouse ? edge.name : "";
     report.lastPlace = lastPlace || edgeWarehouse || loosePlace || edge?.name || "";
     const card = await collectCard(posting, deadline, null);
-    if (dbgOn) {
-      dbg("api-done", {
-        path: "native",
-        found,
-        loaded,
-        total,
-        trimmed,
-        flags: { ...flags },
-        edge: edge ? { at: edge.at, name: edge.name } : null,
-        lastPlace: report.lastPlace,
-        card
-      });
-    }
     report.number = card.number;
     report.cmn = card.cmn;
     report.status = cutoffAt ? stateUnder || stateOver : card.status;
@@ -1640,17 +1536,12 @@
 
   async function apiScan(job) {
     setCutoff(job.cutoff);
-    dbgStart(job);
     let nativeFail = null;
     if (!nativeOff()) {
       const native = await nativeScan(job);
       if (native.ok || native.auth) return native;
       if (native.missing) nativeOffAt = Date.now();
       nativeFail = native;
-      dbg("api-native-fail", {
-        reason: String(native.reason || "").slice(0, 300),
-        missing: Boolean(native.missing)
-      });
     }
 
     const nativeReport = nativeFail
@@ -1676,19 +1567,12 @@
     const deadline = Date.now() + Math.max(4000, Number(job.timeoutMs) || 20000);
     const sizeModes = [DEFAULT_PAGE_SIZE, null];
     let failure = "";
-    if (dbgOn && recipe) {
-      dbg("api-recipe", {
-        url: String(recipe.url || ""),
-        method: String(recipe.method || ""),
-        body: String(recipe.body || "").slice(0, 4000)
-      });
-    }
 
     for (const pageSize of sizeModes) {
       let loaded = 0;
       let total = null;
       let found = false;
-      const flags = { sawRow: false, sawMove: false, sawAudit: false, sawUnder: false };
+      const flags = { sawRow: false, sawMove: false, sawAudit: false, sawUnder: false, sawAnswer: false };
       let edge = null;
       let sample = "";
       let pageable = true;
@@ -1734,7 +1618,8 @@
           break;
         }
 
-        const raw = findRows(json);
+        // пустой records — это ответ «перемещений нет», а не сломанный список
+        const raw = Array.isArray(json.records) ? json.records : findRows(json);
         if (!raw) {
           failure = "в ответе не нашлось списка строк";
           failed = true;
@@ -1746,21 +1631,6 @@
         moveScanFlags(raw, rows, flags);
         if (rows.length !== raw.length) filtered = true;
         edge = edgeAboveCutoff(raw, edge);
-        if (dbgOn) {
-          dbg("api-page", {
-            path: "recipe",
-            page,
-            status: response.status,
-            chars: (response.text || "").length,
-            records: raw.length,
-            kept: rows.length,
-            total,
-            audit: looksLikeAudit(raw),
-            types: typeHisto(raw),
-            slots: slotHisto(raw)
-          });
-        }
-
         if (page === 0) {
           digest = digestOf(response.text);
           firstJson = json;
@@ -1794,19 +1664,6 @@
       if (!report.lastPlace && edge) report.lastPlace = edge.name;
 
       const card = await collectCard(posting, deadline, firstJson);
-      if (dbgOn) {
-        dbg("api-done", {
-          path: "recipe",
-          found,
-          loaded,
-          total,
-          filtered,
-          flags: { ...flags },
-          edge: edge ? { at: edge.at, name: edge.name } : null,
-          lastPlace: report.lastPlace,
-          card
-        });
-      }
       report.number = card.number;
       report.cmn = card.cmn;
       report.status = cutoffAt ? "" : card.status;
@@ -2151,8 +2008,12 @@
     return out;
   }
 
+  // подписи свойств из «Все», которые точно не перемещения: их видно
+  // в хабе, а выучить из ответов API больше неоткуда — он отфильтрован
+  const PROPERTY_WORDS = ["цмн", "тайм-слот", "статус", "статус предмета", "поток", "свойство", "уск"];
+
   function foreignWords() {
-    const words = new Set();
+    const words = new Set(PROPERTY_WORDS);
     const mine = new Set(auditTypes);
     const collect = (table) => {
       for (const code of Object.keys(table)) {
@@ -2565,6 +2426,7 @@
     let openedHistory = false;
     let onTransitions = false;
     let gridAt = 0;
+    let preClick = null;
 
     const ready = await waitFor(() => {
       const grid = historyReady();
@@ -2582,6 +2444,7 @@
       }
       if (own === "clicked") {
         clickedOwnAt = Date.now();
+        if (!preClick) preClick = { rows: rowNodes().length, counter: parseCounter() };
         return false;
       }
       if (!own && !openedHistory && pickTab(HISTORY_LABELS) === "clicked") {
@@ -2612,21 +2475,11 @@
     // чтобы следующие отправления открывались на «Перемещениях» сразу
     const tabParam = currentTabParam();
 
-    if (dbgOn) {
-      const labels = [];
-      for (const el of document.querySelectorAll(HUB.tab)) {
-        if (labels.length >= 12) break;
-        labels.push(`${textOf(el)}${tabIsActive(el) ? " *" : ""}`);
-      }
-      dbg("dom-tabs", { tab: tabParam, onTransitions, labels });
-    }
-
     // вкладку «Перемещения» открыть не вышло — значит перед нами «Все»,
     // и строить по ней отчёт нельзя: там свойства, а не перемещения.
     // Карточку предмета всё же забираем — номер, статус и ЦМН к ней не привязаны
     if (!onTransitions && pickTab(TRANSITION_LABELS, true) !== "active") {
       const offered = TRANSITION_LABELS.some((wanted) => findTabLabelled(wanted));
-      dbg("dom-guard", { offered, tab: tabParam });
       return {
         // вкладки нет вовсе — это ответ хаба, повторять нечего;
         // есть, но не открылась — сбой, пусть перепроверка попробует ещё
@@ -2639,6 +2492,15 @@
         tab: tabParam,
         report: await cardOnlyReport(job.posting, deadline)
       };
+    }
+
+    // сетка перерисовывается под вкладку не мгновенно: пока идёт её запрос,
+    // на экране висят строки «Все» — их читать нельзя
+    if (preClick) {
+      await waitFor(
+        () => rowNodes().length !== preClick.rows || parseCounter() !== preClick.counter,
+        Math.min(1500, left())
+      );
     }
 
     let total = parseCounter();
@@ -2745,19 +2607,6 @@
     }
     const words = foreignWords();
     const tableRows = keepTransitionRows(rowNodes(), words, typeColumn());
-    if (dbgOn) {
-      dbg("dom-done", {
-        found,
-        total,
-        loaded: seen.size,
-        rows: prevLength,
-        kept: tableRows.length,
-        trimmed: domTrimmed,
-        tab: tabParam,
-        card,
-        api
-      });
-    }
     const report = {
       lastPlace: tableRows.length ? "" : placeAboveCutoff(rowNodes(), words, typeColumn()),
       marks: domMarks(tableRows),
@@ -2783,10 +2632,15 @@
       return { ok: false, status: "paused", found, expected, loaded, via: "dom", report, tab: tabParam };
     }
 
+    // вкладка «Перемещения» дочитана и пуста — это «нет истории»,
+    // даже если в сетке ещё висят чужие строки со «Все»
+    const bare = !found && !tableRows.length;
     return {
       ok: complete,
       report,
-      status: complete ? (report.lastPlace && cutoffAt && !tableRows.length ? "later" : "complete") : "partial",
+      status: complete
+        ? (report.lastPlace && cutoffAt && bare ? "later" : bare ? "no_history" : "complete")
+        : "partial",
       via: "dom",
       found,
       expected,
@@ -2855,13 +2709,9 @@
   async function runDomJob(job) {
     abortFlag = false;
     setCutoff(job.cutoff);
-    dbgStart(job);
     try {
       const raw = await domScan(job);
-      const out = normalizeResult(raw);
-      const trace = await dbgFinish();
-      if (trace) out.debug = trace;
-      return out;
+      return normalizeResult(raw);
     } catch (error) {
       return {
         status: "exception",
@@ -2933,8 +2783,7 @@
     if (message.action === "ht:apiScan") {
       abortFlag = false;
       apiScan(message)
-        .then(async (raw) => {
-          const trace = await dbgFinish();
+        .then((raw) => {
           if (!raw?.ok) {
             sendResponse({
               ok: false,
@@ -2942,14 +2791,11 @@
               auth: Boolean(raw?.auth),
               nativeMissing: Boolean(raw?.nativeMissing),
               notReady: Boolean(raw?.notReady),
-              probe: raw?.probe || [],
-              debug: trace || undefined
+              probe: raw?.probe || []
             });
             return;
           }
-          const result = normalizeResult(raw);
-          if (trace) result.debug = trace;
-          sendResponse({ ok: true, result });
+          sendResponse({ ok: true, result: normalizeResult(raw) });
         })
         .catch((error) => sendResponse({ ok: false, reason: String(error?.message || error) }));
       return true;
