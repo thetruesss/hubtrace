@@ -2142,6 +2142,14 @@
     return Boolean(el.querySelector(HUB.tabActive));
   }
 
+  function currentTabParam() {
+    try {
+      return String(new URLSearchParams(location.search).get("tab") || "");
+    } catch (_err) {
+      return "";
+    }
+  }
+
   function pickTab(labels, lookOnly) {
     for (const wanted of labels) {
       const el = findTabLabelled(wanted);
@@ -2152,6 +2160,26 @@
       return "clicked";
     }
     return null;
+  }
+
+  async function cardOnlyReport(posting, deadline) {
+    const page = readItemCard();
+    let api = emptyCard();
+    if (!abortFlag) {
+      try {
+        api = await collectCard(posting, deadline, null);
+      } catch (_err) {
+        api = emptyCard();
+      }
+    }
+    return {
+      number: page.number || api.number || "",
+      cmn: page.cmn || api.cmn || "",
+      status: cutoffAt ? "" : page.status || api.status || "",
+      columns: [],
+      lastRows: [],
+      hits: []
+    };
   }
 
   async function domScan(job) {
@@ -2236,9 +2264,11 @@
 
     const TAB_SWITCH_MS = 4000;
     const TAB_LOOK_MS = 800;
+    const TAB_RECLICK_MS = 1200;
     let tabSettled = false;
-    let clickedOwn = false;
+    let clickedOwnAt = 0;
     let openedHistory = false;
+    let onTransitions = false;
     let gridAt = 0;
 
     const ready = await waitFor(() => {
@@ -2246,13 +2276,17 @@
       if (grid && !gridAt) gridAt = Date.now();
       if (tabSettled || !document.body) return grid;
 
-      const own = pickTab(TRANSITION_LABELS, clickedOwn);
+      // после клика ждём, но недолго: страница любит перерисовать вкладки
+      // и потерять наше нажатие, тогда жмём ещё раз
+      const settling = clickedOwnAt && Date.now() - clickedOwnAt < TAB_RECLICK_MS;
+      const own = pickTab(TRANSITION_LABELS, settling);
       if (own === "active") {
         tabSettled = true;
+        onTransitions = true;
         return grid;
       }
       if (own === "clicked") {
-        clickedOwn = true;
+        clickedOwnAt = Date.now();
         return false;
       }
       if (!own && !openedHistory && pickTab(HISTORY_LABELS) === "clicked") {
@@ -2268,7 +2302,35 @@
       if (detectAuth()) return { ok: false, status: "auth", found: false, expected: 0, loaded: 0 };
       if (detectMissing()) return { ok: false, status: "missing", found: false, expected: 0, loaded: 0 };
       if (abortFlag) return { ok: false, status: "paused", found: false, expected: 0, loaded: 0 };
-      return { ok: false, status: "no_history", found: false, expected: 0, loaded: 0 };
+      return {
+        ok: false,
+        status: "no_history",
+        found: false,
+        expected: 0,
+        loaded: 0,
+        via: "dom",
+        report: await cardOnlyReport(job.posting, deadline)
+      };
+    }
+
+    // хаб сам переписывает адрес под открытую вкладку — запоминаем,
+    // чтобы следующие отправления открывались на «Перемещениях» сразу
+    const tabParam = currentTabParam();
+
+    // вкладку «Перемещения» открыть не вышло — значит перед нами «Все»,
+    // и строить по ней отчёт нельзя: там свойства, а не перемещения.
+    // Карточку предмета всё же забираем — номер, статус и ЦМН к ней не привязаны
+    if (!onTransitions && pickTab(TRANSITION_LABELS, true) !== "active") {
+      return {
+        ok: false,
+        status: "no_history",
+        found: false,
+        expected: 0,
+        loaded: 0,
+        via: "dom",
+        tab: tabParam,
+        report: await cardOnlyReport(job.posting, deadline)
+      };
     }
 
     let total = parseCounter();
@@ -2394,7 +2456,7 @@
     else if (complete) expected = loaded;
 
     if (abortFlag && !found && !complete) {
-      return { ok: false, status: "paused", found, expected, loaded, via: "dom", report };
+      return { ok: false, status: "paused", found, expected, loaded, via: "dom", report, tab: tabParam };
     }
 
     return {
@@ -2405,7 +2467,8 @@
       found,
       expected,
       loaded,
-      sample
+      sample,
+      tab: tabParam
     };
   }
 
@@ -2415,6 +2478,7 @@
     return {
       codes: (Array.isArray(report.codes) ? report.codes : []).slice(0, 3).map((value) => String(value || "")),
       number: String(report.number || ""),
+      cmn: String(report.cmn || ""),
       status: String(report.status || ""),
       warehouseAt: String(report.warehouseAt || ""),
       warehouseCell: String(report.warehouseCell || ""),
@@ -2453,6 +2517,7 @@
       loaded: Number(raw.loaded) || 0,
       ok: Boolean(raw.ok),
       sample: raw.sample || "",
+      tab: String(raw.tab || ""),
       report: normalizeReport(raw.report)
     };
   }

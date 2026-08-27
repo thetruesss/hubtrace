@@ -103,6 +103,7 @@ const state = {
   lessonBusy: false,
   autoThreads: false,
   auditTypes: null,
+  historyTab: "",
   apiProbe: [],
   retryRound: 0,
   retryIndexes: new Set(),
@@ -648,7 +649,16 @@ const HISTORY_TAB = "transitionHistory";
 function buildHistoryUrl(posting) {
   const id = encodeURIComponent(cleanPosting(posting));
   const place = state.placeId ? `warehouse=${encodeURIComponent(state.placeId)}&` : "";
-  return `https://hub.o3t.ru/management/stock/item/Lozon:${id}?${place}tab=${HISTORY_TAB}`;
+  const tab = encodeURIComponent(state.historyTab || HISTORY_TAB);
+  return `https://hub.o3t.ru/management/stock/item/Lozon:${id}?${place}tab=${tab}`;
+}
+
+// адрес вкладки «Перемещения» мы не знаем заранее: хаб дописывает его сам,
+// когда вкладка открыта. Первый же удачный заход подсказывает остальным
+function rememberHistoryTab(tab) {
+  const clean = String(tab || "").trim();
+  if (!clean || clean === state.historyTab) return;
+  state.historyTab = clean;
 }
 
 function failItem(posting, status, extra) {
@@ -731,6 +741,7 @@ async function domScan(worker, posting) {
 
     if (verdict?.stopped) return failItem(posting, "stopped");
     if (verdict?.timeout) return failItem(posting, "timeout");
+    rememberHistoryTab(verdict?.tab);
     return { posting, ...verdict };
   } catch (error) {
     return failItem(posting, "exception", { error: String(error?.message || error) });
@@ -823,6 +834,7 @@ function mergeReports(a, b) {
     warehouseAt: strong.warehouseAt || weak.warehouseAt || "",
     warehouseCell: strong.warehouseCell || weak.warehouseCell || "",
     hits: strong.hits?.length ? strong.hits : weak.hits || [],
+    cmn: strong.cmn || weak.cmn || "",
     lastPlace: strong.lastPlace || weak.lastPlace || "",
     columns: strong.columns?.length ? strong.columns : weak.columns || [],
     lastRows: strong.lastRows?.length ? strong.lastRows : weak.lastRows || [],
