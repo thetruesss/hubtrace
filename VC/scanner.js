@@ -1522,6 +1522,7 @@
           found = true;
           const match = rows.find((row) => JSON.stringify(row).toLowerCase().includes(needle));
           sample = match ? JSON.stringify(match).slice(0, 280) : "";
+          if (match && !allRows.includes(match)) allRows.push(match);
         }
 
         loaded += rows.length;

@@ -3459,7 +3459,7 @@ function renderColsChart(host, slice, dimKey, options) {
     if (bucket) bucket[classify(entry.item)] += 1;
   }
 
-  let totals = { hit: 0, miss: 0, issue: 0 };
+  const totals = { hit: 0, miss: 0, issue: 0 };
   for (const counts of split.values()) {
     totals.hit += counts.hit;
     totals.miss += counts.miss;
@@ -3486,17 +3486,18 @@ function renderColsChart(host, slice, dimKey, options) {
     return counts.hit + counts.miss + counts.issue;
   })) || 1;
 
+  const grand = totals.hit + totals.miss + totals.issue;
+  const active = options.active;
+
   for (const [value] of top) {
     const counts = split.get(value);
     const total = counts.hit + counts.miss + counts.issue;
-    const active = options.active;
     const col = document.createElement("button");
     col.type = "button";
     col.className = `col${chipState(active, value)}`;
     markPick(col, value);
     col.addEventListener("click", (event) => options.pick(value, addKey(event)));
 
-    const grand = totals.hit + totals.miss + totals.issue;
     const tipRows = [["всего ID", total]];
     if (counts.hit) tipRows.push(["склад есть", counts.hit]);
     if (counts.miss) tipRows.push(["склада нет", counts.miss]);

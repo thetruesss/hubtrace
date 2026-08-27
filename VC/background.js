@@ -107,9 +107,10 @@ const state = {
   retryRound: 0,
   retryIndexes: new Set(),
   retryPending: new Set(),
-  apiNotReady: false,
 
   workers: new Map(),
+  spawning: new Set(),
+  spawnFails: 0,
   liveWorkers: 0,
   domInFlight: 0,
 
@@ -394,6 +395,10 @@ function stopScan() {
     return;
   }
   state.stopping = true;
+  if (state.paused) {
+    state.pausedMs += Date.now() - (state.pausedAt || Date.now());
+    state.pausedAt = 0;
+  }
   state.paused = false;
   releaseGate();
   releaseStop();
@@ -510,15 +515,26 @@ function activateTab(tabId) {
   });
 }
 
+const SPAWN_FAIL_LIMIT = 10;
+
 async function spawnWorker(id) {
-  if (state.workers.has(id)) return;
+  if (state.workers.has(id) || state.spawning.has(id)) return;
+  state.spawning.add(id);
   state.liveWorkers += 1;
   try {
     await spawnWorkerInner(id);
+    state.spawnFails = 0;
   } catch (error) {
     state.liveWorkers -= 1;
+    state.spawnFails += 1;
     notice("error", `Не удалось поднять вкладку: ${String(error?.message || error)}`);
+    if (state.spawnFails >= SPAWN_FAIL_LIMIT) {
+      notice("error", "Рабочее окно не открывается, останавливаю прогон.");
+      stopScan();
+    }
     maybeFinalize();
+  } finally {
+    state.spawning.delete(id);
   }
 }
 
@@ -560,7 +576,8 @@ async function spawnWorkerInner(id) {
     phase: "idle",
     via: "",
     hubReady: false,
-    retire: false
+    retire: false,
+    apiNotReady: false
   };
   state.workers.set(id, worker);
   await updateTab(tab.id, { autoDiscardable: false });
@@ -569,7 +586,7 @@ async function spawnWorkerInner(id) {
 }
 
 function retireWorker(worker) {
-  if (!state.workers.has(worker.id)) return;
+  if (state.workers.get(worker.id) !== worker) return;
   state.workers.delete(worker.id);
   if (worker.tabId != null) {
     pendingByTab.delete(worker.tabId);
@@ -742,7 +759,7 @@ async function apiScan(worker, posting) {
     return null;
   }
   setPhase(worker, "api", posting, "api");
-  state.apiNotReady = false;
+  worker.apiNotReady = false;
   const reply = await Promise.race([
     sendTab(worker.tabId, {
       action: "ht:apiScan",
@@ -766,7 +783,7 @@ async function apiScan(worker, posting) {
       broadcastHints();
     }
     if (reply?.notReady) {
-      state.apiNotReady = true;
+      worker.apiNotReady = true;
       return null;
     }
     if (reply?.auth) {
@@ -1195,7 +1212,7 @@ async function processOne(worker, posting, index) {
   if (apiAllowed(worker)) {
     if (state.apiState === "trusted" && !spotCheckDue() && !lessonDue()) {
       const api = await apiScan(worker, posting);
-      if (!api && state.apiNotReady) return domScanWithRetry(worker, posting);
+      if (!api && worker.apiNotReady) return domScanWithRetry(worker, posting);
       if (api) {
         state.apiFailStreak = 0;
         state.apiSinceCheck += 1;
@@ -1579,7 +1596,6 @@ async function runScan(payload, postings, warehouse, cutoff, cutoffText) {
   state.lessonTries = 0;
   state.lessonBusy = false;
   state.auditTypes = null;
-  state.apiNotReady = false;
   state.retryRound = 0;
   state.retryIndexes = new Set();
   state.retryPending = new Set();
@@ -1599,6 +1615,8 @@ async function runScan(payload, postings, warehouse, cutoff, cutoffText) {
   state.recipeStale = false;
   state.recipeStaleAt = 0;
   state.domInFlight = 0;
+  state.spawning = new Set();
+  state.spawnFails = 0;
   state.anchorTabId = null;
   state.workerTabIds = new Set();
   state.startedAt = Date.now();

@@ -290,7 +290,11 @@
       }
 
       const promise = originalFetch(input, init);
-      if (!request || !probe.capturing) return promise;
+      if (!request) return promise;
+      if (!probe.capturing) {
+        noteHints(request);
+        return promise;
+      }
 
       promise
         .then((response) => {
@@ -341,7 +345,7 @@
         const info = this[INFO];
         if (info) {
           if (typeof body === "string") info.body = body;
-          this.addEventListener("load", () => {
+          const onLoad = () => {
             try {
               if (this.status < 200 || this.status >= 300) return;
               if (this.responseType && this.responseType !== "text" && this.responseType !== "json") return;
@@ -349,7 +353,8 @@
                 this.responseType === "json" ? JSON.stringify(this.response) : String(this.responseText || "");
               consider(info, text);
             } catch {}
-          });
+          };
+          this.addEventListener("load", onLoad, { once: true });
         }
       } catch {}
       return protoSend.apply(this, arguments);
