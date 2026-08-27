@@ -347,8 +347,7 @@ function setStep(name) {
 function classify(item) {
   if (item?.found) return "hit";
   if (item?.status === "partial") return "issue";
-  if (item?.status === "no_history") return "issue";
-  if (["complete", "missing"].includes(item?.status)) return "miss";
+  if (["complete", "missing", "no_history", "later"].includes(item?.status)) return "miss";
   if (item?.ok) return "miss";
   return "issue";
 }
@@ -1653,7 +1652,6 @@ function cutItem(item, at) {
   };
 
   if (!top && dated && kind === "hit") {
-    next.ok = false;
     next.status = "later";
   } else if (!rows.length && source.length) {
     next.status = "later";
