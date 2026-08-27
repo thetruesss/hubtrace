@@ -1077,6 +1077,10 @@ const MONTH_NAMES = [
 ];
 const WEEK_DAYS = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"];
 const WHEEL_ITEM = 30;
+const WHEEL_NOTCH = 24;
+const WHEEL_REST_MS = 240;
+const YEARS_BACK = 5;
+const YEARS_ON = 1;
 
 const datePickers = new Map();
 let openedDatePicker = null;
@@ -1085,24 +1089,50 @@ function stampText(date) {
   return `${pad(date.getDate())}.${pad(date.getMonth() + 1)}.${date.getFullYear()} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
 
+function maskStamp(raw) {
+  const digits = String(raw || "").replace(/\D/g, "").slice(0, 14);
+  if (!digits) return "";
+  let out = [digits.slice(0, 2), digits.slice(2, 4), digits.slice(4, 8)].filter(Boolean).join(".");
+  if (digits.length > 8) out += ` ${digits.slice(8, 10)}`;
+  if (digits.length > 10) out += `:${digits.slice(10, 12)}`;
+  if (digits.length > 12) out += `:${digits.slice(12, 14)}`;
+  return out;
+}
+
 function sameDay(a, b) {
   return (
     a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate()
   );
 }
 
-function wheelColumn(count) {
-  const col = el("div", "wheel__col");
-  for (let i = 0; i < count; i += 1) {
-    const item = el("span", "wheel__item", pad(i));
-    item.dataset.at = String(i);
+function fillWheel(col, labels) {
+  col.replaceChildren();
+  labels.forEach((label, at) => {
+    const item = el("span", "wheel__item", label);
+    item.dataset.at = String(at);
     col.appendChild(item);
-  }
+  });
   return col;
 }
 
+function wheelColumn(labels, mod) {
+  return fillWheel(el("div", `wheel__col${mod ? ` wheel__col--${mod}` : ""}`), labels);
+}
+
+function padLabels(count) {
+  return Array.from({ length: count }, (_, i) => pad(i));
+}
+
+function itemStep(col) {
+  return col.firstElementChild?.offsetHeight || WHEEL_ITEM;
+}
+
+function wheelLast(col) {
+  return Math.max(0, col.childElementCount - 1);
+}
+
 function wheelAt(col) {
-  return Math.round(col.scrollTop / WHEEL_ITEM);
+  return Math.round(col.scrollTop / itemStep(col));
 }
 
 function paintWheel(col) {
@@ -1112,9 +1142,52 @@ function paintWheel(col) {
 }
 
 function spinWheel(col, value) {
-  const top = value * WHEEL_ITEM;
+  const top = Math.max(0, Math.min(wheelLast(col), value)) * itemStep(col);
   if (Math.abs(col.scrollTop - top) > 1) col.scrollTop = top;
   paintWheel(col);
+}
+
+function rollWheel(col, to) {
+  const at = Math.max(0, Math.min(wheelLast(col), to));
+  col.scrollTo({ top: at * itemStep(col), behavior: "smooth" });
+}
+
+function bindWheel(col, onSettle) {
+  let timer = null;
+  let spin = 0;
+  let spinAt = 0;
+
+  col.addEventListener("scroll", () => {
+    paintWheel(col);
+    window.clearTimeout(timer);
+    timer = window.setTimeout(() => onSettle(Math.max(0, Math.min(wheelLast(col), wheelAt(col)))), 110);
+  });
+
+  col.addEventListener(
+    "wheel",
+    (event) => {
+      event.preventDefault();
+      const now = Date.now();
+      if (now - spinAt > WHEEL_REST_MS) spin = 0;
+      spinAt = now;
+      spin += event.deltaY;
+      if (Math.abs(spin) < WHEEL_NOTCH) return;
+      rollWheel(col, wheelAt(col) + (spin > 0 ? 1 : -1));
+      spin = 0;
+    },
+    { passive: false }
+  );
+
+  col.addEventListener("click", (event) => {
+    const item = event.target.closest("[data-at]");
+    if (item) rollWheel(col, Number(item.dataset.at));
+  });
+}
+
+function wheelDeck(mod, ...columns) {
+  const deck = el("div", `wheel__deck${mod ? ` wheel__deck--${mod}` : ""}`);
+  deck.append(el("i", "wheel__band"), ...columns);
+  return deck;
 }
 
 function buildDatePicker() {
@@ -1128,18 +1201,29 @@ function buildDatePicker() {
   const next = el("button", "dtp__nav", "›");
   next.type = "button";
   next.title = "Следующий месяц";
-  const title = el("b", "dtp__title");
+  const title = el("button", "dtp__title");
+  title.type = "button";
+  title.title = "Выбрать месяц и год";
+  const titleText = el("span", "dtp__label");
+  title.append(titleText, caretIcon("dtp__caret"));
   head.append(prev, title, next);
 
   const week = el("div", "dtp__week");
   for (const day of WEEK_DAYS) week.appendChild(el("span", null, day));
 
   const grid = el("div", "dtp__grid");
+  const days = el("div", "dtp__days");
+  days.append(week, grid);
 
+  const month = wheelColumn(MONTH_NAMES, "wide");
+  const year = wheelColumn([], "wide");
+  const period = el("div", "dtp__period");
+  period.appendChild(wheelDeck("period", month, year));
+
+  const hour = wheelColumn(padLabels(24));
+  const minute = wheelColumn(padLabels(60));
   const wheel = el("div", "wheel");
-  const hour = wheelColumn(24);
-  const minute = wheelColumn(60);
-  wheel.append(el("i", "wheel__band"), hour, el("b", "wheel__sep", ":"), minute);
+  wheel.appendChild(wheelDeck(null, hour, el("b", "wheel__sep", ":"), minute));
 
   const foot = el("div", "dtp__foot");
   const now = el("button", "dtp__link", "Сейчас");
@@ -1150,10 +1234,10 @@ function buildDatePicker() {
   done.type = "button";
   foot.append(now, wipe, done);
 
-  pop.append(head, week, grid, wheel, foot);
+  pop.append(head, days, period, wheel, foot);
   document.body.appendChild(pop);
 
-  return { pop, prev, next, title, grid, hour, minute, now, wipe, done };
+  return { pop, prev, next, title, titleText, days, grid, period, month, year, hour, minute, now, wipe, done };
 }
 
 function datePickerValue(picker) {
@@ -1166,10 +1250,31 @@ function syncWheels(picker) {
   spinWheel(picker.parts.minute, picker.minute);
 }
 
+function syncPeriod(picker) {
+  const parts = picker.parts;
+  const thisYear = new Date().getFullYear();
+  const from = Math.min(thisYear - YEARS_BACK, picker.year);
+  const to = Math.max(thisYear + YEARS_ON, picker.year);
+  if (picker.yearFrom !== from || parts.year.childElementCount !== to - from + 1) {
+    picker.yearFrom = from;
+    fillWheel(parts.year, Array.from({ length: to - from + 1 }, (_, i) => String(from + i)));
+  }
+  spinWheel(parts.month, picker.month);
+  spinWheel(parts.year, picker.year - picker.yearFrom);
+}
+
+function stepMonth(picker, by) {
+  const step = new Date(picker.year, picker.month + by, 1);
+  picker.year = step.getFullYear();
+  picker.month = step.getMonth();
+  renderDatePicker(picker);
+}
+
 function renderDatePicker(picker) {
   const parts = picker.parts;
   const chosen = picker.chosen;
-  parts.title.textContent = `${MONTH_NAMES[picker.month]} ${picker.year}`;
+  parts.titleText.textContent = `${MONTH_NAMES[picker.month]} ${picker.year}`;
+  if (parts.pop.classList.contains("is-period")) syncPeriod(picker);
 
   const first = new Date(picker.year, picker.month, 1);
   const shift = (first.getDay() + 6) % 7;
@@ -1237,6 +1342,7 @@ function openDatePicker(picker) {
   picker.hour = value.getHours();
   picker.minute = value.getMinutes();
 
+  picker.parts.pop.classList.remove("is-period");
   renderDatePicker(picker);
   picker.parts.pop.hidden = false;
   syncWheels(picker);
@@ -1290,37 +1396,36 @@ function mountDatePicker(id) {
   parts.pop.addEventListener("mousedown", (event) => event.preventDefault());
   parts.pop.addEventListener("click", (event) => event.stopPropagation());
 
-  parts.prev.addEventListener("click", () => {
-    const step = new Date(picker.year, picker.month - 1, 1);
-    picker.year = step.getFullYear();
-    picker.month = step.getMonth();
-    renderDatePicker(picker);
-  });
-  parts.next.addEventListener("click", () => {
-    const step = new Date(picker.year, picker.month + 1, 1);
-    picker.year = step.getFullYear();
-    picker.month = step.getMonth();
-    renderDatePicker(picker);
+  parts.prev.addEventListener("click", () => stepMonth(picker, -1));
+  parts.next.addEventListener("click", () => stepMonth(picker, 1));
+  parts.title.addEventListener("click", () => {
+    const on = parts.pop.classList.toggle("is-period");
+    if (on) syncPeriod(picker);
+    placeDatePicker(picker);
   });
   parts.grid.addEventListener("click", (event) => {
     const cell = event.target.closest("[data-day]");
     if (cell) pickDay(picker, cell.dataset.day);
   });
+
   for (const unit of ["hour", "minute"]) {
-    const col = parts[unit];
-    let timer = null;
-    col.addEventListener("scroll", () => {
-      paintWheel(col);
-      window.clearTimeout(timer);
-      timer = window.setTimeout(() => {
-        const limit = unit === "hour" ? 23 : 59;
-        const value = Math.max(0, Math.min(limit, wheelAt(col)));
-        if (picker[unit] === value) return;
-        picker[unit] = value;
-        slideDatePicker(picker);
-      }, 110);
+    bindWheel(parts[unit], (value) => {
+      if (picker[unit] === value) return;
+      picker[unit] = value;
+      slideDatePicker(picker);
     });
   }
+  bindWheel(parts.month, (value) => {
+    if (picker.month === value) return;
+    picker.month = value;
+    renderDatePicker(picker);
+  });
+  bindWheel(parts.year, (value) => {
+    const year = picker.yearFrom + value;
+    if (picker.year === year) return;
+    picker.year = year;
+    renderDatePicker(picker);
+  });
   parts.now.addEventListener("click", () => {
     const at = new Date();
     picker.year = at.getFullYear();
@@ -1354,6 +1459,20 @@ function mountDatePicker(id) {
     syncWheels(picker);
   });
 }
+
+document.addEventListener(
+  "input",
+  (event) => {
+    const input = event.target;
+    if (!input?.matches?.(".dtp-field input")) return;
+    const masked = maskStamp(input.value);
+    if (masked === input.value) return;
+    const tail = input.selectionStart === input.value.length;
+    input.value = masked;
+    if (tail) input.setSelectionRange(masked.length, masked.length);
+  },
+  true
+);
 
 document.addEventListener("pointerdown", (event) => {
   if (!openedDatePicker) return;
@@ -2335,19 +2454,11 @@ function renderPickerList(picker) {
     return;
   }
   for (const item of shown) {
-    const on = values.includes(item.value);
-    const option = el("button", `mselect__opt${on ? " is-on" : ""}`);
-    option.type = "button";
-    option.dataset.value = item.value;
-    option.setAttribute("role", "option");
-    option.setAttribute("aria-selected", on ? "true" : "false");
-    option.append(el("i", "mselect__mark"), el("span", "mselect__label", item.label));
-    list.appendChild(option);
+    list.appendChild(pickerOption(item.value, item.label, values.includes(item.value)));
   }
 }
 
-function fitPicker(picker) {
-  const { pop, host } = picker;
+function fitPop(host, pop) {
   pop.classList.remove("is-up", "is-left");
   const box = host.getBoundingClientRect();
   if (box.bottom + pop.offsetHeight + 12 > window.innerHeight && box.top > pop.offsetHeight + 12) {
@@ -2356,7 +2467,124 @@ function fitPicker(picker) {
   if (box.left + pop.offsetWidth + 12 > window.innerWidth) pop.classList.add("is-left");
 }
 
+function fitPicker(picker) {
+  fitPop(picker.host, picker.pop);
+}
+
+function pickerOption(value, label, on) {
+  const option = el("button", `mselect__opt${on ? " is-on" : ""}`);
+  option.type = "button";
+  option.dataset.value = value;
+  option.setAttribute("role", "option");
+  option.setAttribute("aria-selected", on ? "true" : "false");
+  option.append(el("i", "mselect__mark"), el("span", "mselect__label", label));
+  return option;
+}
+
+const singles = new Set();
+
+function shutSingle(one) {
+  if (!one.open) return;
+  one.open = false;
+  one.pop.classList.remove("is-open");
+  one.btn.setAttribute("aria-expanded", "false");
+  one.host.classList.remove("is-open");
+  window.clearTimeout(one.timer);
+  one.timer = window.setTimeout(() => {
+    if (!one.open) one.pop.hidden = true;
+  }, 200);
+}
+
+function closeSingles(keep) {
+  for (const one of [...singles]) {
+    if (!one.host.isConnected) {
+      singles.delete(one);
+      one.pop.remove();
+    } else if (one !== keep) {
+      shutSingle(one);
+    }
+  }
+}
+
+function placeSingle(one) {
+  const pop = one.pop;
+  const box = one.btn.getBoundingClientRect();
+  pop.style.minWidth = `${box.width}px`;
+  const size = pop.getBoundingClientRect();
+  const room = 10;
+
+  let top = box.bottom + 6;
+  if (top + size.height + room > window.innerHeight && box.top - size.height - 6 > room) {
+    top = box.top - size.height - 6;
+  }
+  pop.style.top = `${Math.max(room, Math.min(top, window.innerHeight - size.height - room))}px`;
+  pop.style.left = `${Math.max(room, Math.min(box.left, window.innerWidth - size.width - room))}px`;
+}
+
+function openSingle(one) {
+  closeAllPickers();
+  closeSingles(one);
+  if (one.open) return;
+  one.open = true;
+  window.clearTimeout(one.timer);
+  one.paint();
+  one.pop.hidden = false;
+  one.btn.setAttribute("aria-expanded", "true");
+  one.host.classList.add("is-open");
+  placeSingle(one);
+  requestAnimationFrame(() => one.pop.classList.add("is-open"));
+}
+
+function trackSingles() {
+  for (const one of singles) {
+    if (!one.open) continue;
+    const box = one.btn.getBoundingClientRect();
+    if (box.bottom < 0 || box.top > window.innerHeight) shutSingle(one);
+    else placeSingle(one);
+  }
+}
+
+window.addEventListener("resize", trackSingles);
+document.addEventListener("scroll", trackSingles, true);
+
+// список живёт на body: панели режут своим overflow всё, что вылезает за край
+function bindSingle(host, btn, entries, value, onChange) {
+  const pop = el("div", "mselect__pop mselect__pop--one");
+  pop.hidden = true;
+  const list = el("div", "mselect__list");
+  list.setAttribute("role", "listbox");
+  pop.appendChild(list);
+  document.body.appendChild(pop);
+
+  btn.setAttribute("aria-haspopup", "listbox");
+  btn.setAttribute("aria-expanded", "false");
+
+  const one = {
+    host, btn, pop, open: false, timer: null,
+    paint() {
+      list.replaceChildren();
+      for (const [key, title] of entries) list.appendChild(pickerOption(key, title, key === value));
+    }
+  };
+  singles.add(one);
+
+  btn.addEventListener("click", (event) => {
+    event.stopPropagation();
+    if (one.open) shutSingle(one);
+    else openSingle(one);
+  });
+  pop.addEventListener("click", (event) => event.stopPropagation());
+  list.addEventListener("click", (event) => {
+    const option = event.target.closest("[data-value]");
+    if (!option) return;
+    shutSingle(one);
+    if (option.dataset.value !== value) onChange(option.dataset.value);
+  });
+  return one;
+}
+
 function openPicker(id) {
+  closeSingles(null);
   for (const other of pickers.keys()) if (other !== id) closePicker(other);
   const picker = pickers.get(id);
   if (!picker || picker.open) return;
@@ -2409,9 +2637,18 @@ function setPickerValues(id, values) {
   if (picker.open) paintPickerMarks(picker);
 }
 
-document.addEventListener("click", closeAllPickers);
+document.addEventListener("click", () => {
+  closeAllPickers();
+  closeSingles(null);
+});
 
 function escapeClosedPicker() {
+  const single = [...singles].find((one) => one.open);
+  if (single) {
+    shutSingle(single);
+    single.btn.focus({ preventScroll: true });
+    return true;
+  }
   const open = [...pickers.values()].find((picker) => picker.open);
   if (!open) return false;
   closePicker(open.id);
@@ -2432,6 +2669,20 @@ function svgEl(tag, attrs) {
   const node = document.createElementNS(SVG_NS, tag);
   for (const [key, value] of Object.entries(attrs || {})) node.setAttribute(key, String(value));
   return node;
+}
+
+function crossIcon(className) {
+  const cross = svgEl("svg", { viewBox: "0 0 12 12", class: className, "aria-hidden": "true" });
+  cross.appendChild(
+    svgEl("path", {
+      d: "M3.5 3.5 8.5 8.5M8.5 3.5 3.5 8.5",
+      fill: "none",
+      stroke: "currentColor",
+      "stroke-width": "1.25",
+      "stroke-linecap": "round"
+    })
+  );
+  return cross;
 }
 
 function caretIcon(className) {
@@ -2642,9 +2893,10 @@ function renderDetailChips() {
   emptyNow(box);
   for (const value of detailQuery) {
     const chip = el("span", "detail__chip", value);
-    const drop = el("button", null, "×");
+    const drop = el("button");
     drop.type = "button";
     drop.title = "Убрать из поиска";
+    drop.appendChild(crossIcon());
     drop.addEventListener("click", () => {
       detailQuery = detailQuery.filter((entry) => entry !== value);
       $("detail-search").value = detailQuery.join(" ");
@@ -3006,6 +3258,31 @@ function renderStatsKpis(shown) {
     markValue(box, tile.value, tile.label);
     host.appendChild(box);
   }
+  host.appendChild(deltaTile(hits, misses));
+}
+
+function deltaTile(hits, misses) {
+  const total = hits + misses;
+  const gap = hits - misses;
+  const lead = gap > 0 ? "+" : gap < 0 ? "−" : "";
+
+  const box = el("div", "kpi kpi--delta");
+  box.appendChild(el("span", null, "Разница"));
+  box.appendChild(el("b", null, `${lead}${Math.abs(gap)}`));
+
+  const bar = el("div", "delta");
+  const hit = el("i", "delta__hit");
+  const miss = el("i", "delta__miss");
+  hit.style.flexGrow = String(total ? hits : 0);
+  miss.style.flexGrow = String(total ? misses : 0);
+  bar.append(hit, miss);
+  box.appendChild(bar);
+
+  box.appendChild(
+    el("em", null, total ? `${hits} к ${misses} · ${Math.round((hits / total) * 100)}% со складом` : "сравнивать нечего")
+  );
+  markValue(box, gap, "Разница", total ? `${hits} к ${misses}` : "");
+  return box;
 }
 
 function markPickGroup(node, key) {
@@ -3403,8 +3680,10 @@ function renderBarChart(host, rows, options) {
   const top = rows.slice(0, 10);
   const max = Math.max(...top.map(([, count]) => count)) || 1;
   const total = rows.reduce((sum, [, count]) => sum + count, 0);
+  const digits = Math.max(2, ...top.map(([, count]) => String(count).length));
   const rowsBox = el("div", "bars__rows");
   rowsBox.style.setProperty("--bar-rows", String(top.length));
+  rowsBox.style.setProperty("--bar-value", `${digits}ch`);
   markPickGroup(rowsBox, options.filterKey);
   top.forEach(([value, count], at) => {
     const active = options.active;
@@ -3703,17 +3982,8 @@ function renderDonutChart(host, rows, options) {
   host.appendChild(box);
 }
 
-function optionSelect(value, entries, onChange) {
-  const select = document.createElement("select");
-  for (const [key, title] of entries) {
-    const option = document.createElement("option");
-    option.value = key;
-    option.textContent = title;
-    select.appendChild(option);
-  }
-  select.value = value;
-  select.addEventListener("change", () => onChange(select.value));
-  return select;
+function titleOf(entries, value) {
+  return entries.find(([key]) => key === value)?.[1] || value;
 }
 
 function panelTitle(value, entries, onChange) {
@@ -3721,22 +3991,22 @@ function panelTitle(value, entries, onChange) {
   const button = el("button", "ptitle__btn");
   button.type = "button";
   button.title = "Выбрать, что показывать";
-  const label = entries.find(([key]) => key === value)?.[1] || value;
-  button.appendChild(el("h3", null, label));
+  button.appendChild(el("h3", null, titleOf(entries, value)));
   button.appendChild(caretIcon("ptitle__caret"));
-
-  const select = optionSelect(value, entries, onChange);
-  select.className = "ptitle__select";
-  select.setAttribute("aria-label", "Что показывать");
-
-  box.append(button, select);
+  box.appendChild(button);
+  bindSingle(box, button, entries, value, onChange);
   return box;
 }
 
 function panelSelect(value, entries, onChange) {
-  const pick = el("label", "pick pick--panel");
-  pick.appendChild(optionSelect(value, entries, onChange));
-  return pick;
+  const box = el("div", "mselect mselect--one");
+  const button = el("button", "mselect__btn");
+  button.type = "button";
+  button.title = "Как показывать";
+  button.append(el("span", "mselect__value", titleOf(entries, value)), el("i", "mselect__caret"));
+  box.appendChild(button);
+  bindSingle(box, button, entries, value, onChange);
+  return box;
 }
 
 function updatePanel(index, patch) {
@@ -3772,9 +4042,10 @@ function renderStatsPanel(panel, index) {
   tools.appendChild(
     panelSelect(panel.viz, Object.entries(STATS_VIZ), (next) => updatePanel(index, { viz: next }))
   );
-  const drop = el("button", "spanel__drop", "×");
+  const drop = el("button", "spanel__drop");
   drop.type = "button";
   drop.title = "Убрать панель";
+  drop.appendChild(crossIcon());
   drop.addEventListener("click", () => {
     const done = () => {
       statsPanels.splice(index, 1);
@@ -4219,9 +4490,10 @@ function renderStatsChips() {
   emptyNow(box);
   for (const { key, label, value } of active) {
     const chip = el("span", "detail__chip", `${label}: ${value}`);
-    const drop = el("button", null, "×");
+    const drop = el("button");
     drop.type = "button";
     drop.title = "Снять фильтр";
+    drop.appendChild(crossIcon());
     drop.addEventListener("click", () => {
       setStatsFilter(key, filterList(key).filter((one) => one !== value));
     });
