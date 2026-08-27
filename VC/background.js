@@ -653,8 +653,6 @@ function buildHistoryUrl(posting) {
   return `https://hub.o3t.ru/management/stock/item/Lozon:${id}?${place}tab=${tab}`;
 }
 
-// адрес вкладки «Перемещения» мы не знаем заранее: хаб дописывает его сам,
-// когда вкладка открыта. Первый же удачный заход подсказывает остальным
 function rememberHistoryTab(tab) {
   const clean = String(tab || "").trim();
   if (!clean || clean === state.historyTab) return;
@@ -860,8 +858,6 @@ function needsRetry(item, attempt) {
   if (!item) return true;
   if (item.found) return false;
   if (isHardStop(item)) return false;
-  // «позже потолка» и «нет истории» — это ответы, а не сбои:
-  // пересканирование их не изменит
   if (item.ok && ["complete", "later", "no_history"].includes(item.status)) return false;
   const conf = cfg();
   if (item.status === "partial") return attempt <= conf.retryPartial;
@@ -1923,5 +1919,4 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   return false;
 });
 
-// прибираем тяжёлый слепок отладки, оставшийся от прошлых версий
 chrome.storage.local.remove("hubTraceDebug", ignoreLastError);

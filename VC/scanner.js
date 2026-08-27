@@ -268,7 +268,6 @@
 
   const AUDIT_PATH = "/p-api/scms-article-gateway/v1/articles/{id}/auditV3";
 
-  // чем сам хаб наполняет вкладку «Перемещения» — из её собственного запроса
   const TRANSITION_TYPES = [
     "InTripContainer",
     "InnerWarehouse",
@@ -283,8 +282,6 @@
     if (!Array.isArray(next) || !next.length) return false;
     const clean = [...new Set(next.map((value) => String(value || "")).filter(Boolean))].slice(0, 12);
     if (!clean.length) return false;
-    // свой список узнаём по пересечению с базовыми типами: незнакомые новые
-    // едут вместе с ними, а фильтр вкладки «Все» по паре чужих типов — нет
     const core = clean.filter((code) => TRANSITION_TYPES.includes(code));
     if (core.length < 3) return false;
     if (clean.join("|") === auditTypes.join("|")) return false;
@@ -837,8 +834,6 @@
     return null;
   }
 
-  // ближайшее перемещение выше среза: под срезом записей не осталось,
-  // и самое раннее из того, что выше, — лучшее, что мы знаем о предмете
   function edgeAboveCutoff(rows, best) {
     if (!cutoffAt || !Array.isArray(rows)) return best || null;
     let edge = best || null;
@@ -854,7 +849,6 @@
     return edge;
   }
 
-  // почему в ответе пусто: перемещений не было вовсе или они все выше среза
   function emptyReason(sawRow, sawMove, sawUnder) {
     if (sawRow && !sawMove) return "no_history";
     if (cutoffAt && sawMove && !sawUnder) return "later";
@@ -872,13 +866,9 @@
     return flags;
   }
 
-  // вердикты «нет истории» и «позже потолка» позволены только на знакомой
-  // форме ответа — по чужой судить, были ли перемещения, нельзя
   function scanStatus(found, flags) {
     if (found) return "";
     if (flags.sawAudit) return emptyReason(flags.sawRow, flags.sawMove, flags.sawUnder);
-    // запрос просит только перемещения, распознанный ответ пуст —
-    // значит перемещений нет, а не «склада нет»
     if (flags.sawAnswer && !flags.sawRow) return "no_history";
     return "";
   }
@@ -925,8 +915,6 @@
     return { at, place: place?.name || "", cell };
   }
 
-  // лента вех для перемотки среза: соседние записи с тем же складом
-  // и ячейкой схлопываются, свежие впереди
   function pushMarks(list, records) {
     for (const record of records || []) {
       if (list.length >= MARKS_LIMIT) return list;
@@ -993,10 +981,6 @@
   function emptyCard() {
     return { number: "", status: "", cmn: "" };
   }
-
-  // ЦМН из блока «Где находится». Ищем по имени поля, а не по виду значения:
-  // не найдём — столбец останется пустым, но не соврёт чужим складом
-
 
   function cardFilled(card) {
     return Boolean(card && (card.number || card.status));
@@ -1148,8 +1132,6 @@
 
       const raw = Array.isArray(json.records) ? json.records : [];
       const records = keepTransitions(raw);
-      // перемещения считаем до среза: срез сужает картину, но не отменяет
-      // того, что история движения у предмета вообще есть
       moveScanFlags(raw, records, flags);
       if (records.length !== raw.length) trimmed = true;
       edge = edgeAboveCutoff(raw, edge);
@@ -1201,8 +1183,6 @@
 
     const report = reportFromAudit(head, hits);
     report.marks = marks;
-    // ниже среза перемещений не нашлось — берём склад из ближайшей
-    // записи сверху: на момент среза предмет числился там
     const edgeWarehouse = edge?.warehouse ? edge.name : "";
     report.lastPlace = lastPlace || edgeWarehouse || loosePlace || edge?.name || "";
     const card = await collectCard(posting, deadline, null);
@@ -1506,8 +1486,6 @@
   function keepTransitions(rows) {
     if (!Array.isArray(rows) || !rows.length) return rows || [];
     if (!looksLikeAudit(rows)) return rows.filter(recordUnderCutoff);
-    // считаем только перемещения: пусто здесь — это ответ «перемещений нет»,
-    // а не повод взять записи об изменении свойств
     return rows.filter(isMove).filter(recordUnderCutoff);
   }
 
@@ -1618,7 +1596,6 @@
           break;
         }
 
-        // пустой records — это ответ «перемещений нет», а не сломанный список
         const raw = Array.isArray(json.records) ? json.records : findRows(json);
         if (!raw) {
           failure = "в ответе не нашлось списка строк";
@@ -1947,8 +1924,6 @@
     return out;
   }
 
-  // на странице ЦМН подписан прямо словом, поэтому ищем по подписи,
-  // а не по классам вёрстки
   function readCmnFromPage() {
     const nodes = document.querySelectorAll("span,div,b,strong,p,a");
     for (let i = 0; i < nodes.length && i < 1200; i += 1) {
@@ -2008,8 +1983,6 @@
     return out;
   }
 
-  // подписи свойств из «Все», которые точно не перемещения: их видно
-  // в хабе, а выучить из ответов API больше неоткуда — он отфильтрован
   const PROPERTY_WORDS = ["цмн", "тайм-слот", "статус", "статус предмета", "поток", "свойство", "уск"];
 
   function foreignWords() {
@@ -2044,8 +2017,6 @@
     return cell ? norm(cell.textContent).toLowerCase() : "";
   }
 
-  // то же для строк таблицы: из «Местоположение: A → B» берём тот конец,
-  // который таблица показывает как склад строки
   function placeFromCells(cells) {
     let loose = "";
     for (const cell of cells || []) {
@@ -2433,8 +2404,6 @@
       if (grid && !gridAt) gridAt = Date.now();
       if (tabSettled || !document.body) return grid;
 
-      // после клика ждём, но недолго: страница любит перерисовать вкладки
-      // и потерять наше нажатие, тогда жмём ещё раз
       const settling = clickedOwnAt && Date.now() - clickedOwnAt < TAB_RECLICK_MS;
       const own = pickTab(TRANSITION_LABELS, settling);
       if (own === "active") {
@@ -2471,18 +2440,11 @@
       };
     }
 
-    // хаб сам переписывает адрес под открытую вкладку — запоминаем,
-    // чтобы следующие отправления открывались на «Перемещениях» сразу
     const tabParam = currentTabParam();
 
-    // вкладку «Перемещения» открыть не вышло — значит перед нами «Все»,
-    // и строить по ней отчёт нельзя: там свойства, а не перемещения.
-    // Карточку предмета всё же забираем — номер, статус и ЦМН к ней не привязаны
     if (!onTransitions && pickTab(TRANSITION_LABELS, true) !== "active") {
       const offered = TRANSITION_LABELS.some((wanted) => findTabLabelled(wanted));
       return {
-        // вкладки нет вовсе — это ответ хаба, повторять нечего;
-        // есть, но не открылась — сбой, пусть перепроверка попробует ещё
         ok: !offered,
         status: "no_history",
         found: false,
@@ -2494,8 +2456,6 @@
       };
     }
 
-    // сетка перерисовывается под вкладку не мгновенно: пока идёт её запрос,
-    // на экране висят строки «Все» — их читать нельзя
     if (preClick) {
       await waitFor(
         () => rowNodes().length !== preClick.rows || parseCounter() !== preClick.counter,
@@ -2632,8 +2592,6 @@
       return { ok: false, status: "paused", found, expected, loaded, via: "dom", report, tab: tabParam };
     }
 
-    // вкладка «Перемещения» дочитана и пуста — это «нет истории»,
-    // даже если в сетке ещё висят чужие строки со «Все»
     const bare = !found && !tableRows.length;
     return {
       ok: complete,
