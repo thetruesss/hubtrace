@@ -22,44 +22,9 @@
     startedAt: Date.now(),
     capturing: true,
     appVersion: "",
-    placeId: "",
-    debug: false,
-    journal: []
+    placeId: ""
   };
   window.__hubTraceProbe = probe;
-
-  // журнал для отладочного отчёта: что за запросы к хабу шли на этой странице.
-  // Заголовки не пишем вовсе — в них куки и токены, им в отчёте не место
-  const JOURNAL_LIMIT = 30;
-  const JOURNAL_BODY_CAP = 4000;
-  const JOURNAL_TEXT_CAP = 20000;
-  let journalSeq = 0;
-
-  function clipText(value, cap) {
-    const text = String(value == null ? "" : value);
-    return text.length > cap ? `${text.slice(0, cap)}…(+${text.length - cap})` : text;
-  }
-
-  function journalPush(request, responseText, status, own) {
-    if (!probe.debug || !request) return;
-    const url = String(request.url || "");
-    if (!sameOrigin(url)) return;
-    const lower = url.toLowerCase();
-    if (/\.(js|css|png|jpe?g|svg|woff2?|ico|map)(\?|$)/.test(lower)) return;
-    if (/analytics|metrics|sentry|telemetry|tracker/.test(lower)) return;
-    probe.journal.push({
-      id: ++journalSeq,
-      at: Date.now(),
-      own: Boolean(own),
-      method: String(request.method || "GET").toUpperCase(),
-      url: absolute(url),
-      status: Number(status) || 0,
-      body: clipText(typeof request.body === "string" ? request.body : "", JOURNAL_BODY_CAP),
-      response: clipText(responseText, JOURNAL_TEXT_CAP),
-      href: location.href
-    });
-    if (probe.journal.length > JOURNAL_LIMIT) probe.journal.shift();
-  }
 
   function post(payload) {
     try {
@@ -270,9 +235,8 @@
     if (changed) post({ type: "hint", appVersion: probe.appVersion, placeId: probe.placeId });
   }
 
-  function consider(request, responseText, status) {
+  function consider(request, responseText) {
     noteHints(request);
-    journalPush(request, responseText, status == null ? 200 : status, false);
     if (!probe.capturing) return;
     if (Date.now() - probe.startedAt > CAPTURE_WINDOW_MS) {
       probe.capturing = false;
@@ -323,14 +287,13 @@
 
       const promise = originalFetch(input, init);
       if (!request) return promise;
-      if (!probe.capturing && !probe.debug) {
+      if (!probe.capturing) {
         noteHints(request);
         return promise;
       }
 
       promise
         .then((response) => {
-          if (response && !response.ok) journalPush(request, "", response.status, false);
           if (!response || !response.ok) return;
           const type = response.headers && response.headers.get("content-type");
           if (type && !/json|text/i.test(type)) return;
@@ -384,7 +347,7 @@
               if (this.responseType && this.responseType !== "text" && this.responseType !== "json") return;
               const text =
                 this.responseType === "json" ? JSON.stringify(this.response) : String(this.responseText || "");
-              consider(info, text, this.status);
+              consider(info, text);
             } catch {}
           };
           this.addEventListener("load", onLoad, { once: true });
@@ -399,17 +362,6 @@
     if (event.origin && event.origin !== ORIGIN) return;
     const data = event.data;
     if (!data || data.channel !== CHANNEL) return;
-
-    if (data.type === "debugOn") {
-      probe.debug = true;
-      return;
-    }
-
-    if (data.type === "askJournal") {
-      const after = Number(data.after) || 0;
-      post({ type: "journal", ticket: data.ticket, entries: probe.journal.filter((entry) => entry.id > after) });
-      return;
-    }
 
     if (data.type === "askRecipe") {
       if (probe.recipe) post({ type: "recipe", recipe: probe.recipe });
@@ -452,7 +404,6 @@
       )
       .then((result) => {
         clearTimeout(timer);
-        journalPush({ url, method, body }, result.text, result.status, true);
         post({ type: "replayResult", ticket, ...result });
       })
       .catch((error) => {
