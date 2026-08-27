@@ -800,7 +800,7 @@ function renderFab() {
   fab.classList.toggle("is-done", ready && ui.reportSaved);
 
   const note = $("fab-note");
-  if (!note) return;
+  if (!note || !ready) return;
   if (ui.reportSaved) {
     note.textContent = "Скачано · нажмите ещё раз";
     return;
@@ -863,11 +863,15 @@ function findLogin(raw) {
   return /^\d+$/.test(text) ? text : "";
 }
 
-function userColumnAt(report) {
+function columnAt(report, mask, fallback) {
   const columns = report?.columns;
-  if (!Array.isArray(columns) || !columns.length) return 2;
-  const at = columns.findIndex((title) => /^польз/i.test(String(title || "")));
-  return at < 0 ? 2 : at;
+  if (!Array.isArray(columns)) return fallback;
+  const at = columns.findIndex((title) => mask.test(String(title || "")));
+  return at < 0 ? fallback : at;
+}
+
+function userColumnAt(report) {
+  return columnAt(report, /^польз/i, 2);
 }
 
 function withLabels(report) {
@@ -1063,6 +1067,7 @@ function indexResults(keepFilters) {
   fillStatsOptions();
   renderDetail();
   if (resultView === "stats") renderStats();
+  else renderFab();
 }
 
 function setViewCutoff(raw, quiet) {
@@ -1452,10 +1457,7 @@ function cutoffNow() {
 }
 
 function dateColumnAt(report) {
-  const columns = report?.columns;
-  if (!Array.isArray(columns) || !columns.length) return 1;
-  const at = columns.findIndex((title) => /^дата/i.test(String(title || "")));
-  return at < 0 ? 1 : at;
+  return columnAt(report, /^дата/i, 1);
 }
 
 function hitsOf(report) {
@@ -2842,10 +2844,7 @@ function topPlaceOf(rows) {
 function topDateOf(report) {
   const rows = report?.lastRows;
   if (!Array.isArray(rows) || !rows.length) return "";
-  const columns = report.columns || [];
-  let at = columns.findIndex((title) => /^дата/i.test(String(title || "")));
-  if (at < 0) at = 1;
-  return String(rows[0]?.[at] || "").trim();
+  return String(rows[0]?.[dateColumnAt(report)] || "").trim();
 }
 
 function blameOf(item) {
@@ -2932,16 +2931,11 @@ function tallyBy(entries, keyOf) {
 }
 
 function fillStatsOptions() {
-  const fill = (id, values) => setPickerItems(id, values);
-
-  const cells = tallyBy(
-    statsIndex.filter((entry) => entry.blame.kind === "cell"),
-    (entry) => entry.blame.value
-  ).map(([value]) => value);
-  const places = tallyBy(
-    statsIndex.filter((entry) => entry.blame.kind === "place"),
-    (entry) => entry.blame.value
-  ).map(([value]) => value);
+  const blameValues = (kind) =>
+    tallyBy(
+      statsIndex.filter((entry) => entry.blame.kind === kind),
+      (entry) => entry.blame.value
+    ).map(([value]) => value);
 
   const buckets = [];
   const statuses = [];
@@ -2956,11 +2950,11 @@ function fillStatsOptions() {
   statuses.sort((a, b) => a.localeCompare(b, "ru"));
   ops.sort((a, b) => a.localeCompare(b, "ru"));
 
-  fill("stats-cell", cells);
-  fill("stats-place", places);
-  fill("stats-bucket", buckets);
-  fill("stats-status", statuses);
-  fill("stats-op", ops);
+  setPickerItems("stats-cell", blameValues("cell"));
+  setPickerItems("stats-place", blameValues("place"));
+  setPickerItems("stats-bucket", buckets);
+  setPickerItems("stats-status", statuses);
+  setPickerItems("stats-op", ops);
 }
 
 function syncStatsControls() {
@@ -2995,11 +2989,10 @@ function renderStatsKpis(shown) {
 
   host.innerHTML = "";
   for (const tile of tiles) {
-    const box = el("div", `kpi${tile.mod ? ` kpi--${tile.mod}` : ""}`);
+    const box = el("div", `kpi kpi--${tile.mod}`);
     box.appendChild(el("span", null, tile.label));
-    box.appendChild(el("b", null, tile.text != null ? tile.text : String(tile.value)));
-    if (tile.sub) box.appendChild(el("em", null, tile.sub));
-    markValue(box, tile.text != null ? tile.text : tile.value, tile.label);
+    box.appendChild(el("b", null, String(tile.value)));
+    markValue(box, tile.value, tile.label);
     host.appendChild(box);
   }
 }
@@ -3402,7 +3395,7 @@ function renderBarChart(host, rows, options) {
   const rowsBox = el("div", "bars__rows");
   rowsBox.style.setProperty("--bar-rows", String(top.length));
   markPickGroup(rowsBox, options.filterKey);
-  for (const [value, count] of top) {
+  top.forEach(([value, count], at) => {
     const active = options.active;
     const row = document.createElement("button");
     row.type = "button";
@@ -3417,7 +3410,7 @@ function renderBarChart(host, rows, options) {
       rows: [
         ["ID", count],
         ["доля среза", shareText(count, total)],
-        ["место", `${rows.findIndex(([name]) => name === value) + 1} из ${rows.length}`]
+        ["место", `${at + 1} из ${rows.length}`]
       ],
       foot: pickFoot(active, value)
     });
@@ -3433,7 +3426,7 @@ function renderBarChart(host, rows, options) {
     markValue(row, options.labelOf(value), null, count);
     row.append(label, track, num);
     rowsBox.appendChild(row);
-  }
+  });
   host.appendChild(rowsBox);
 
   const feet = [];
@@ -3705,6 +3698,19 @@ function renderDonutChart(host, rows, options) {
   host.appendChild(box);
 }
 
+function optionSelect(value, entries, onChange) {
+  const select = document.createElement("select");
+  for (const [key, title] of entries) {
+    const option = document.createElement("option");
+    option.value = key;
+    option.textContent = title;
+    select.appendChild(option);
+  }
+  select.value = value;
+  select.addEventListener("change", () => onChange(select.value));
+  return select;
+}
+
 function panelTitle(value, entries, onChange) {
   const box = el("div", "ptitle");
   const button = el("button", "ptitle__btn");
@@ -3726,17 +3732,9 @@ function panelTitle(value, entries, onChange) {
   caret.appendChild(path);
   button.appendChild(caret);
 
-  const select = document.createElement("select");
+  const select = optionSelect(value, entries, onChange);
   select.className = "ptitle__select";
   select.setAttribute("aria-label", "Что показывать");
-  for (const [key, title] of entries) {
-    const option = document.createElement("option");
-    option.value = key;
-    option.textContent = title;
-    select.appendChild(option);
-  }
-  select.value = value;
-  select.addEventListener("change", () => onChange(select.value));
 
   box.append(button, select);
   return box;
@@ -3744,16 +3742,7 @@ function panelTitle(value, entries, onChange) {
 
 function panelSelect(value, entries, onChange) {
   const pick = el("label", "pick pick--panel");
-  const select = document.createElement("select");
-  for (const [key, title] of entries) {
-    const option = document.createElement("option");
-    option.value = key;
-    option.textContent = title;
-    select.appendChild(option);
-  }
-  select.value = value;
-  select.addEventListener("change", () => onChange(select.value));
-  pick.appendChild(select);
+  pick.appendChild(optionSelect(value, entries, onChange));
   return pick;
 }
 
@@ -3779,8 +3768,6 @@ function renderStatsPanel(panel, index) {
   const dim = STATS_DIMS[panel.dim];
   const section = el("section", "panel glass spanel");
   section.dataset.at = String(index);
-  section.dataset.dim = panel.dim;
-  section.dataset.viz = panel.viz;
 
   const head = el("div", "spanel__head");
   head.appendChild(
@@ -3816,9 +3803,8 @@ function renderStatsPanel(panel, index) {
   const chart = el("div", panel.viz === "bars" ? "bars" : "pchart");
   section.appendChild(chart);
 
-  const slice = statsIndex.filter(
-    (entry) => passesStats(entry, new Set([dim.filter])) && dim.of(entry)
-  );
+  const skip = new Set([dim.filter]);
+  const slice = statsIndex.filter((entry) => passesStats(entry, skip) && dim.of(entry));
   const active = filterList(dim.filter);
   const pick = (value, add) => toggleStatsFilter(dim.filter, value, add);
   const labelOf = dimLabelOf(panel.dim);
@@ -3873,8 +3859,7 @@ function renderStatsPanel(panel, index) {
   const missing =
     panel.dim === "cell" || panel.dim === "place"
       ? statsIndex.filter(
-          (entry) =>
-            passesStats(entry, new Set([dim.filter])) && entry.blame.kind === panel.dim && !entry.blame.value
+          (entry) => passesStats(entry, skip) && entry.blame.kind === panel.dim && !entry.blame.value
         ).length
       : 0;
   renderBarChart(chart, dimRows(panel.dim, slice), {
@@ -4320,15 +4305,18 @@ function statsCopyItems(target) {
   const cell = target.closest("#stats-rows td");
   const cols = visibleStatsCols();
 
-  if (head?.dataset.sort) {
-    const key = head.dataset.sort;
+  const columnItem = (key) => {
     const rows = statsRowsForExport();
-    items.push({
+    return {
       label: "Копировать столбец",
       hint: `${rows.length} ${plural(rows.length, ["значение", "значения", "значений"])}`,
       text: rows.map((entry) => columnText(key, entry)).join("\n"),
       said: `Столбец «${STATS_COLUMNS[key].title}» скопирован`
-    });
+    };
+  };
+
+  if (head?.dataset.sort) {
+    items.push(columnItem(head.dataset.sort));
     return items;
   }
 
@@ -4351,15 +4339,7 @@ function statsCopyItems(target) {
         said: "Строка скопирована"
       });
     }
-    if (key) {
-      const rows = statsRowsForExport();
-      items.push({
-        label: "Копировать столбец",
-        hint: `${rows.length} ${plural(rows.length, ["значение", "значения", "значений"])}`,
-        text: rows.map((one) => columnText(key, one)).join("\n"),
-        said: `Столбец «${title}» скопирован`
-      });
-    }
+    if (key) items.push(columnItem(key));
     return items;
   }
 

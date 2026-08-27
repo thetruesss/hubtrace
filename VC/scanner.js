@@ -103,19 +103,19 @@
     }
   }
 
+  function beatsRecipe(next, current, currentScore) {
+    const score = Number(next.score) || 0;
+    if (score > currentScore) return true;
+    return score >= currentScore && (Number(next.capturedAt) || 0) > (Number(current?.capturedAt) || 0);
+  }
+
   function adoptRecipe(next, share) {
     if (!next || !next.url || !next.itemId) return;
     if (!carriesId(next)) return;
-    const score = Number(next.score) || 0;
-    const captured = Number(next.capturedAt) || 0;
-    const currentCaptured = Number(recipe?.capturedAt) || 0;
-
-    const better = score > recipeScore;
-    const fresher = score >= recipeScore && captured > currentCaptured;
-    if (!better && !fresher) return;
+    if (!beatsRecipe(next, recipe, recipeScore)) return;
 
     recipe = next;
-    recipeScore = score;
+    recipeScore = Number(next.score) || 0;
     rememberHints(next);
     if (share) void toBackground({ action: "ht:recipe", recipe: next });
   }
@@ -123,12 +123,10 @@
   function adoptCardRecipe(next, share) {
     if (!next || !next.url || !next.itemId) return;
     if (!carriesId(next)) return;
-    const score = Number(next.score) || 0;
-    const captured = Number(next.capturedAt) || 0;
-    const currentCaptured = Number(cardRecipe?.capturedAt) || 0;
-    if (!(score > cardScore || (score >= cardScore && captured > currentCaptured))) return;
+    if (!beatsRecipe(next, cardRecipe, cardScore)) return;
+
     cardRecipe = next;
-    cardScore = score;
+    cardScore = Number(next.score) || 0;
     rememberHints(next);
     if (share) void toBackground({ action: "ht:cardRecipe", recipe: next });
   }
@@ -1393,7 +1391,7 @@
     if (!looksLikeAudit(rows)) return rows.filter(recordUnderCutoff);
     const kept = rows.filter((record) => auditTypes.includes(String(record?.changeType || "")));
     if (kept.length) typesConfirmed = true;
-    const list = kept.length || typesConfirmed ? kept : rows;
+    const list = typesConfirmed ? kept : rows;
     return list.filter(recordUnderCutoff);
   }
 
@@ -2261,14 +2259,16 @@
       }, Math.min(6000, left()));
     }
 
-    reportPhase("rows", job.posting);
-    ensureScrollCss();
-    harvest();
-
-    if (!found && !cutoffAt && fallbackHistoryText().includes(needle)) {
+    const sweep = () => {
+      harvest();
+      if (found || cutoffAt || !fallbackHistoryText().includes(needle)) return;
       found = true;
       sample = needle;
-    }
+    };
+
+    reportPhase("rows", job.posting);
+    ensureScrollCss();
+    sweep();
 
     const needMore = () => total == null || seenAll.size < total;
     let drained = !needMore();
@@ -2311,12 +2311,7 @@
       if (!drained && !needMore()) drained = true;
     }
 
-    harvest();
-
-    if (!found && !cutoffAt && fallbackHistoryText().includes(needle)) {
-      found = true;
-      sample = needle;
-    }
+    sweep();
 
     const card = readItemCard();
     let api = emptyCard();
@@ -2341,15 +2336,10 @@
 
     const loaded = seen.size;
     const complete = found || (total != null ? seenAll.size >= total : drained);
-    const expected = domTrimmed
-      ? complete || found
-        ? loaded
-        : 0
-      : total != null
-        ? total
-        : drained || found
-          ? loaded
-          : 0;
+    let expected = 0;
+    if (domTrimmed) expected = complete ? loaded : 0;
+    else if (total != null) expected = total;
+    else if (complete) expected = loaded;
 
     if (abortFlag && !found && !complete) {
       return { ok: false, status: "paused", found, expected, loaded, via: "dom", report };

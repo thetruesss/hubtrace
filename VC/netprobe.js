@@ -184,7 +184,6 @@
       score,
       capturedAt: Date.now()
     };
-    if (!recipe.itemId) return;
 
     probe.card = recipe;
     probe.cardScore = score;
@@ -361,7 +360,19 @@
     if (event.source !== window) return;
     if (event.origin && event.origin !== ORIGIN) return;
     const data = event.data;
-    if (!data || data.channel !== CHANNEL || data.type !== "replay") return;
+    if (!data || data.channel !== CHANNEL) return;
+
+    if (data.type === "askRecipe") {
+      if (probe.recipe) post({ type: "recipe", recipe: probe.recipe });
+      if (probe.card) post({ type: "cardRecipe", recipe: probe.card });
+      readBuildVars();
+      if (probe.appVersion || probe.placeId) {
+        post({ type: "hint", appVersion: probe.appVersion, placeId: probe.placeId });
+      }
+      return;
+    }
+
+    if (data.type !== "replay") return;
 
     const { ticket, url, method, headers, body, timeoutMs } = data;
     const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
@@ -398,18 +409,6 @@
         clearTimeout(timer);
         post({ type: "replayResult", ticket, ok: false, status: 0, error: String(error?.message || error) });
       });
-  });
-
-  window.addEventListener("message", (event) => {
-    if (event.source !== window) return;
-    if (event.origin && event.origin !== ORIGIN) return;
-    if (event.data?.channel !== CHANNEL || event.data?.type !== "askRecipe") return;
-    if (probe.recipe) post({ type: "recipe", recipe: probe.recipe });
-    if (probe.card) post({ type: "cardRecipe", recipe: probe.card });
-    readBuildVars();
-    if (probe.appVersion || probe.placeId) {
-      post({ type: "hint", appVersion: probe.appVersion, placeId: probe.placeId });
-    }
   });
 
   post({ type: "probeReady" });

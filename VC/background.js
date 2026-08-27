@@ -12,7 +12,6 @@ const MODES = {
   turbo: {
     label: "Турбо",
     threads: 8,
-    api: true,
     retryPartial: 0,
     retryFail: 1,
     navTimeoutMs: 20000,
@@ -23,7 +22,6 @@ const MODES = {
   balance: {
     label: "Баланс",
     threads: 5,
-    api: true,
     retryPartial: 1,
     retryFail: 1,
     navTimeoutMs: 28000,
@@ -34,7 +32,6 @@ const MODES = {
   deep: {
     label: "Глубокий",
     threads: 3,
-    api: true,
     retryPartial: 3,
     retryFail: 2,
     navTimeoutMs: 40000,
@@ -929,7 +926,7 @@ function reviveNativeApi() {
 }
 
 function apiAllowed(worker) {
-  if (!state.useApi || !cfg().api || !worker.hubReady) return false;
+  if (!state.useApi || !worker.hubReady) return false;
   reviveNativeApi();
   if (!state.nativeApi && !state.recipe) return false;
 
@@ -1000,13 +997,17 @@ const API_AUTH_STREAK_LIMIT = 6;
 
 const NATIVE_RECOVER_MS = 180000;
 
+function fresherRecipe(next, current) {
+  if (!current) return true;
+  const score = Number(next?.score) || 0;
+  const rival = Number(current.score) || 0;
+  if (score > rival) return true;
+  return score >= rival && (Number(next?.capturedAt) || 0) > (Number(current.capturedAt) || 0);
+}
+
 function acceptRecipe(next) {
-  if (!state.recipe) return true;
   if (state.recipeStale) return true;
-  const score = Number(next.score) || 0;
-  const current = Number(state.recipe.score) || 0;
-  if (score > current) return true;
-  return score >= current && (Number(next.capturedAt) || 0) > (Number(state.recipe.capturedAt) || 0);
+  return fresherRecipe(next, state.recipe);
 }
 
 function markRecipeStale(status) {
@@ -1015,6 +1016,17 @@ function markRecipeStale(status) {
   state.recipeStaleAt = Date.now();
   notice("api", `Токен устарел (ответ ${status || 401}). Обновляю его загрузкой страницы.`);
   emitState(true);
+}
+
+function noteApiMiss(blocked) {
+  if (state.recipeStale) {
+    if (state.apiAuthStreak >= API_AUTH_STREAK_LIMIT) {
+      blockApi(`Токен не обновляется: ${state.apiLastReason || "ответ 401"}.`, "unavailable");
+    }
+    return;
+  }
+  state.apiFailStreak += 1;
+  if (state.apiFailStreak >= API_FAIL_LIMIT) blockApi(blocked, "unavailable");
 }
 
 function blockApi(reason, kind) {
@@ -1072,16 +1084,7 @@ const API_INCONCLUSIVE_LIMIT = 3;
 function calibrate(api, dom, index) {
   state.apiRecheck = false;
   if (!api) {
-    if (state.recipeStale) {
-      if (state.apiAuthStreak >= API_AUTH_STREAK_LIMIT) {
-        blockApi(`Токен не обновляется: ${state.apiLastReason || "ответ 401"}.`, "unavailable");
-      }
-      return;
-    }
-    state.apiFailStreak += 1;
-    if (state.apiFailStreak >= API_FAIL_LIMIT) {
-      blockApi(`Быстрый путь недоступен: ${state.apiLastReason || "нет ответа"}. Работаю через DOM.`, "unavailable");
-    }
+    noteApiMiss(`Быстрый путь недоступен: ${state.apiLastReason || "нет ответа"}. Работаю через DOM.`);
     return;
   }
 
@@ -1168,7 +1171,7 @@ async function primeTab(worker, posting) {
 }
 
 async function retryBoth(worker, posting, index) {
-  if (!worker.hubReady && state.useApi && cfg().api) await primeTab(worker, posting);
+  if (!worker.hubReady && state.useApi) await primeTab(worker, posting);
 
   const api = apiAllowed(worker) ? await apiScan(worker, posting) : null;
   if (api) {
@@ -1185,7 +1188,7 @@ async function retryBoth(worker, posting, index) {
 }
 
 async function processOne(worker, posting, index) {
-  if (!worker.hubReady && state.useApi && cfg().api) await primeTab(worker, posting);
+  if (!worker.hubReady && state.useApi) await primeTab(worker, posting);
 
   if (state.retryIndexes.has(index)) return retryBoth(worker, posting, index);
 
@@ -1200,16 +1203,7 @@ async function processOne(worker, posting, index) {
         watchDigest(api);
         return api;
       }
-      if (state.recipeStale) {
-        if (state.apiAuthStreak >= API_AUTH_STREAK_LIMIT) {
-          blockApi(`Токен не обновляется: ${state.apiLastReason || "ответ 401"}.`, "unavailable");
-        }
-      } else {
-        state.apiFailStreak += 1;
-        if (state.apiFailStreak >= API_FAIL_LIMIT) {
-          blockApi(`Быстрый путь перестал отвечать: ${state.apiLastReason || "нет ответа"}.`, "unavailable");
-        }
-      }
+      noteApiMiss(`Быстрый путь перестал отвечать: ${state.apiLastReason || "нет ответа"}.`);
     } else {
       const lesson = lessonDue();
       if (lesson) {
@@ -1655,9 +1649,6 @@ async function applyLiveSettings(raw) {
   if (raw?.mode && MODES[raw.mode] && raw.mode !== state.mode) {
     state.mode = raw.mode;
     if (raw.threads == null) state.threads = MODES[raw.mode].threads;
-    if (!MODES[raw.mode].api) {
-      state.apiSinceCheck = 0;
-    }
   }
   if (raw?.threads != null) {
     state.threads = Math.max(1, Math.min(MAX_THREADS, Number(raw.threads) || state.threads));
@@ -1789,13 +1780,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   if (action === "ht:cardRecipe") {
     const next = message.recipe;
-    const current = state.cardRecipe;
-    const score = Number(next?.score) || 0;
-    const fresher =
-      !current ||
-      score > (Number(current.score) || 0) ||
-      (score >= (Number(current.score) || 0) && (Number(next.capturedAt) || 0) > (Number(current.capturedAt) || 0));
-    if (next?.itemId && fresher) {
+    if (next?.itemId && fresherRecipe(next, state.cardRecipe)) {
       state.cardRecipe = next;
       for (const worker of state.workers.values()) {
         if (worker.tabId != null) void sendTab(worker.tabId, { action: "ht:setCardRecipe", recipe: next });

@@ -155,10 +155,9 @@
       if (cells.length) body.push(`<row r="${rowIndex + 1}">${cells.join("")}</row>`);
     });
 
-    const width = Math.max(
-      (sheet.columns || []).length,
-      ...rows.map((row) => (row || []).length),
-      1
+    const width = rows.reduce(
+      (wide, row) => Math.max(wide, (row || []).length),
+      Math.max((sheet.columns || []).length, 1)
     );
     const lastCol = columnName(width - 1);
     const lastRow = Math.max(1, rows.length);

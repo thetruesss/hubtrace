@@ -1216,11 +1216,6 @@ input[type="number"] {
   color: #fff;
 }
 
-.seg[data-mode="turbo"] .seg__btn.is-on,
-.seg[data-mode="deep"] .seg__btn.is-on {
-  color: #10151f;
-}
-
 .range {
   -webkit-appearance: none;
   appearance: none;
@@ -3215,7 +3210,6 @@ input[type="number"] {
 }
 
 .bars__none {
-  margin: auto 0;
   margin: 6px 0;
   font-size: 11.5px;
   color: var(--faint);
@@ -3585,7 +3579,8 @@ a.t-id__code:hover {
   border-radius: 50%;
   box-shadow: 0 0 0 2px #0a0e18;
   transform: translate(-50%, -50%);
-  transition: opacity 0.2s var(--ease);
+  cursor: pointer;
+  transition: transform 0.16s var(--sp), box-shadow 0.16s var(--ease), opacity 0.2s var(--ease);
 }
 
 .line__dot.is-dim {
@@ -4738,9 +4733,6 @@ picture,
 canvas,
 video {
   -webkit-user-drag: none;
-  -khtml-user-drag: none;
-  -moz-user-drag: none;
-  user-drag: none;
 }
 
 svg,
@@ -4763,7 +4755,6 @@ kbd,
 
 .stats__table th[draggable="true"] {
   -webkit-user-drag: element;
-  user-drag: element;
 }
 
 .viztip {
@@ -4833,11 +4824,6 @@ kbd,
 .col:hover .col__cap,
 .col:focus-visible .col__cap {
   color: var(--text);
-}
-
-.line__dot {
-  cursor: pointer;
-  transition: transform 0.16s var(--sp), box-shadow 0.16s var(--ease), opacity 0.2s var(--ease);
 }
 
 .line__dot:hover {
