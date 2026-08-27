@@ -2671,6 +2671,20 @@ function svgEl(tag, attrs) {
   return node;
 }
 
+function crossIcon(className) {
+  const cross = svgEl("svg", { viewBox: "0 0 12 12", class: className, "aria-hidden": "true" });
+  cross.appendChild(
+    svgEl("path", {
+      d: "M3.5 3.5 8.5 8.5M8.5 3.5 3.5 8.5",
+      fill: "none",
+      stroke: "currentColor",
+      "stroke-width": "1.25",
+      "stroke-linecap": "round"
+    })
+  );
+  return cross;
+}
+
 function caretIcon(className) {
   const caret = svgEl("svg", { viewBox: "0 0 12 12", class: className, "aria-hidden": "true" });
   caret.appendChild(
@@ -2879,9 +2893,10 @@ function renderDetailChips() {
   emptyNow(box);
   for (const value of detailQuery) {
     const chip = el("span", "detail__chip", value);
-    const drop = el("button", null, "×");
+    const drop = el("button");
     drop.type = "button";
     drop.title = "Убрать из поиска";
+    drop.appendChild(crossIcon());
     drop.addEventListener("click", () => {
       detailQuery = detailQuery.filter((entry) => entry !== value);
       $("detail-search").value = detailQuery.join(" ");
@@ -4027,9 +4042,10 @@ function renderStatsPanel(panel, index) {
   tools.appendChild(
     panelSelect(panel.viz, Object.entries(STATS_VIZ), (next) => updatePanel(index, { viz: next }))
   );
-  const drop = el("button", "spanel__drop", "×");
+  const drop = el("button", "spanel__drop");
   drop.type = "button";
   drop.title = "Убрать панель";
+  drop.appendChild(crossIcon());
   drop.addEventListener("click", () => {
     const done = () => {
       statsPanels.splice(index, 1);
@@ -4474,9 +4490,10 @@ function renderStatsChips() {
   emptyNow(box);
   for (const { key, label, value } of active) {
     const chip = el("span", "detail__chip", `${label}: ${value}`);
-    const drop = el("button", null, "×");
+    const drop = el("button");
     drop.type = "button";
     drop.title = "Снять фильтр";
+    drop.appendChild(crossIcon());
     drop.addEventListener("click", () => {
       setStatsFilter(key, filterList(key).filter((one) => one !== value));
     });
