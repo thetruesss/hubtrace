@@ -1001,8 +1001,10 @@ function mergeReports(a, b) {
     warehouseAt: strong.warehouseAt || weak.warehouseAt || "",
     warehouseCell: strong.warehouseCell || weak.warehouseCell || "",
     hits: strong.hits?.length ? strong.hits : weak.hits || [],
+    marks: strong.marks?.length ? strong.marks : weak.marks || [],
     cmn: strong.cmn || weak.cmn || "",
     lastPlace: strong.lastPlace || weak.lastPlace || "",
+    lastPlaceAt: (strong.lastPlace ? strong.lastPlaceAt : weak.lastPlaceAt) || "",
     columns: strong.columns?.length ? strong.columns : weak.columns || [],
     lastRows: strong.lastRows?.length ? strong.lastRows : weak.lastRows || [],
     codes: strong.lastRows?.length ? strong.codes || [] : weak.codes || []
