@@ -858,7 +858,8 @@ function needsRetry(item, attempt) {
   if (!item) return true;
   if (item.found) return false;
   if (isHardStop(item)) return false;
-  if (item.ok && item.status === "complete") return false;
+  // «позже потолка» — это ответ, а не сбой: пересканирование его не изменит
+  if (item.ok && ["complete", "later"].includes(item.status)) return false;
   const conf = cfg();
   if (item.status === "partial") return attempt <= conf.retryPartial;
   return attempt <= conf.retryFail;

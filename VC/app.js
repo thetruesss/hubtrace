@@ -1599,12 +1599,22 @@ function cutItem(item, at) {
   const codes = Array.isArray(report.codes) ? report.codes : [];
   const rows = [];
   const kept = [];
+  const above = [];
   source.forEach((row, index) => {
     const stamp = parseHubDate(Array.isArray(row) ? row[dateAt] : "");
-    if (stamp && stamp.getTime() > at) return;
+    if (stamp && stamp.getTime() > at) {
+      above.push({ row, ms: stamp.getTime() });
+      return;
+    }
     rows.push(row);
     kept.push(codes[index] ?? "");
   });
+
+  // под срезом строк не осталось — склад берём из ближайшей строки сверху:
+  // на момент среза предмет числился именно там
+  above.sort((one, two) => one.ms - two.ms);
+  const edgeRow = above[0]?.row;
+  const place = rows.length ? "" : topPlaceOf(edgeRow ? [edgeRow] : []) || report.lastPlace || "";
 
   const list = hitsOf(report);
   const top = list.find((hit) => hit.ms <= at) || null;
@@ -1619,12 +1629,14 @@ function cutItem(item, at) {
       codes: kept,
       warehouseAt: top ? top.at : dated ? "" : report.warehouseAt,
       warehouseCell: top ? top.cell : dated ? "" : report.warehouseCell,
-      lastPlace: ""
+      lastPlace: place
     }
   };
 
   if (!top && dated && kind === "hit") {
     next.ok = false;
+    next.status = "later";
+  } else if (!rows.length && source.length) {
     next.status = "later";
   }
   return next;
@@ -3185,7 +3197,8 @@ function blameOf(item) {
     const place = report.lastPlace || topPlaceOf(withLabels(report));
     return { kind: "place", value: place, at: topDateOf(report) };
   }
-  return { kind: "none", value: "", at: "" };
+  const known = report.lastPlace || topPlaceOf(withLabels(report));
+  return known ? { kind: "place", value: known, at: "" } : { kind: "none", value: "", at: "" };
 }
 
 const BLAME_TAGS = { cell: "ячейка", place: "склад" };

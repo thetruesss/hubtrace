@@ -826,6 +826,30 @@
     return null;
   }
 
+  // ближайшее перемещение выше среза: под срезом записей не осталось,
+  // и самое раннее из того, что выше, — лучшее, что мы знаем о предмете
+  function edgeAboveCutoff(rows, best) {
+    if (!cutoffAt || !Array.isArray(rows)) return best || null;
+    let edge = best || null;
+    for (const record of rows) {
+      if (!isMove(record)) continue;
+      const at = recordStamp(record);
+      if (at == null || at <= cutoffAt) continue;
+      if (edge && edge.at <= at) continue;
+      const place = placeOfRecord(record);
+      if (!place) continue;
+      edge = { at, name: place.name, warehouse: place.warehouse };
+    }
+    return edge;
+  }
+
+  // почему в ответе пусто: перемещений не было вовсе или они все выше среза
+  function emptyReason(sawRow, sawMove, sawUnder) {
+    if (sawRow && !sawMove) return "no_history";
+    if (cutoffAt && sawMove && !sawUnder) return "later";
+    return "";
+  }
+
   function topPlaceFrom(records) {
     let fallback = "";
     for (const record of records || []) {
@@ -997,6 +1021,7 @@
     let found = false;
     let sawRow = false;
     let sawMove = false;
+    let sawUnder = false;
     let sample = "";
     let digest = "";
     const head = [];
@@ -1004,6 +1029,7 @@
     let foundAt = -1;
     let lastPlace = "";
     let loosePlace = "";
+    let edge = null;
     let stateUnder = "";
     let stateOver = "";
     let size = apiTune.pageSize;
@@ -1066,8 +1092,12 @@
       const raw = Array.isArray(json.records) ? json.records : [];
       const records = keepTransitions(raw);
       if (raw.length) sawRow = true;
-      if (records.length) sawMove = true;
+      // перемещения считаем до среза: срез сужает картину, но не отменяет
+      // того, что история движения у предмета вообще есть
+      if (raw.some(isMove)) sawMove = true;
+      if (records.length) sawUnder = true;
       if (records.length !== raw.length) trimmed = true;
+      edge = edgeAboveCutoff(raw, edge);
 
       if (cutoffAt) {
         for (const record of raw) {
@@ -1115,7 +1145,10 @@
     }
 
     const report = reportFromAudit(head, hits);
-    report.lastPlace = lastPlace || loosePlace;
+    // ниже среза перемещений не нашлось — берём склад из ближайшей
+    // записи сверху: на момент среза предмет числился там
+    const edgeWarehouse = edge?.warehouse ? edge.name : "";
+    report.lastPlace = lastPlace || edgeWarehouse || loosePlace || edge?.name || "";
     const card = await collectCard(posting, deadline, null);
     report.number = card.number;
     report.cmn = card.cmn;
@@ -1125,7 +1158,7 @@
       ok: true,
       via: "api",
       found,
-      status: !found && sawRow && !sawMove ? "no_history" : "",
+      status: found ? "" : emptyReason(sawRow, sawMove, sawUnder),
       expected: trimmed || total == null ? loaded : total,
       loaded,
       complete: trimmed || total == null || loaded >= total || found,
@@ -1483,6 +1516,8 @@
       let found = false;
       let sawRow = false;
       let sawMove = false;
+      let sawUnder = false;
+      let edge = null;
       let sample = "";
       let pageable = true;
       let failed = false;
@@ -1537,8 +1572,10 @@
 
         const rows = keepTransitions(raw);
         if (raw.length) sawRow = true;
-        if (rows.length) sawMove = true;
+        if (raw.some(isMove)) sawMove = true;
+        if (rows.length) sawUnder = true;
         if (rows.length !== raw.length) filtered = true;
+        edge = edgeAboveCutoff(raw, edge);
 
         if (page === 0) {
           digest = digestOf(response.text);
@@ -1569,6 +1606,7 @@
 
       const expected = filtered || total == null ? loaded : total;
       const report = reportFromRows(allRows, needle);
+      if (!report.lastPlace && edge) report.lastPlace = edge.name;
 
       const card = await collectCard(posting, deadline, firstJson);
       report.number = card.number;
@@ -1579,7 +1617,7 @@
         ok: true,
         via: "api",
         found,
-        status: !found && sawRow && !sawMove ? "no_history" : "",
+        status: found ? "" : emptyReason(sawRow, sawMove, sawUnder),
         expected,
         loaded,
         complete: filtered || total == null ? true : loaded >= total || found,
@@ -1945,6 +1983,47 @@
       cell = cells[at] || cells[0];
     }
     return cell ? norm(cell.textContent).toLowerCase() : "";
+  }
+
+  // то же для строк таблицы: из «Местоположение: A → B» берём тот конец,
+  // который таблица показывает как склад строки
+  function placeFromCells(cells) {
+    let loose = "";
+    for (const cell of cells || []) {
+      const text = String(cell || "");
+      const at = text.indexOf("Местоположение:");
+      if (at < 0) continue;
+      const value = text.slice(at + "Местоположение:".length).split(";")[0];
+      const sides = value.split("\u2192").map((side) => side.trim()).filter(Boolean);
+      for (let i = sides.length - 1; i >= 0; i -= 1) {
+        const side = sides[i];
+        if (!side || side === "—") continue;
+        const warehouse = side.match(/^(.*?)\s*·\s*Склад$/);
+        if (warehouse) return warehouse[1].trim();
+        if (!loose) loose = side.replace(/\s*·\s*[^·]+$/, "").trim();
+      }
+    }
+    return loose;
+  }
+
+  function placeAboveCutoff(rows, words, at) {
+    if (!cutoffAt) return "";
+    const titles = tableColumns();
+    const foreign = words || foreignWords();
+    const column = at == null ? typeColumnAt() : at;
+    let bestAt = null;
+    let name = "";
+    for (const row of rows || []) {
+      if (foreign.size && foreign.has(rowTypeText(row, column))) continue;
+      const stamp = shownStamp(rowDate(row, titles));
+      if (stamp == null || stamp <= cutoffAt) continue;
+      if (bestAt != null && bestAt <= stamp) continue;
+      const place = placeFromCells(rowCells(row));
+      if (!place) continue;
+      bestAt = stamp;
+      name = place;
+    }
+    return name;
   }
 
   function keepTransitionRows(rows, words, at) {
@@ -2435,8 +2514,10 @@
         api = emptyCard();
       }
     }
-    const tableRows = keepTransitionRows(rowNodes(), foreignWords(), typeColumn());
+    const words = foreignWords();
+    const tableRows = keepTransitionRows(rowNodes(), words, typeColumn());
     const report = {
+      lastPlace: tableRows.length ? "" : placeAboveCutoff(rowNodes(), words, typeColumn()),
       number: card.number || api.number || "",
       cmn: card.cmn || api.cmn || "",
       status: cutoffAt ? "" : card.status || api.status || "",
@@ -2462,7 +2543,7 @@
     return {
       ok: complete,
       report,
-      status: complete ? "complete" : "partial",
+      status: complete ? (report.lastPlace && cutoffAt && !tableRows.length ? "later" : "complete") : "partial",
       via: "dom",
       found,
       expected,
