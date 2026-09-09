@@ -37,6 +37,14 @@
       "all_frames": false
     }
   ],
-  "permissions": ["tabs", "scripting", "storage", "windows", "notifications"],
-  "host_permissions": ["https://hub.o3t.ru/*"]
+  "permissions": ["tabs", "scripting", "storage", "notifications"],
+  "host_permissions": ["https://hub.o3t.ru/*"],
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "{eeeb1f98-effb-41ee-84b1-b46568f21b0f}",
+      "strict_min_version": "128.0",
+      "update_url": "https://cdn1.ozone.ru/s3/ozon-browser-extensions-public/updates.json",
+      "data_collection_permissions": { "required": ["none"] }
+    }
+  }
 }

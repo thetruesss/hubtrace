@@ -737,20 +737,30 @@ function renderBrief(parsed) {
   const count = (parsed || parsePostings(postingsEl.value)).length;
   const rate = Number(ui.rates.auto) || Number(ui.rates[settings.mode]) || 0;
 
-  const rows = [["", `<b>${count}</b> ${plural(count, ["номер", "номера", "номеров"])} в очереди`]];
-  if (count && rate) rows.push(["", `Примерно <b>${fmtDuration((count / rate) * 60000)}</b> по прошлым запускам`]);
-  rows.push(["", "Итог придёт списком, детализацией и аналитикой"]);
+  const rows = [["", [el("b", "", String(count)), ` ${plural(count, ["номер", "номера", "номеров"])} в очереди`]]];
+  if (count && rate) {
+    rows.push(["", ["Примерно ", el("b", "", fmtDuration((count / rate) * 60000)), " по прошлым запускам"]]);
+  }
+  rows.push(["", ["Итог придёт списком, детализацией и аналитикой"]]);
   rows.push([
     "is-hint",
-    "<kbd>Ctrl</kbd><kbd>↵</kbd><i>старт</i><kbd>Space</kbd><i>пауза</i><kbd>Esc</kbd><i>стоп</i>"
+    [
+      el("kbd", "", "Ctrl"),
+      el("kbd", "", "↵"),
+      el("i", "", "старт"),
+      el("kbd", "", "Space"),
+      el("i", "", "пауза"),
+      el("kbd", "", "Esc"),
+      el("i", "", "стоп")
+    ]
   ]);
 
   list.innerHTML = "";
-  for (const [cls, html] of rows) {
+  for (const [cls, parts] of rows) {
     const li = document.createElement("li");
     if (cls) li.className = cls;
     const text = document.createElement("span");
-    text.innerHTML = html;
+    for (const part of parts) text.append(part);
     li.appendChild(text);
     list.appendChild(li);
   }

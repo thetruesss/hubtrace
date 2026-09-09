@@ -376,6 +376,11 @@
     if (data.type !== "replay") return;
 
     const { ticket, url, method, headers, body, timeoutMs } = data;
+    if (!sameOrigin(url)) {
+      post({ type: "replayResult", ticket, ok: false, status: 0, error: "foreign_origin" });
+      return;
+    }
+
     const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
     const timer = setTimeout(() => {
       try {

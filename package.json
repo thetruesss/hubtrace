@@ -1,0 +1,15 @@
+{
+  "name": "hub-trace",
+  "version": "2.39.0",
+  "description": "Корректировщик расстановки ответственности OnTime: browser extension for hub.o3t.ru",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/build.mjs chrome",
+    "build:firefox": "node scripts/build.mjs firefox",
+    "lint:firefox": "npm run build:firefox && web-ext lint --source-dir dist/firefox-mv3 --self-hosted"
+  },
+  "devDependencies": {
+    "web-ext": "^8.3.0"
+  }
+}
